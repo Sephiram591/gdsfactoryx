@@ -3,6 +3,11 @@
 A path can be extruded using any CrossSection returning a Component
 The CrossSection defines the layer numbers, widths and offsets
 
+All path points are float64 ``jax.numpy`` arrays: every function here is
+differentiable (in eager mode) with respect to its float arguments (radius,
+angle, length, widths, offsets, waypoints, ...). Discrete choices (number of
+points, branches) are made on the concrete primal values.
+
 Adapted from PHIDL https://github.com/amccaugh/phidl/ by Adam McCaughan
 """
 
@@ -14,21 +19,22 @@ import warnings
 from collections.abc import Callable, Sequence
 from typing import Any, Literal, TypeVar, cast, overload
 
-import kfactory as kf
-import klayout.db as kdb
+import jax
 import numpy as np
 import numpy.typing as npt
-from kfactory.conf import CheckInstances
-from kfactory.geometry import UMGeometricObject
-from numpy import mod
-from scipy import optimize
 
-import gdsfactory as gf
+import gdsfactory.typings  # noqa: F401  (import order: typings before cross_section)
 from gdsfactory._cell import cell
-from gdsfactory.component import Component, ComponentAllAngle
-from gdsfactory.component_layout import (
-    rotate_points,
+from gdsfactory._jax import (
+    Array,
+    asarray,
+    is_tracer,
+    jnp,
+    round_st,
+    to_float,
+    to_numpy,
 )
+from gdsfactory.component import Box, Component, ComponentAllAngle
 from gdsfactory.cross_section import (
     CrossSection,
     Section,
@@ -36,6 +42,7 @@ from gdsfactory.cross_section import (
     TransitionAsymmetric,
 )
 from gdsfactory.pdk import get_layer_name
+from gdsfactory.transform import Transform, rotate_points
 from gdsfactory.typings import (
     AngleInDegrees,
     AnyComponent,
@@ -46,212 +53,226 @@ from gdsfactory.typings import (
 )
 
 
-def _simplify(
-    points: npt.NDArray[np.floating[Any]], tolerance: float
-) -> npt.NDArray[np.floating[Any]]:
+def _simplify(points: Array, tolerance: float) -> Array:
+    """Simplifies a polyline (shapely topology-preserving Douglas-Peucker).
+
+    The kept vertices are chosen on the concrete values; the result is a
+    differentiable selection of the input points.
+    """
     import shapely.geometry as sg
 
-    ls = sg.LineString(points)
-    ls_simple = ls.simplify(tolerance=tolerance)
-    return np.asarray(ls_simple.coords)
+    pts_np = to_numpy(points)
+    ls = sg.LineString(pts_np)
+    simple = np.asarray(ls.simplify(tolerance=tolerance).coords)
+    # map simplified coordinates back to indices of the original points
+    idx: list[int] = []
+    j = 0
+    for q in simple:
+        while j < len(pts_np) and not np.array_equal(pts_np[j], q):
+            j += 1
+        if j == len(pts_np):
+            return asarray(simple)
+        idx.append(j)
+        j += 1
+    return asarray(points)[np.asarray(idx)]
 
 
 def reflect_points(
-    points: npt.NDArray[np.floating[Any]],
-    p1: tuple[float, float] = (0, 0),
-    p2: tuple[float, float] = (1, 0),
-) -> npt.NDArray[np.float64]:
+    points: Any,
+    p1: Any = (0, 0),
+    p2: Any = (1, 0),
+) -> Array:
     """Reflects points across the line formed by p1 and p2.
-
-    from https://github.com/amccaugh/phidl/pull/181
 
     ``points`` may be input as either single points [1,2] or array-like[N][2],
     and will return in kind.
-
-    Args:
-        points: array-like[N][2]
-        p1: Coordinates of the start of the reflecting line.
-        p2: Coordinates of the end of the reflecting line.
-
-    Returns:
-        A new set of points that are reflected across ``p1`` and ``p2``.
     """
-    original_shape = np.shape(points)
-    points = np.atleast_2d(points)
-    return_single_point = len(original_shape) == 1
-    p1_array = np.asarray(p1)
-    p2_array = np.asarray(p2)
+    pts = asarray(points)
+    return_single_point = pts.ndim == 1
+    pts = jnp.atleast_2d(pts)
+    p1_array = asarray(p1)
+    p2_array = asarray(p2)
 
     line_vec = p2_array - p1_array
-    line_vec_norm = np.linalg.norm(line_vec) ** 2
-
-    # Compute reflection
-    proj = np.sum(line_vec * (points - p1_array), axis=-1, keepdims=True)
-    reflected_points = (
-        2 * (p1_array + (p2_array - p1_array) * proj / line_vec_norm) - points
-    )
-    return reflected_points[0] if return_single_point else reflected_points  # type: ignore[no-any-return]
+    line_vec_norm = jnp.sum(line_vec**2)
+    proj = jnp.sum(line_vec * (pts - p1_array), axis=-1, keepdims=True)
+    reflected = 2 * (p1_array + (p2_array - p1_array) * proj / line_vec_norm) - pts
+    return reflected[0] if return_single_point else reflected
 
 
-class Path(UMGeometricObject):
+def _angle_deg(dy: Any, dx: Any) -> Any:
+    return jnp.arctan2(dy, dx) / jnp.pi * 180
+
+
+def _mod360(a: Any) -> Any:
+    if is_tracer(a) or isinstance(a, jax.Array):
+        return jnp.mod(a, 360)
+    return float(np.mod(a, 360))
+
+
+def _is_points_like(path: Any) -> bool:
+    if isinstance(path, jax.Array | np.ndarray) or is_tracer(path):
+        return path.ndim == 2 and path.shape[1] == 2
+    if isinstance(path, list | tuple) and path and not isinstance(path[0], Path):
+        try:
+            first = path[0]
+            return len(first) == 2 and not isinstance(first, Path)
+        except TypeError:
+            return False
+    return False
+
+
+class Path:
     """You can extrude a Path with a CrossSection to create a Component.
 
     Parameters:
         path: array-like[N][2], Path, or list of Paths.
-
     """
 
     def __init__(
         self,
-        path: npt.NDArray[np.floating[Any]]
-        | Path
-        | list[tuple[float, float]]
-        | None = None,
+        path: Any = None,
         start_angle: float | None = None,
         end_angle: float | None = None,
     ) -> None:
-        """Initializes a Path.
-
-        Args:
-            path: array-like[N][2], Path, or list of Paths.
-            start_angle: optional angle in degrees at the start of the path.
-                Overrides the angle inferred from the points.
-            end_angle: optional angle in degrees at the end of the path.
-                Overrides the angle inferred from the points.
-        """
-        self.points: npt.NDArray[np.floating[Any]] = np.array(
-            [[0, 0]], dtype=np.float64
-        )
-        self.start_angle: float = 0
-        self.end_angle: float = 0
+        self.points: Array = asarray([[0.0, 0.0]])
+        self.start_angle: Any = 0.0
+        self.end_angle: Any = 0.0
         self.info: dict[str, Any] = {}
         if path is not None:
             if isinstance(path, Path):
-                self.points = np.array(path.points, dtype=np.float64)
+                self.points = path.points
                 self.start_angle = path.start_angle
                 self.end_angle = path.end_angle
-                self.info = {}
-            elif (
-                (np.asarray(path, dtype=object).ndim == 2)
-                and np.issubdtype(np.array(path).dtype, np.number)
-                and (np.shape(path)[1] == 2)
-            ):
-                self.points = np.array(path, dtype=np.float64)
+            elif _is_points_like(path):
+                self.points = _as_points(path)
                 if len(self.points) > 1:
-                    nx1, ny1 = self.points[1] - self.points[0]
-                    self.start_angle = np.arctan2(ny1, nx1) / np.pi * 180
-                    nx2, ny2 = self.points[-1] - self.points[-2]
-                    self.end_angle = np.arctan2(ny2, nx2) / np.pi * 180
-            elif np.asarray(path, dtype=object).size > 1:
-                self.append(path)
+                    d1 = self.points[1] - self.points[0]
+                    self.start_angle = _angle_deg(d1[1], d1[0])
+                    d2 = self.points[-1] - self.points[-2]
+                    self.end_angle = _angle_deg(d2[1], d2[0])
+            elif isinstance(path, list | tuple) and len(path) > 0:
+                self.append(list(path))
             else:
                 raise ValueError(
                     "Path() the `path` argument must be either blank, a path Object, "
                     "an array-like[N][2] list of points, or a list of these"
                 )
         if start_angle is not None:
-            self.start_angle = mod(start_angle, 360)
+            self.start_angle = _mod360(start_angle)
         if end_angle is not None:
-            self.end_angle = mod(end_angle, 360)
+            self.end_angle = _mod360(end_angle)
 
     def __repr__(self) -> str:
-        """Returns path points."""
         return (
-            f"Path(start_angle={self.start_angle}, "
-            f"end_angle={self.end_angle}, "
-            f"points={self.points})"
+            f"Path(start_angle={to_float(self.start_angle)}, "
+            f"end_angle={to_float(self.end_angle)}, "
+            f"points={to_numpy(self.points)})"
         )
 
     def __len__(self) -> int:
-        """Returns path points."""
         return len(self.points)
 
-    def __iadd__(self, path_or_points: npt.NDArray[np.floating[Any]] | Path) -> Path:
-        """Adds points to current path."""
+    def __iadd__(self, path_or_points: Any) -> Path:
         return self.append(path_or_points)
 
-    def __add__(self, path: npt.NDArray[np.floating[Any]] | Path) -> Path:
-        """Returns new path concatenating current and new path."""
+    def __add__(self, path: Any) -> Path:
         new = self.copy()
         return new.append(path)
 
-    @property
-    def kcl(self) -> kf.KCLayout:
-        return gf.kcl
+    # ------------------------------------------------------------ geometry
+    def transform(self, trans: Any, /) -> Path:
+        """Transforms the Path in place (Transform or KLayout transformation)."""
+        if not isinstance(trans, Transform):
+            import klayout.db as kdb
 
-    def transform(
-        self,
-        trans: kdb.Trans | kdb.DTrans | kdb.ICplxTrans | kdb.DCplxTrans,
-        /,
-    ) -> Any:
-        """Transforms the Path in place.
+            if isinstance(trans, kdb.DTrans):
+                trans = kdb.DCplxTrans(trans)
+            elif isinstance(trans, kdb.Trans):
+                trans = kdb.DCplxTrans(trans.to_dtype(1e-3))
+            elif isinstance(trans, kdb.ICplxTrans):
+                trans = trans.to_itrans(1e-3)
+            trans = Transform.from_klayout(trans)
+        self.points = trans.apply(self.points)
+        self.start_angle = trans.apply_angle(self.start_angle)
+        self.end_angle = trans.apply_angle(self.end_angle)
+        return self
 
-        Applies a transformation as a magnification, then a mirroring at
-        the x-axis, then a rotation, then a displacement, following KLayout.
+    def dbbox(self, layer: int | None = None) -> Box:
+        mn = jnp.min(self.points, axis=0)
+        mx = jnp.max(self.points, axis=0)
+        return Box(mn[0], mn[1], mx[0], mx[1])
 
-        Args:
-            trans: the transformation to apply.
-        """
-        if isinstance(trans, kdb.DCplxTrans):
-            trans_ = trans
-        elif isinstance(trans, kdb.DTrans):
-            trans_ = kdb.DCplxTrans(trans)
-        elif isinstance(trans, kdb.Trans):
-            trans_ = kdb.DCplxTrans(trans.to_dtype(gf.kcl.dbu))
-        else:
-            trans_ = trans.to_itrans(gf.kcl.dbu)
-
-        new_points = np.asarray(self.points, dtype=np.float64)
-
-        if trans_.mag != 1:
-            new_points = new_points * trans_.mag
-
-        if trans_.mirror:
-            new_points = new_points * np.array([1.0, -1.0])
-
-        if trans_.angle != 0:
-            angle_rad = np.radians(trans_.angle)
-            cos_angle = np.cos(angle_rad)
-            sin_angle = np.sin(angle_rad)
-
-            rotation_matrix = np.array(
-                [
-                    [cos_angle, sin_angle],
-                    [-sin_angle, cos_angle],
-                ]
-            )
-            new_points = np.dot(new_points, rotation_matrix)
-
-        new_points = new_points + np.array([trans_.disp.x, trans_.disp.y])
-
-        self.points = new_points
-        sign = -1 if trans_.mirror else 1
-        self.start_angle = mod(sign * self.start_angle + trans_.angle, 360)
-        self.end_angle = mod(sign * self.end_angle + trans_.angle, 360)
-
-    def dbbox(self, layer: int | None = None) -> kdb.DBox:
-        return kdb.DBox(*self.bbox_np().flatten())
-
-    def ibbox(self, layer: int | None = None) -> kdb.Box:
-        return kdb.Box(*map(gf.kcl.to_dbu, self.bbox_np().flatten()))
+    ibbox = dbbox
 
     def bbox_np(self) -> npt.NDArray[np.float64]:
-        """Returns the bounding box of the Path as a numpy array."""
-        return np.array(
-            [
-                (np.min(self.points[:, 0]), np.min(self.points[:, 1])),
-                (np.max(self.points[:, 0]), np.max(self.points[:, 1])),
-            ],
-            dtype=np.float64,
-        )
+        pts = to_numpy(self.points)
+        return np.array([pts.min(axis=0), pts.max(axis=0)], dtype=np.float64)
 
-    def append(
-        self,
-        path: npt.NDArray[np.floating[Any]]
-        | Path
-        | list[Path]
-        | list[tuple[float, float]],
-    ) -> Path:
+    @property
+    def xmin(self) -> Any:
+        return jnp.min(self.points[:, 0])
+
+    @property
+    def xmax(self) -> Any:
+        return jnp.max(self.points[:, 0])
+
+    @property
+    def ymin(self) -> Any:
+        return jnp.min(self.points[:, 1])
+
+    @property
+    def ymax(self) -> Any:
+        return jnp.max(self.points[:, 1])
+
+    @property
+    def x(self) -> Any:
+        return (self.xmin + self.xmax) / 2
+
+    @property
+    def y(self) -> Any:
+        return (self.ymin + self.ymax) / 2
+
+    @property
+    def center(self) -> Array:
+        return jnp.stack([self.x, self.y])
+
+    @property
+    def xsize(self) -> Any:
+        return self.xmax - self.xmin
+
+    @property
+    def ysize(self) -> Any:
+        return self.ymax - self.ymin
+
+    def move(self, *args: Any) -> Path:
+        """Moves: move((dx, dy)), move(dx, dy) or move(origin, destination)."""
+        from gdsfactory._ports import _move_args
+
+        dx, dy = _move_args(args)
+        self.points = self.points + jnp.stack([asarray(dx), asarray(dy)])
+        return self
+
+    dmove = move
+
+    def movex(self, dx: Any) -> Path:
+        return self.move(dx, 0.0)
+
+    def movey(self, dy: Any) -> Path:
+        return self.move(0.0, dy)
+
+    def rotate(self, angle: Any = 45, center: Any = (0.0, 0.0)) -> Path:
+        """Rotates the path (degrees, counter-clockwise) around center."""
+        if not is_tracer(angle) and float(angle) == 0:
+            return self
+        self.points = rotate_points(self.points, angle, center)
+        self.start_angle = _mod360(self.start_angle + angle)
+        self.end_angle = _mod360(self.end_angle + angle)
+        return self
+
+    drotate = rotate
+
+    def append(self, path: Any) -> Path:
         """Attach Path to the end of this Path.
 
         The input path automatically rotates and translates such that it continues
@@ -260,28 +281,21 @@ class Path(UMGeometricObject):
         Args:
             path: Path, array-like[N][2], or list of Paths. The input path that will be appended.
         """
-        # If appending another Path, load relevant variables
         if isinstance(path, Path):
             start_angle = path.start_angle
             end_angle = path.end_angle
             points = path.points
-        # If array[N][2]
-        elif (
-            (np.asarray(path, dtype=object).ndim == 2)
-            and not isinstance(path[0], Path)
-            and np.issubdtype(np.array(path).dtype, np.number)
-            and (np.shape(path)[1] == 2)  # type: ignore[arg-type]
-        ):
-            points = np.asarray(path, dtype=np.float64)
-            start_angle, end_angle = 0, 0
+        elif _is_points_like(path):
+            points = _as_points(path)
+            start_angle, end_angle = 0.0, 0.0
             if len(points) > 1:
-                nx1, ny1 = points[1] - points[0]
-                start_angle = np.arctan2(ny1, nx1) / np.pi * 180
-                nx2, ny2 = points[-1] - points[-2]
-                end_angle = np.arctan2(ny2, nx2) / np.pi * 180
-        elif isinstance(path, list):
+                d1 = points[1] - points[0]
+                start_angle = _angle_deg(d1[1], d1[0])
+                d2 = points[-1] - points[-2]
+                end_angle = _angle_deg(d2[1], d2[0])
+        elif isinstance(path, list | tuple):
             for p in path:
-                self.append(p)  # type: ignore[arg-type]
+                self.append(p)
             return self
         else:
             raise ValueError(
@@ -289,19 +303,15 @@ class Path(UMGeometricObject):
                 "a Path object, an array-like[N][2] list of points, or a list of these"
             )
 
-        # Connect beginning of new points with old points
-        points = rotate_points(points, angle=self.end_angle - start_angle)
-        points += self.points[-1, :] - points[0, :]
-
-        # Update end angle
-        self.end_angle = mod(end_angle + self.end_angle - start_angle, 360)
-
-        # Concatenate old points + new points
-        self.points = np.vstack([self.points, points[1:]])
-
+        rot = self.end_angle - start_angle
+        if is_tracer(rot) or to_float(rot) != 0:
+            points = rotate_points(points, angle=rot)
+        points = points + (self.points[-1, :] - points[0, :])
+        self.end_angle = _mod360(end_angle + self.end_angle - start_angle)
+        self.points = jnp.concatenate([self.points, points[1:]])
         return self
 
-    def offset(self, offset: float | Callable[[float], float] = 0) -> Path:
+    def offset(self, offset: Any = 0) -> Path:
         """Offsets Path so that it follows the Path centerline plus an offset.
 
         The offset can either be a fixed value, or a function
@@ -310,34 +320,26 @@ class Path(UMGeometricObject):
         Args:
             offset: int or float, callable. Magnitude of the offset
         """
-        if offset == 0:
-            points = self.points
-            start_angle = self.start_angle
-            end_angle = self.end_angle
-        elif callable(offset):
-            # Compute lengths
-            dx = np.diff(self.points[:, 0])
-            dy = np.diff(self.points[:, 1])
-            lengths = np.cumsum(np.sqrt((dx) ** 2 + (dy) ** 2))
-            lengths = np.concatenate([[0], lengths])
-            # Create list of offset points and perform offset
+        if callable(offset):
+            lengths = _cumulative_lengths(self.points)
             points = self.centerpoint_offset_curve(
                 self.points,
                 offset_distance=offset(lengths / lengths[-1]),
                 start_angle=self.start_angle,
                 end_angle=self.end_angle,
             )
-            # Numerically compute start and end angles
             tol = 1e-6
             ds = tol / lengths[-1]
             ny1 = offset(ds) - offset(0)
-            start_angle = np.arctan2(-ny1, tol) / np.pi * 180 + self.start_angle
+            start_angle = _angle_deg(-ny1, tol) + self.start_angle
             ny2 = offset(1) - offset(1 - ds)
-            end_angle = np.arctan2(-ny2, tol) / np.pi * 180 + self.end_angle
+            end_angle = _angle_deg(-ny2, tol) + self.end_angle
+        elif not is_tracer(offset) and to_float(offset) == 0:
+            return self
         else:
             points = self.centerpoint_offset_curve(
                 self.points,
-                offset_distance=cast(float, offset),  # type: ignore[redundant-cast]
+                offset_distance=offset,
                 start_angle=self.start_angle,
                 end_angle=self.end_angle,
             )
@@ -351,20 +353,13 @@ class Path(UMGeometricObject):
 
     def centerpoint_offset_curve(
         self,
-        points: npt.NDArray[np.floating[Any]],
-        offset_distance: float | Sequence[float] | npt.NDArray[np.floating[Any]],
-        start_angle: float | None = None,
-        end_angle: float | None = None,
-    ) -> npt.NDArray[np.floating[Any]]:
-        """Creates a offset curve computing the centerpoint offset of x and y points.
-
-        Args:
-            points: array-like[N][2] The points to be offset.
-            offset_distance: array-like[N] The distance to offset the points.
-            start_angle: float or None The angle at the start of the path.
-            end_angle: float or None The angle at the end of the path.
-
-        """
+        points: Any,
+        offset_distance: Any,
+        start_angle: Any = None,
+        end_angle: Any = None,
+    ) -> Array:
+        """Creates a offset curve computing the centerpoint offset of x and y points."""
+        points = asarray(points)
         cos_mid, sin_mid, sin_half = _compute_offset_directions(points)
         return _offset_curve_from_directions(
             points,
@@ -378,52 +373,38 @@ class Path(UMGeometricObject):
 
     def _parametric_offset_curve(
         self,
-        points: npt.NDArray[np.floating[Any]],
-        offset_distance: npt.NDArray[np.floating[Any]],
-        start_angle: float | None = None,
-        end_angle: float | None = None,
-    ) -> npt.NDArray[np.floating[Any]]:
-        """Creates a parametric offset by using gradient of the supplied x and y points.
-
-        Args:
-            points: array-like[N][2] The points to be offset.
-            offset_distance: array-like[N] The distance to offset the points.
-            start_angle: float or None The angle at the start of the path.
-            end_angle: float or None The angle at the end of the path.
-
-
-        """
+        points: Any,
+        offset_distance: Any,
+        start_angle: Any = None,
+        end_angle: Any = None,
+    ) -> Array:
+        """Creates a parametric offset by using gradient of the supplied x and y points."""
+        points = asarray(points)
         x = points[:, 0]
         y = points[:, 1]
-        dxdt = np.gradient(x)
-        dydt = np.gradient(y)
+        dxdt = jnp.gradient(x)
+        dydt = jnp.gradient(y)
         if start_angle is not None:
-            dxdt[0] = np.cos(start_angle * np.pi / 180)
-            dydt[0] = np.sin(start_angle * np.pi / 180)
+            dxdt = dxdt.at[0].set(jnp.cos(start_angle * jnp.pi / 180))
+            dydt = dydt.at[0].set(jnp.sin(start_angle * jnp.pi / 180))
         if end_angle is not None:
-            dxdt[-1] = np.cos(end_angle * np.pi / 180)
-            dydt[-1] = np.sin(end_angle * np.pi / 180)
-        x_offset = x + offset_distance * dydt / np.sqrt(dxdt**2 + dydt**2)
-        y_offset = y - offset_distance * dxdt / np.sqrt(dydt**2 + dxdt**2)
-        return np.array([x_offset, y_offset]).T
+            dxdt = dxdt.at[-1].set(jnp.cos(end_angle * jnp.pi / 180))
+            dydt = dydt.at[-1].set(jnp.sin(end_angle * jnp.pi / 180))
+        norm = jnp.sqrt(dxdt**2 + dydt**2)
+        x_offset = x + offset_distance * dydt / norm
+        y_offset = y - offset_distance * dxdt / norm
+        return jnp.stack([x_offset, y_offset]).T
 
-    def length(self) -> float:
-        """Return cumulative length."""
-        x = self.points[:, 0]
-        y = self.points[:, 1]
-        dx: npt.NDArray[np.floating[Any]] = np.diff(x)
-        dy: npt.NDArray[np.floating[Any]] = np.diff(y)
-        return float(np.round(np.sum(np.sqrt((dx) ** 2 + (dy) ** 2)), 3))
+    def length(self) -> Any:
+        """Return cumulative length (rounded to 1e-3 um, straight-through gradient)."""
+        return round_st(self.length_exact(), 3)
 
-    def curvature(
-        self,
-    ) -> tuple[npt.NDArray[np.floating[Any]], npt.NDArray[np.floating[Any]]]:
-        """Calculates Path curvature.
+    def length_exact(self) -> Any:
+        d = jnp.diff(self.points, axis=0)
+        return jnp.sum(jnp.sqrt(jnp.sum(d**2, axis=1)))
 
-        The curvature is numerically computed so areas where the curvature
-        jumps instantaneously (such as between an arc and a straight segment)
-        will be slightly interpolated, and sudden changes in point density
-        along the curve can cause discontinuities.
+    def curvature(self) -> tuple[Array, Array]:
+        """Calculates Path curvature (numerically).
 
         Returns:
             s: array-like[N] The arc-length of the Path
@@ -431,132 +412,57 @@ class Path(UMGeometricObject):
         """
         x = self.points[:, 0]
         y = self.points[:, 1]
-        dx = np.diff(x)
-        dy = np.diff(y)
-        ds = np.sqrt((dx) ** 2 + (dy) ** 2)
-        s = np.cumsum(ds)
-        theta = np.arctan2(dy, dx)
-
-        # Fix discontinuities arising from np.arctan2
-        dtheta = np.diff(theta)
-        dtheta[np.where(dtheta > np.pi)] += -2 * np.pi
-        dtheta[np.where(dtheta < -np.pi)] += 2 * np.pi
-        theta = np.concatenate([[0], np.cumsum(dtheta)]) + theta[0]
+        dx = jnp.diff(x)
+        dy = jnp.diff(y)
+        ds = jnp.sqrt(dx**2 + dy**2)
+        s = jnp.cumsum(ds)
+        theta = jnp.unwrap(jnp.arctan2(dy, dx))
 
         match len(ds):
             case 0 | 1:
-                k = np.array([np.inf])
+                k = asarray([np.inf])
             case 2:
-                k = np.nan_to_num(np.gradient(theta, s, edge_order=1), nan=np.inf)
+                k = jnp.nan_to_num(_gradient(theta, s, edge_order=1), nan=np.inf)
             case _:
-                k = np.gradient(theta, s, edge_order=2)
-
+                k = _gradient(theta, s, edge_order=2)
         return s, k
 
     def __hash__(self) -> int:
-        """Computes a hash of the Path."""
         return self.hash_geometry()
 
     def __eq__(self, other: object) -> bool:
-        """Check if two Path instances are equal."""
         if not isinstance(other, Path):
             return False
         return (
-            np.array_equal(self.points, other.points)
-            and self.start_angle == other.start_angle
-            and self.end_angle == other.end_angle
+            np.array_equal(to_numpy(self.points), to_numpy(other.points))
+            and to_float(self.start_angle) == to_float(other.start_angle)
+            and to_float(self.end_angle) == to_float(other.end_angle)
         )
 
     def hash_geometry(self, precision: float = 1e-4) -> int:
-        """Computes an SHA1 hash of the points in the Path and the start_angle and end_angle.
-
-        Args:
-            precision: Rounding precision for the the objects in the Component. For instance, \
-                    a precision of 1e-2 will round a point at (0.124, 1.748) to (0.12, 1.75)
-
-        Returns:
-            str Hash result in the form of an SHA1 hex digest string.
-
-            hash(
-                hash(First layer information: [layer1, datatype1]),
-                hash(Polygon 1 on layer 1 points: [(x1,y1),(x2,y2),(x3,y3)] ),
-                hash(Polygon 2 on layer 1 points: [(x1,y1),(x2,y2),(x3,y3),(x4,y4)] ),
-                hash(Polygon 3 on layer 1 points: [(x1,y1),(x2,y2),(x3,y3)] ),
-                hash(Second layer information: [layer2, datatype2]),
-                hash(Polygon 1 on layer 2 points: [(x1,y1),(x2,y2),(x3,y3),(x4,y4)] ),
-                hash(Polygon 2 on layer 2 points: [(x1,y1),(x2,y2),(x3,y3)] ),
-            )
-        """
+        """Computes an SHA1 hash of the points and start/end angles."""
         magic_offset = 0.17048614
-
-        # Create a SHA1 hash object
         final_hash = hashlib.sha1()
-
-        # Adjust points by precision and add the magic offset, then convert to bytes
         adjusted_points = (
-            ((self.points / precision) + magic_offset).round().astype(np.int64)
+            ((to_numpy(self.points) / precision) + magic_offset).round().astype(np.int64)
         )
         final_hash.update(adjusted_points.tobytes())
-
-        # Adjust angles by precision, round and convert to bytes
-        adjusted_angles = np.array([self.start_angle, self.end_angle])
+        adjusted_angles = np.array([to_float(self.start_angle), to_float(self.end_angle)])
         adjusted_angles = (
             ((adjusted_angles / precision) + magic_offset).round().astype(np.int64)
         )
         final_hash.update(adjusted_angles.tobytes())
-        hash_bytes = final_hash.digest()
-        return int.from_bytes(hash_bytes, byteorder="big")
+        return int.from_bytes(final_hash.digest(), byteorder="big")
 
     def plot(self) -> None:
-        """Plot path in matplotlib.
-
-        Example:
-            ```python
-            import gdsfactory as gf
-
-            p = gf.path.euler(radius=10)
-            p.plot()
-            ```
-        """
+        """Plot path in matplotlib."""
         import matplotlib.pyplot as plt
 
-        plt.plot(self.points[:, 0], self.points[:, 1])
+        pts = to_numpy(self.points)
+        plt.plot(pts[:, 0], pts[:, 1])
         plt.axis("equal")
         plt.grid(True)
         plt.show()
-
-    @overload
-    def extrude(
-        self,
-        cross_section: CrossSectionSpec | None = None,
-        layer: LayerSpec | None = None,
-        width: float | None = None,
-        simplify: float | None = None,
-        all_angle: Literal[False] = False,
-        register_cross_section: bool = False,
-    ) -> Component: ...
-
-    @overload
-    def extrude(
-        self,
-        cross_section: CrossSectionSpec | None = None,
-        layer: LayerSpec | None = None,
-        width: float | None = None,
-        simplify: float | None = None,
-        all_angle: Literal[True] = True,
-        register_cross_section: bool = False,
-    ) -> ComponentAllAngle: ...
-
-    @overload
-    def extrude(
-        self,
-        cross_section: CrossSectionSpec | None = None,
-        layer: LayerSpec | None = None,
-        width: float | None = None,
-        simplify: float | None = None,
-        all_angle: bool = True,
-        register_cross_section: bool = False,
-    ) -> AnyComponent: ...
 
     def extrude(
         self,
@@ -569,28 +475,13 @@ class Path(UMGeometricObject):
     ) -> AnyComponent:
         """Returns Component by extruding a Path with a CrossSection.
 
-        A path can be extruded using any CrossSection returning a Component
-        The CrossSection defines the layer numbers, widths and offsets.
-
         Args:
             cross_section: to extrude.
             layer: optional layer.
             width: optional width in um.
-            simplify: Tolerance value for the simplification algorithm. \
-                    All points that can be removed without changing the resulting polygon\
-                    by more than the value listed here will be removed.
-
-            all_angle: if True, the bend is drawn with a single euler curve.
+            simplify: Tolerance value for the simplification algorithm.
+            all_angle: kept for API compatibility (all components support any angle).
             register_cross_section: if True, the cross_section factory is registered in the active PDK.
-
-        Example:
-            ```python
-            import gdsfactory as gf
-
-            p = gf.path.euler(radius=10)
-            c = p.extrude(layer=(1, 0), width=0.5)
-            c.plot()
-            ```
         """
         return extrude(
             p=self,
@@ -602,135 +493,136 @@ class Path(UMGeometricObject):
             register_cross_section=register_cross_section,
         )
 
-    @overload
-    def extrude_transition(
-        self,
-        transition: Transition | TransitionAsymmetric,
-        all_angle: Literal[False] = False,
-    ) -> Component: ...
-
-    @overload
-    def extrude_transition(
-        self,
-        transition: Transition | TransitionAsymmetric,
-        all_angle: Literal[True] = True,
-    ) -> ComponentAllAngle: ...
-
-    @overload
-    def extrude_transition(
-        self,
-        transition: Transition | TransitionAsymmetric,
-        all_angle: bool = True,
-    ) -> AnyComponent: ...
-
     def extrude_transition(
         self,
         transition: Transition | TransitionAsymmetric,
         all_angle: bool = False,
     ) -> AnyComponent:
-        """Extrudes a path along a transition.
-
-        Allows different transition methods for the upper and lower edges.
-
-        Args:
-            transition: Transition or TransitionAsymmetric object describing the
-                cross-sections and default transition types.
-            all_angle: if True, returns a ComponentAllAngle.
-
-        Returns:
-            AnyComponent: The extruded component with the specified transition methods
-                for each edge.
-        """
+        """Extrudes a path along a transition."""
         return extrude_transition(p=self, transition=transition, all_angle=all_angle)
 
     def copy(self) -> Path:
         """Returns a copy of the Path."""
         p = Path()
         p.info = self.info.copy()
-        p.points = np.array(self.points)
+        p.points = self.points
         p.start_angle = self.start_angle
         p.end_angle = self.end_angle
         return p
 
-    def mirror(
-        self, p1: tuple[float, float] = (0, 1), p2: tuple[float, float] = (0, 0)
-    ) -> Path:
-        """Mirrors the Path across the line formed between the two specified points.
-
-        ``points`` may be input as either single points [1,2]
-        or array-like[N][2], and will return in kind.
-
-        Args:
-            p1: First point of the line.
-            p2: Second point of the line.
-        """
+    def mirror(self, p1: Any = (0, 1), p2: Any = (0, 0)) -> Path:
+        """Mirrors the Path across the line formed between the two specified points."""
         self.points = reflect_points(self.points, p1, p2)
-        angle = np.arctan2((p2[1] - p1[1]), (p2[0] - p1[0])) * 180 / np.pi
+        p1a = asarray(p1)
+        p2a = asarray(p2)
+        angle = _angle_deg(p2a[1] - p1a[1], p2a[0] - p1a[0])
         if self.start_angle is not None:
-            self.start_angle = mod(2 * angle - self.start_angle, 360)
+            self.start_angle = _mod360(2 * angle - self.start_angle)
         if self.end_angle is not None:
-            self.end_angle = mod(2 * angle - self.end_angle, 360)
+            self.end_angle = _mod360(2 * angle - self.end_angle)
         return self
+
+    dmirror = mirror
+
+    def mirror_x(self, x: Any = 0.0) -> Path:
+        return self.mirror((x, 1), (x, 0))
+
+    def mirror_y(self, y: Any = 0.0) -> Path:
+        return self.mirror((1, y), (0, y))
 
     def invert(self) -> Path:
-        """Inverts the Path by reversing the order of its points.
-
-        The shape of the path is unchanged, but its start becomes its end and vice versa.
-        """
+        """Inverts the Path by reversing the order of its points."""
         self.points = self.points[::-1]
         self.start_angle, self.end_angle = (
-            mod(self.end_angle + 180, 360),
-            mod(self.start_angle + 180, 360),
+            _mod360(self.end_angle + 180),
+            _mod360(self.start_angle + 180),
         )
         return self
+
+
+def _as_points(path: Any) -> Array:
+    if isinstance(path, jax.Array | np.ndarray) or is_tracer(path):
+        return asarray(path)
+    from gdsfactory._jax import points_array
+
+    return points_array(path)
+
+
+def _cumulative_lengths(points: Array) -> Array:
+    d = jnp.diff(points, axis=0)
+    lengths = jnp.cumsum(jnp.sqrt(jnp.sum(d**2, axis=1)))
+    return jnp.concatenate([jnp.zeros(1), lengths])
+
+
+def _gradient(f: Array, x: Array, edge_order: int = 1) -> Array:
+    """jnp version of np.gradient(f, x) for non-uniform 1D spacing."""
+    n = f.shape[0]
+    if n < 2:
+        return jnp.full_like(f, jnp.inf)
+    out = jnp.zeros_like(f)
+    dx1 = x[1:-1] - x[:-2]
+    dx2 = x[2:] - x[1:-1]
+    a = -(dx2) / (dx1 * (dx1 + dx2))
+    b = (dx2 - dx1) / (dx1 * dx2)
+    c = dx1 / (dx2 * (dx1 + dx2))
+    out = out.at[1:-1].set(a * f[:-2] + b * f[1:-1] + c * f[2:])
+    if edge_order == 1 or n < 3:
+        out = out.at[0].set((f[1] - f[0]) / (x[1] - x[0]))
+        out = out.at[-1].set((f[-1] - f[-2]) / (x[-1] - x[-2]))
+    else:
+        dx1 = x[1] - x[0]
+        dx2 = x[2] - x[1]
+        a = -(2.0 * dx1 + dx2) / (dx1 * (dx1 + dx2))
+        b = (dx1 + dx2) / (dx1 * dx2)
+        c = -dx1 / (dx2 * (dx1 + dx2))
+        out = out.at[0].set(a * f[0] + b * f[1] + c * f[2])
+        dx1 = x[-2] - x[-3]
+        dx2 = x[-1] - x[-2]
+        a = dx2 / (dx1 * (dx1 + dx2))
+        b = -(dx2 + dx1) / (dx1 * dx2)
+        c = (2.0 * dx2 + dx1) / (dx2 * (dx1 + dx2))
+        out = out.at[-1].set(a * f[-3] + b * f[-2] + c * f[-1])
+    return out
 
 
 PathFactory = Callable[..., Path]
 T = TypeVar("T", float, npt.NDArray[np.floating[Any]])
 
 
-def _sinusoidal_transition(y1: float, y2: float) -> Callable[[T], T]:
+def _sinusoidal_transition(y1: Any, y2: Any) -> Callable[[Any], Any]:
     dy = y2 - y1
 
-    def sine(t: T) -> T:
-        return cast(
-            T,
-            np.add(
-                y1, np.multiply(np.subtract(1, np.cos(np.multiply(np.pi, t))), dy / 2)
-            ),
-        )
+    def sine(t: Any) -> Any:
+        return y1 + (1 - jnp.cos(jnp.pi * t)) * dy / 2
 
     return sine
 
 
-def _parabolic_transition(y1: float, y2: float) -> Callable[[T], T]:
+def _parabolic_transition(y1: Any, y2: Any) -> Callable[[Any], Any]:
     dy = y2 - y1
 
-    def parabolic(t: T) -> T:
-        return cast(T, np.add(y1, np.multiply(np.sqrt(t), dy)))
+    def parabolic(t: Any) -> Any:
+        return y1 + jnp.sqrt(t) * dy
 
     return parabolic
 
 
-def _linear_transition(y1: float, y2: float) -> Callable[[T], T]:
+def _linear_transition(y1: Any, y2: Any) -> Callable[[Any], Any]:
     dy = y2 - y1
 
-    def linear(t: T) -> T:
-        return cast(T, np.add(y1, np.multiply(t, dy)))
+    def linear(t: Any) -> Any:
+        return y1 + t * dy
 
     return linear
 
 
-def transition_exponential(
-    y1: float, y2: float, exp: float = 0.5
-) -> Callable[[npt.NDArray[np.floating[Any]]], npt.NDArray[np.floating[Any]]]:
+def transition_exponential(y1: Any, y2: Any, exp: float = 0.5) -> Callable[[Any], Any]:
     """Returns the function for an exponential transition.
 
     Args:
         y1: start width in um.
         y2: end width in um.
         exp: exponent.
-
     """
     return lambda t: y1 + (y2 - y1) * t**exp
 
@@ -760,26 +652,24 @@ adiabatic_polyfit_TE1550SOI_220nm = np.array(
 def transition_adiabatic(
     w1: float,
     w2: float,
-    neff_w: Callable[[float], float],
+    neff_w: Callable[[Any], Any],
     wavelength: float = 1.55,
     alpha: float = 1,
     max_length: float = 200,
     num_points_ODE: int = 2000,
-) -> tuple[npt.NDArray[np.floating[Any]], npt.NDArray[np.floating[Any]]]:
+) -> tuple[Array, Array]:
     """Returns the points for an optimal adiabatic transition for well-guided modes.
+
+    The ODE dw/dx = alpha * wavelength / (neff(w) * w) is integrated with
+    ``jax.experimental.ode.odeint``, so the result is differentiable with
+    respect to w1, w2, wavelength and alpha (``neff_w`` must be jax-traceable).
 
     Args:
         w1: start width in um.
         w2: end width in um.
-        neff_w: a callable that returns the effective index as a function of width. \
-                By default, use a compact model of neff(y) for fundamental 1550 nm TE \
-                mode of 220nm-thick core with 3.45 index, fully clad with 1.44 index.\
-                Many coefficients are needed to capture the behaviour.
+        neff_w: a callable that returns the effective index as a function of width.
         wavelength: wavelength, in same units as widths.
-        alpha: parameter that scales the rate of width change
-            - closer to 0 means longer and more adiabatic;
-            - 1 is the intuitive limit beyond which higher order modes are excited;
-            - [2] reports good performance up to 1.4 for fundamental TE in SOI (for multiple core thicknesses)
+        alpha: parameter that scales the rate of width change.
         max_length: maximum length in um.
         num_points_ODE: number of samplings points for the ODE solve.
 
@@ -789,37 +679,21 @@ def transition_adiabatic(
         [2] Fu, Yunfei, et al. "Efficient adiabatic silicon-on-insulator waveguide taper."
             Photonics Res., vol. 2, no. 3, 1 June 2014, pp. A41-A44, doi:10.1364/PRJ.2.000A41.
     """
-    from scipy.integrate import odeint
+    from jax.experimental.ode import odeint
 
-    # Define ODE
-    def dWdx(
-        w: float,
-        x: float,
-        neff_w: Callable[[float], float],
-        wavelength: float,
-        alpha: float,
-    ) -> float:
+    def dWdx(w: Any, x: Any, wavelength: Any, alpha: Any) -> Any:
         return alpha * wavelength / (neff_w(w) * w)
 
-    # Parse input
-    if w2 < w1:
-        wmin = w2
-        wmax = w1
-        order = -1
+    if to_float(w2) < to_float(w1):
+        wmin, wmax, order = w2, w1, -1
     else:
-        wmin = w1
-        wmax = w2
-        order = 1
+        wmin, wmax, order = w1, w2, 1
 
-    # Solve ODE
-    x = np.linspace(0, max_length, num_points_ODE)
-
-    sol = odeint(dWdx, wmin, x, args=(neff_w, wavelength, alpha))
-
-    # Extract optimal curve
-    xs = x[np.where(sol[:, 0] < wmax)]
-    ws = sol[:, 0][np.where(sol[:, 0] < wmax)]
-
+    x = jnp.linspace(0, max_length, num_points_ODE)
+    sol = odeint(dWdx, asarray(wmin), x, asarray(wavelength), asarray(alpha))
+    mask = to_numpy(sol) < to_float(wmax)
+    xs = x[mask]
+    ws = sol[mask]
     return xs, ws[::order]
 
 
@@ -838,11 +712,8 @@ def transition(
     Args:
         cross_section1: First CrossSection.
         cross_section2: Second CrossSection.
-        width_type: 'sine', 'parabolic', 'linear' or Callable. type of width transition used \
-                if any widths are different between the two input CrossSections.
-        offset_type: 'sine', 'parabolic', 'linear' or Callable. type of width transition used \
-                if any widths are different between the two input CrossSections. \
-
+        width_type: 'sine', 'parabolic', 'linear' or Callable.
+        offset_type: 'sine', 'parabolic', 'linear' or Callable.
     """
     from gdsfactory.pdk import get_cross_section, get_layer
 
@@ -854,8 +725,7 @@ def transition(
     layers1.add(get_layer(X1.layer))
     layers2.add(get_layer(X2.layer))
 
-    has_common_layers = bool(layers1.intersection(layers2))
-    if not has_common_layers:
+    if not layers1.intersection(layers2):
         raise ValueError(
             f"transition() found no common layers X1 {layers1} and X2 {layers2}"
         )
@@ -876,16 +746,7 @@ def transition_asymmetric(
     offset_type1: WidthTypes | Callable[[float, float, float], float] = "sine",
     offset_type2: WidthTypes | Callable[[float, float, float], float] = "sine",
 ) -> TransitionAsymmetric:
-    """Returns a smoothly-transitioning object between two CrossSections with asymmetric transitions.
-
-    Args:
-        cross_section1: First CrossSection.
-        cross_section2: Second CrossSection.
-        width_type1: transition type for lower edge width.
-        width_type2: transition type for upper edge width.
-        offset_type1: transition type for lower edge offset.
-        offset_type2: transition type for upper edge offset.
-    """
+    """Returns a smoothly-transitioning object between two CrossSections with asymmetric transitions."""
     from gdsfactory.pdk import get_cross_section, get_layer
 
     X1 = get_cross_section(cross_section1)
@@ -896,8 +757,7 @@ def transition_asymmetric(
     layers1.add(get_layer(X1.layer))
     layers2.add(get_layer(X2.layer))
 
-    has_common_layers = bool(layers1.intersection(layers2))
-    if not has_common_layers:
+    if not layers1.intersection(layers2):
         raise ValueError(
             f"transition_asymmetric() found no common layers X1 {layers1} and X2 {layers2}"
         )
@@ -912,7 +772,7 @@ def transition_asymmetric(
     )
 
 
-@cell(check_instances=CheckInstances.IGNORE)
+@cell
 def along_path(
     p: Path,
     component: ComponentSpec,
@@ -937,7 +797,7 @@ def along_path(
     component = get_component(component)
 
     length = p.length()
-    number = (length - 2 * padding) // spacing + 1
+    number = (to_float(length) - 2 * to_float(padding)) // to_float(spacing) + 1
 
     c = Component()
 
@@ -945,32 +805,23 @@ def along_path(
     next_component = (length - (number - 1) * spacing) / 2
     stop = length - next_component
 
-    # Prepare in advance the rotation angle for each segment
-    angle_list = [
-        np.rad2deg(
-            np.arctan2(
-                (p.points[i + 1] - p.points[i])[1], (p.points[i + 1] - p.points[i])[0]
-            )
-        )
-        for i in range(len(p.points) - 1)
-    ]
-
-    for i, start_pt in enumerate(p.points[:-1]):
-        end_pt = p.points[i + 1]
-        segment_vector = end_pt - start_pt
-        segment_length = float(np.linalg.norm(segment_vector))
+    pts = p.points
+    for i in range(len(pts) - 1):
+        start_pt = pts[i]
+        segment_vector = pts[i + 1] - start_pt
+        segment_length = jnp.sqrt(jnp.sum(segment_vector**2))
         unit_vector = segment_vector / segment_length
+        angle = jnp.rad2deg(jnp.arctan2(segment_vector[1], segment_vector[0]))
 
-        # Get the pre-calculated angle for this segment
-        angle = angle_list[i]
-
-        while next_component <= cum_dist + segment_length and next_component <= stop:
+        while to_float(next_component) <= to_float(cum_dist + segment_length) and to_float(
+            next_component
+        ) <= to_float(stop):
             added_dist = next_component - cum_dist
             offset = added_dist * unit_vector
             component_ref = c << component
             component_ref.rotate(angle).move(start_pt + offset)
-            next_component += spacing
-        cum_dist += segment_length
+            next_component = next_component + spacing
+        cum_dist = cum_dist + segment_length
 
     return c
 
@@ -998,42 +849,6 @@ def _is_implicit_section_name(name: str) -> bool:
     )
 
 
-@overload
-def extrude(
-    p: Path,
-    cross_section: CrossSectionSpec | None = None,
-    layer: LayerSpec | None = None,
-    width: float | None = None,
-    simplify: float | None = None,
-    all_angle: Literal[False] = False,
-    register_cross_section: bool = False,
-) -> Component: ...
-
-
-@overload
-def extrude(
-    p: Path,
-    cross_section: CrossSectionSpec | None = None,
-    layer: LayerSpec | None = None,
-    width: float | None = None,
-    simplify: float | None = None,
-    all_angle: Literal[True] = True,
-    register_cross_section: bool = False,
-) -> ComponentAllAngle: ...
-
-
-@overload
-def extrude(
-    p: Path,
-    cross_section: CrossSectionSpec | None = None,
-    layer: LayerSpec | None = None,
-    width: float | None = None,
-    simplify: float | None = None,
-    all_angle: bool = ...,
-    register_cross_section: bool = False,
-) -> AnyComponent: ...
-
-
 def extrude(
     p: Path,
     cross_section: CrossSectionSpec | None = None,
@@ -1056,7 +871,7 @@ def extrude(
         simplify: Tolerance value for the simplification algorithm. \
                 All points that can be removed without changing the resulting polygon \
                 by more than the value listed here will be removed.
-        all_angle: if True, returns a ComponentAllAngle.
+        all_angle: kept for API compatibility.
         register_cross_section: if True, registers the cross-section factory \
             used for extrusion in the global cross-section registry.
     """
@@ -1082,20 +897,14 @@ def extrude(
         )
         x = get_cross_section(CrossSection(sections=(s,)))
 
-    xsection_points: list[list[float | npt.NDArray[np.floating[Any]]]] = []
     c = ComponentAllAngle() if all_angle else Component()
     path_length = p.length()
 
     layer = get_layer(layer or x.layer)
-
-    _dir_cache: (
-        tuple[
-            npt.NDArray[np.floating[Any]],
-            npt.NDArray[np.floating[Any]],
-            npt.NDArray[np.floating[Any]],
-        ]
-        | None
-    ) = None
+    _dir_cache: tuple[Array, Array, Array] | None = None
+    points = p.points
+    start_angle = p.start_angle
+    end_angle = p.end_angle
 
     for section in x.sections:
         p_sec = p.copy()
@@ -1103,140 +912,27 @@ def extrude(
         port_types = section.port_types
         hidden = section.hidden
 
-        offset_value: float | npt.NDArray[np.floating[Any]] = section.offset
-        width_value: float | npt.NDArray[np.floating[Any]] = section.width
+        offset_value: Any = section.offset
+        width_value: Any = section.width
         width_function = section.width_function
         offset_function = section.offset_function
         layer = get_layer(section.layer)
 
-        xsection_points.append([width_value, offset_value])
+        insets = section.insets
+        has_insets = bool(insets) and tuple(to_float(i) for i in insets) != (0, 0)  # type: ignore[union-attr]
+        path_changed = has_insets
 
-        path_changed = bool(section.insets and section.insets != (0, 0))
-
-        if section.insets and section.insets != (0, 0):
-            p_pts = p_sec.points
-
-            # This excludes the first point, so length of output array is smaller by 1
-            p_xy_segment_lengths = np.array(
-                [
-                    np.diff(p_pts[:, 0]),
-                    np.diff(p_pts[:, 1]),
-                ]
-            ).T
-
-            # Using the axis=1 makes output equivalent to [np.linalg.norm(p_xy_segment_lengths[i, :])
-            #                                              for i
-            #                                              in range(len(p_pts[:, 0]))]
-            p_segment_lengths = np.linalg.norm(p_xy_segment_lengths, axis=1)
-
-            p_segment_lengths_forward_cumsum = np.cumsum(
-                p_segment_lengths
-            )  # To get start inset idx & path length
-            p_segment_lengths_reverse_cumsum = np.cumsum(
-                p_segment_lengths[::-1]
-            )  # To get stop inset idx & path length
-
-            if all(section.insets[:] > p_segment_lengths_forward_cumsum[-1]):
+        if has_insets:
+            assert insets is not None
+            trimmed = _inset_path(p_sec, insets)
+            if trimmed is None:
                 warnings.warn(
                     f"Cannot apply delay to Section '{section.name}', delay results in points outside "
                     f"of original path.",
                     stacklevel=3,
                 )
                 continue
-
-            """
-            Find forward cumsum idx (start_diff_idx), reverse cumsum idx (reversed_stop_diff_idx), and the reverse
-            cumsum idx as indexed on the forward cumsum
-
-            For the forward cumsum, this is the same as the idx of the vector that describes the path segment the
-            start inset lies within or at the boundary of (due to the process of finding p_xy_segment_lengths, if
-            the forward cumsum idx is 0, this corresponds to p_pts[1, :])
-
-            The reverse cumsum idx, is the idx from the end of p_xy_segment_lengths (when the reverse
-            cumsum idx is 0, this corresponds to p_pts[-2, :])
-            """
-            start_diff_idx = np.argwhere(
-                p_segment_lengths_forward_cumsum >= section.insets[0]
-            )[0, 0]
-            reversed_stop_diff_idx = np.argwhere(
-                p_segment_lengths_reverse_cumsum >= section.insets[1]
-            )[0, 0]
-            stop_diff_idx = (len(p_xy_segment_lengths) - 1) - reversed_stop_diff_idx
-
-            """
-            Find vectors describing the segments the insets lie within or at the boundary of. Also reverse direction of
-            start vector to ensure vectors point from inside to out (this ensures that a positive/negative inset
-            shortens/lengthens the segment's path, respectively)
-
-            e.g.)   For a straight path (chosen because I don't know how to draw a representation of a curved path
-                    with ASCII characters) with len(p_pts) == 7,
-                    this implies len(p_xy_segment_lengths) == len(p_segment_lengths) == 6
-
-                    so if start_diff_idx == 1 and stop_diff_idx == 5, the start and stop vectors would be
-
-                    (0)  (1)  (2)  (3)  (4)  (5)
-                    ---  ---  ---  ---  ---  ---
-                         <--                 -->
-                          ^(v_start)  (v_stop)^
-            """
-            v_start = -p_xy_segment_lengths[
-                start_diff_idx, :
-            ]  # Reversing vector direction so points inside-out
-            v_stop = p_xy_segment_lengths[
-                stop_diff_idx, :
-            ]  # Vector already points inside-out
-
-            v_start_direction = v_start / np.linalg.norm(v_start)  # Unit vector
-            v_stop_direction = v_stop / np.linalg.norm(v_stop)  # Unit vector
-
-            """
-            The total path length up to the inside edge of v_start/v_stop (e.g. as shown above, the total path length
-            from the left-most edge of the path to the right edge of segment 1) either accounts for more than or all of
-            the total inset amount, depending on whether the inset location lies within the segment defined by
-            v_start/v_stop or on it's inside edge.
-
-            i.e.)   If the inset amount places the inset location *within* the segment defined by v_start/v_stop,
-                    the total path length up to the inside edge of v_start/v_stop the over-accounts for the
-                    total inset amount. The difference between this path length and the inset amount given by the user
-                    then gives the length of v_start/v_stop needed to correctly position the edge of the inset path.
-
-                    If the inset location lies on the inside edge of v_start/v_stop, the total path length up to the
-                    inside edge of v_start/v_stop is equal to the entire inset amount. This means the difference
-                    between the path length and the user provided inset amount will be 0 and v_start/v_stop needs to be
-                    set to the zero vector
-            """
-            start_inset_remainder = (
-                p_segment_lengths_forward_cumsum[start_diff_idx] - section.insets[0]
-            )
-            stop_inset_remainder = (
-                p_segment_lengths_reverse_cumsum[reversed_stop_diff_idx]
-                - section.insets[1]
-            )
-
-            # Correcting v_start/v_stops's length
-            v_start_inset = v_start_direction * start_inset_remainder
-            v_stop_inset = v_stop_direction * stop_inset_remainder
-
-            # Translate v_start_inset/v_stop_inset back to their correct positions in the path, since the
-            # process of finding the vectors that define each path segment translated them all to the origin
-            new_start_point = v_start_inset + p_pts[start_diff_idx + 1, :]
-            new_stop_point = v_stop_inset + p_pts[stop_diff_idx, :]
-
-            _path_points = [new_start_point]
-            _path_points.extend(p_pts[start_diff_idx + 1 : stop_diff_idx + 1])
-            _path_points.append(new_stop_point)
-            trimmed_points = np.array(_path_points, dtype=np.float64)
-            trimmed_points = trimmed_points[
-                np.concatenate(
-                    ([True], np.any(np.diff(trimmed_points, axis=0) != 0, axis=1))
-                )
-            ]
-
-            p_sec = Path(
-                trimmed_points,
-                start_angle=p.start_angle if section.insets[0] == 0 else None,
-                end_angle=p.end_angle if section.insets[1] == 0 else None,
-            )
+            p_sec = trimmed
 
         if callable(offset_function):
             p_sec.offset(offset_function)
@@ -1246,11 +942,7 @@ def extrude(
         start_angle = p_sec.start_angle
         points = p_sec.points
         if callable(width_function):
-            # Compute lengths
-            dx: npt.NDArray[np.floating[Any]] | float = np.diff(p_sec.points[:, 0])
-            dy: npt.NDArray[np.floating[Any]] | float = np.diff(p_sec.points[:, 1])
-            lengths = np.cumsum(np.sqrt(dx**2 + dy**2))
-            lengths = np.concatenate([[0], lengths])
+            lengths = _cumulative_lengths(p_sec.points)
             width_value = width_function(lengths / lengths[-1])
 
         assert width_value is not None
@@ -1259,9 +951,7 @@ def extrude(
         dy2 = offset_value - width_value / 2
 
         if path_changed:
-            # Path was modified (insets or offset_function), compute fresh directions
             cos_mid, sin_mid, sin_half = _compute_offset_directions(points)
-            _dir_cache = None
         elif _dir_cache is not None:
             cos_mid, sin_mid, sin_half = _dir_cache
         else:
@@ -1287,52 +977,37 @@ def extrude(
             points1 = _simplify(points1, tolerance=with_simplify)
             points2 = _simplify(points2, tolerance=with_simplify)
 
-        # Join points together
-        points_poly = np.concatenate([points1, points2[::-1, :]])
-        # Unchanged sections use the original path, so this preserves the old
-        # per-section threshold without recomputing the same length each time.
+        points_poly = jnp.concatenate([points1, points2[::-1, :]])
         section_length = p_sec.length() if path_changed else path_length
 
-        if not hidden and section_length > 1e-3:
+        if not hidden and to_float(section_length) > 1e-3:
             c.add_polygon(points_poly, layer=layer)
 
-        # Add port_names if they were specified
+        scalar_width = jnp.ndim(width_value) == 0
         if port_names[0]:
-            port_width = (
-                width_value if isinstance(width_value, (int, float)) else width_value[0]
-            )
-            port_orientation = (p_sec.start_angle + 180) % 360
-            center = np.average([points1[0], points2[0]], axis=0)
-            face = [points1[0], points2[0]]
-            face = [_rotated_delta(point, center, port_orientation) for point in face]
-
+            port_width = width_value if scalar_width else width_value[0]
+            port_orientation = _mod360(p_sec.start_angle + 180)
+            center = (points1[0] + points2[0]) / 2
             c.add_port(
                 name=port_names[0],
                 layer=layer,
                 port_type=port_types[0],
                 width=port_width,
                 orientation=port_orientation,
-                center=(float(center[0]), float(center[1])),
+                center=center,
                 cross_section=x,
                 register_cross_section=register_cross_section,
             )
         if port_names[1]:
-            port_width = (
-                width_value
-                if isinstance(width_value, (int, float))
-                else width_value[-1]
-            )
-            port_orientation = (p_sec.end_angle) % 360
-            center = np.average([points1[-1], points2[-1]], axis=0)
-            face = [points1[-1], points2[-1]]
-            face = [_rotated_delta(point, center, port_orientation) for point in face]
-
+            port_width = width_value if scalar_width else width_value[-1]
+            port_orientation = _mod360(p_sec.end_angle)
+            center = (points1[-1] + points2[-1]) / 2
             c.add_port(
                 name=port_names[1],
                 layer=layer,
                 port_type=port_types[1],
                 width=port_width,
-                center=(float(center[0]), float(center[1])),
+                center=center,
                 orientation=port_orientation,
                 cross_section=x,
                 register_cross_section=register_cross_section,
@@ -1357,28 +1032,50 @@ def extrude(
     return c
 
 
-@overload
-def extrude_transition(
-    p: Path,
-    transition: Transition | TransitionAsymmetric,
-    all_angle: Literal[False] = False,
-) -> Component: ...
+def _inset_path(p_sec: Path, insets: tuple[Any, Any]) -> Path | None:
+    """Trims the start/end of a path by insets (um). Differentiable in insets and points."""
+    p_pts = p_sec.points
+    seg = jnp.diff(p_pts, axis=0)
+    seg_len = jnp.sqrt(jnp.sum(seg**2, axis=1))
+    fwd = jnp.cumsum(seg_len)
+    rev = jnp.cumsum(seg_len[::-1])
+    fwd_np = to_numpy(fwd)
+    rev_np = to_numpy(rev)
+    i0 = to_float(insets[0])
+    i1 = to_float(insets[1])
+    if i0 > fwd_np[-1] and i1 > fwd_np[-1]:
+        return None
 
+    start_diff_idx = int(np.argwhere(fwd_np >= i0)[0, 0])
+    reversed_stop_diff_idx = int(np.argwhere(rev_np >= i1)[0, 0])
+    stop_diff_idx = (len(seg) - 1) - reversed_stop_diff_idx
 
-@overload
-def extrude_transition(
-    p: Path,
-    transition: Transition | TransitionAsymmetric,
-    all_angle: Literal[True] = True,
-) -> ComponentAllAngle: ...
+    v_start = -seg[start_diff_idx]
+    v_stop = seg[stop_diff_idx]
+    v_start_direction = v_start / jnp.linalg.norm(v_start)
+    v_stop_direction = v_stop / jnp.linalg.norm(v_stop)
 
+    start_inset_remainder = fwd[start_diff_idx] - insets[0]
+    stop_inset_remainder = rev[reversed_stop_diff_idx] - insets[1]
 
-@overload
-def extrude_transition(
-    p: Path,
-    transition: Transition | TransitionAsymmetric,
-    all_angle: bool = True,
-) -> AnyComponent: ...
+    new_start_point = v_start_direction * start_inset_remainder + p_pts[start_diff_idx + 1]
+    new_stop_point = v_stop_direction * stop_inset_remainder + p_pts[stop_diff_idx]
+
+    trimmed = jnp.concatenate(
+        [
+            new_start_point[None, :],
+            p_pts[start_diff_idx + 1 : stop_diff_idx + 1],
+            new_stop_point[None, :],
+        ]
+    )
+    tn = to_numpy(trimmed)
+    keep = np.concatenate(([True], np.any(np.diff(tn, axis=0) != 0, axis=1)))
+    trimmed = trimmed[np.nonzero(keep)[0]]
+    return Path(
+        trimmed,
+        start_angle=p_sec.start_angle if i0 == 0 else None,
+        end_angle=p_sec.end_angle if i1 == 0 else None,
+    )
 
 
 def extrude_transition(
@@ -1391,7 +1088,7 @@ def extrude_transition(
     Args:
         p: Path to extrude.
         transition: Transition or TransitionAsymmetric object describing the cross-sections and default transition types.
-        all_angle: if True, returns a ComponentAllAngle.
+        all_angle: kept for API compatibility.
 
     Returns:
         Component: The extruded component with the specified transition methods for each edge.
@@ -1407,19 +1104,15 @@ def extrude_transition(
 
     x1 = get_cross_section(transition.cross_section1)
     x2 = get_cross_section(transition.cross_section2)
-    # Support different transition methods for points1 and points2 in case of asymmetric transition
     if isinstance(transition, TransitionAsymmetric):
         width_type1 = transition.width_type1
         width_type2 = transition.width_type2
         offset_type1 = transition.offset_type1
         offset_type2 = transition.offset_type2
-    elif isinstance(transition, Transition):
-        width_type1 = transition.width_type
-        width_type2 = transition.width_type
-        offset_type1 = transition.offset_type
-        offset_type2 = transition.offset_type
+    else:
+        width_type1 = width_type2 = transition.width_type
+        offset_type1 = offset_type2 = transition.offset_type
 
-    # if named, prefer name over layer
     named_sections1 = _get_named_sections(x1.sections)
     named_sections2 = _get_named_sections(x2.sections)
 
@@ -1443,95 +1136,42 @@ def extrude_transition(
             f"transition() found no common section names X1 {names1} and X2 {names2}"
         )
 
-    # Compute relative distance of points along path p
-    dx = np.diff(p.points[:, 0])
-    dy = np.diff(p.points[:, 1])
-    lengths = np.cumsum(np.sqrt(dx**2 + dy**2))
-    path_length = float(np.round(lengths[-1], 3))
-    lengths = np.concatenate([[0], lengths]) / lengths[-1]
+    lengths_abs = _cumulative_lengths(p.points)
+    path_length = round_st(lengths_abs[-1], 3)
+    lengths = lengths_abs / lengths_abs[-1]
 
-    for section_name in common_sections:
+    def _make(kind: Any, v1: Any, v2: Any) -> Callable[[Any], Any]:
+        if kind == "linear":
+            return _linear_transition(v1, v2)
+        if kind == "sine":
+            return _sinusoidal_transition(v1, v2)
+        if kind == "parabolic":
+            return _parabolic_transition(v1, v2)
+        if callable(kind):
+            return lambda t: kind(t, v1, v2)
+        raise NotImplementedError
+
+    # deterministic order (set iteration order is arbitrary)
+    for section_name in [n for n in names1 if n in common_sections]:
         section1 = named_sections1[section_name]
         section2 = named_sections2[section_name]
         port_names = section1.port_names
         port_types = section1.port_types
 
-        offset1 = section1.offset
-        offset2 = section2.offset
-        width1 = section1.width
-        width2 = section2.width
+        offset1, offset2 = section1.offset, section2.offset
+        width1, width2 = section1.width, section2.width
 
-        # Transition for points1 (lower edge)
-        if offset_type1 == "linear":
-            offset_func1 = _linear_transition(offset1, offset2)
-        elif offset_type1 == "sine":
-            offset_func1 = _sinusoidal_transition(offset1, offset2)
-        elif offset_type1 == "parabolic":
-            offset_func1 = _parabolic_transition(offset1, offset2)
-        elif callable(offset_type1):
-
-            def _offset_func1(
-                t: T, offset1: float = offset1, offset2: float = offset2
-            ) -> T:
-                return cast("T", offset_type1(t, offset1, offset2))  # type: ignore[misc,arg-type]
-
-            offset_func1 = _offset_func1
-        else:
-            raise NotImplementedError
-
-        if width_type1 == "linear":
-            width_func1 = _linear_transition(width1, width2)
-        elif width_type1 == "sine":
-            width_func1 = _sinusoidal_transition(width1, width2)
-        elif width_type1 == "parabolic":
-            width_func1 = _parabolic_transition(width1, width2)
-        elif callable(width_type1):
-
-            def _width_func1(t: T, width1: float = width1, width2: float = width2) -> T:
-                return cast("T", width_type1(t, width1, width2))  # type: ignore[misc,arg-type]
-
-            width_func1 = _width_func1
-        else:
-            raise NotImplementedError
-
-        # Transition for points2 (upper edge)
-        if offset_type2 == "linear":
-            offset_func2 = _linear_transition(offset1, offset2)
-        elif offset_type2 == "sine":
-            offset_func2 = _sinusoidal_transition(offset1, offset2)
-        elif offset_type2 == "parabolic":
-            offset_func2 = _parabolic_transition(offset1, offset2)
-        elif callable(offset_type2):
-
-            def _offset_func2(
-                t: T, offset1: float = offset1, offset2: float = offset2
-            ) -> T:
-                return cast("T", offset_type2(t, offset1, offset2))  # type: ignore[misc,arg-type]
-
-            offset_func2 = _offset_func2
-        else:
-            raise NotImplementedError
-
-        if width_type2 == "linear":
-            width_func2 = _linear_transition(width1, width2)
-        elif width_type2 == "sine":
-            width_func2 = _sinusoidal_transition(width1, width2)
-        elif width_type2 == "parabolic":
-            width_func2 = _parabolic_transition(width1, width2)
-        elif callable(width_type2):
-
-            def _width_func2(t: T, width1: float = width1, width2: float = width2) -> T:
-                return cast("T", width_type2(t, width1, width2))  # type: ignore[misc,arg-type]
-
-            width_func2 = _width_func2
-        else:
-            raise NotImplementedError
+        offset_func1 = _make(offset_type1, offset1, offset2)
+        width_func1 = _make(width_type1, width1, width2)
+        offset_func2 = _make(offset_type2, offset1, offset2)
+        width_func2 = _make(width_type2, width1, width2)
 
         layer1 = get_layer(section1.layer)
         layer2 = get_layer(section2.layer)
         if layer1 != layer2:
             hidden = True
             layers = [layer1, layer2]
+            layer = layer1
         else:
             hidden = section1.hidden
             layer = layer1
@@ -1551,7 +1191,6 @@ def extrude_transition(
             start_angle=start_angle,
             end_angle=end_angle,
         )
-
         points2 = p.centerpoint_offset_curve(
             points,
             offset_distance=offset_value2 - width_value2 / 2,
@@ -1564,131 +1203,109 @@ def extrude_transition(
             points1 = _simplify(points1, tolerance=tolerance)
             points2 = _simplify(points2, tolerance=tolerance)
 
-        # Join points together
-        points_poly = np.concatenate([points1, points2[::-1, :]])
+        points_poly = jnp.concatenate([points1, points2[::-1, :]])
 
-        if not hidden and path_length > 1e-3:
+        if not hidden and to_float(path_length) > 1e-3:
             c.add_polygon(points_poly, layer=layer)
 
-        # Add port_names if they were specified
+        offset_arr = jnp.broadcast_to(asarray(offset_value1), lengths.shape)
         if port_names[0] is not None:
-            port_width = width1
-            port_orientation = (p.start_angle + 180) % 360
-            assert not isinstance(offset_value1, float)
             center = p.centerpoint_offset_curve(
                 points[:2],
-                offset_distance=cast(Sequence[float], offset_value1)[:2],
+                offset_distance=offset_arr[:2],
                 start_angle=start_angle,
                 end_angle=None,
             )[0]
-
             c.add_port(
                 name=port_names[0],
                 layer=get_layer(layers[0]),
                 port_type=port_types[0],
-                width=port_width,
-                orientation=port_orientation,
+                width=width1,
+                orientation=_mod360(p.start_angle + 180),
                 center=center,
                 cross_section=x1,
             )
         if port_names[1] is not None:
-            port_width = width2
-            port_orientation = (p.end_angle) % 360
-            assert not isinstance(offset_value1, float)
             center = p.centerpoint_offset_curve(
                 points[-2:],
-                offset_distance=cast(Sequence[float], offset_value1)[-2:],
+                offset_distance=offset_arr[-2:],
                 start_angle=None,
                 end_angle=end_angle,
             )[-1]
-
             c.add_port(
                 name=port_names[1],
                 layer=get_layer(layers[1]),
                 port_type=port_types[1],
-                width=port_width,
+                width=width2,
                 center=center,
-                orientation=port_orientation,
+                orientation=_mod360(p.end_angle),
                 cross_section=x2,
             )
 
-    c.info["length"] = float(np.round(p.length(), 3))
+    c.info["length"] = round_st(p.length_exact(), 3)
     return c
 
 
-def _compute_offset_directions(
-    points: npt.NDArray[np.floating[Any]],
-) -> tuple[
-    npt.NDArray[np.floating[Any]],
-    npt.NDArray[np.floating[Any]],
-    npt.NDArray[np.floating[Any]],
-]:
+def _compute_offset_directions(points: Array) -> tuple[Array, Array, Array]:
     """Pre-compute direction vectors for centerpoint offset curves.
 
     Returns (cos_theta_mid, sin_theta_mid, sin_half_dtheta_int).
     """
-    dx = np.diff(points[:, 0])
-    dy = np.diff(points[:, 1])
-    theta = np.unwrap(np.arctan2(dy, dx))
-    theta = np.concatenate([theta[:1], theta, theta[-1:]])
-    theta_mid = (np.pi + theta[1:] + theta[:-1]) / 2
-    dtheta_int = np.pi + theta[:-1] - theta[1:]
-    sin_half = np.sin(dtheta_int / 2)
-    return np.cos(theta_mid), np.sin(theta_mid), sin_half
+    points = asarray(points)
+    dx = jnp.diff(points[:, 0])
+    dy = jnp.diff(points[:, 1])
+    theta = jnp.unwrap(jnp.arctan2(dy, dx))
+    theta = jnp.concatenate([theta[:1], theta, theta[-1:]])
+    theta_mid = (jnp.pi + theta[1:] + theta[:-1]) / 2
+    dtheta_int = jnp.pi + theta[:-1] - theta[1:]
+    sin_half = jnp.sin(dtheta_int / 2)
+    return jnp.cos(theta_mid), jnp.sin(theta_mid), sin_half
 
 
 def _offset_curve_from_directions(
-    points: npt.NDArray[np.floating[Any]],
-    offset_distance: float | Sequence[float] | npt.NDArray[np.floating[Any]],
-    cos_theta_mid: npt.NDArray[np.floating[Any]],
-    sin_theta_mid: npt.NDArray[np.floating[Any]],
-    sin_half_dtheta_int: npt.NDArray[np.floating[Any]],
-    start_angle: float | None = None,
-    end_angle: float | None = None,
-) -> npt.NDArray[np.floating[Any]]:
-    """Single offset curve from pre-computed direction vectors.
-
-    Equivalent to calling ``centerpoint_offset_curve`` but avoids
-    recomputing the direction trig.
-    """
-    new_points = points.copy()
-    offset_array = offset_distance / sin_half_dtheta_int
-
-    new_points[:, 0] -= offset_array * cos_theta_mid
-    new_points[:, 1] -= offset_array * sin_theta_mid
+    points: Array,
+    offset_distance: Any,
+    cos_theta_mid: Array,
+    sin_theta_mid: Array,
+    sin_half_dtheta_int: Array,
+    start_angle: Any = None,
+    end_angle: Any = None,
+) -> Array:
+    """Single offset curve from pre-computed direction vectors."""
+    offset_array = jnp.broadcast_to(
+        asarray(offset_distance) / sin_half_dtheta_int, sin_half_dtheta_int.shape
+    )
+    new_x = points[:, 0] - offset_array * cos_theta_mid
+    new_y = points[:, 1] - offset_array * sin_theta_mid
+    new_points = jnp.stack([new_x, new_y], axis=1)
 
     if start_angle is not None:
-        sa = start_angle * np.pi / 180
-        sin_sa, cos_sa = np.sin(sa), np.cos(sa)
-        new_points[0, :] = points[0, :] + (
-            sin_sa * offset_array[0],
-            -cos_sa * offset_array[0],
+        sa = start_angle * jnp.pi / 180
+        first = points[0, :] + jnp.stack(
+            [jnp.sin(sa) * offset_array[0], -jnp.cos(sa) * offset_array[0]]
         )
+        new_points = new_points.at[0, :].set(first)
 
     if end_angle is not None:
-        ea = end_angle * np.pi / 180
-        sin_ea, cos_ea = np.sin(ea), np.cos(ea)
-        new_points[-1, :] = points[-1, :] + (
-            sin_ea * offset_array[-1],
-            -cos_ea * offset_array[-1],
+        ea = end_angle * jnp.pi / 180
+        last = points[-1, :] + jnp.stack(
+            [jnp.sin(ea) * offset_array[-1], -jnp.cos(ea) * offset_array[-1]]
         )
+        new_points = new_points.at[-1, :].set(last)
 
     return new_points
 
 
 def _apply_offsets(
-    points: npt.NDArray[np.floating[Any]],
-    offset_distance1: float | Sequence[float] | npt.NDArray[np.floating[Any]],
-    offset_distance2: float | Sequence[float] | npt.NDArray[np.floating[Any]],
-    cos_theta_mid: npt.NDArray[np.floating[Any]],
-    sin_theta_mid: npt.NDArray[np.floating[Any]],
-    sin_half_dtheta_int: npt.NDArray[np.floating[Any]],
-    start_angle: float | None = None,
-    end_angle: float | None = None,
-) -> tuple[
-    npt.NDArray[np.floating[Any]],
-    npt.NDArray[np.floating[Any]],
-]:
+    points: Array,
+    offset_distance1: Any,
+    offset_distance2: Any,
+    cos_theta_mid: Array,
+    sin_theta_mid: Array,
+    sin_half_dtheta_int: Array,
+    start_angle: Any = None,
+    end_angle: Any = None,
+) -> tuple[Array, Array]:
     return (
         _offset_curve_from_directions(
             points,
@@ -1711,95 +1328,67 @@ def _apply_offsets(
     )
 
 
-def _rotated_delta(
-    point: npt.NDArray[np.floating[Any]],
-    center: npt.NDArray[np.floating[Any]],
-    orientation: AngleInDegrees,
-) -> npt.NDArray[np.floating[Any]]:
-    """Gets the rotated distance of a point from a center.
-
-    Args:
-        point: the initial point.
-        center: a center point to use as a reference.
-        orientation: the rotation, in degrees.
-
-    Returns: the normalized delta between the point and center, accounting for rotation
-    """
-    ca = np.cos(orientation * np.pi / 180)
-    sa = np.sin(orientation * np.pi / 180)
-    rot_mat = np.array([[ca, -sa], [sa, ca]])
-    delta = point - center
-    return np.array(np.dot(delta, rot_mat))
+def _rotated_delta(point: Any, center: Any, orientation: AngleInDegrees) -> Array:
+    """Gets the rotated distance of a point from a center."""
+    ca = jnp.cos(orientation * jnp.pi / 180)
+    sa = jnp.sin(orientation * jnp.pi / 180)
+    rot_mat = jnp.stack([jnp.stack([ca, -sa]), jnp.stack([sa, ca])])
+    delta = asarray(point) - asarray(center)
+    return delta @ rot_mat
 
 
 def _cut_path_with_ray(
-    start_point: npt.NDArray[np.floating[Any]],
+    start_point: Any,
     start_angle: float | None,
-    end_point: npt.NDArray[np.floating[Any]],
+    end_point: Any,
     end_angle: float | None,
-    path: npt.NDArray[np.floating[Any]],
-) -> npt.NDArray[np.float64]:
-    """Cuts or extends floating[Any] path given a point and angle to project."""
+    path: Any,
+) -> Array:
+    """Cuts or extends a path given a point and angle to project (non-differentiable)."""
     import shapely.geometry as sg
     import shapely.ops
 
-    # a distance to approximate infinity to find ray-segment intersections
+    path = to_numpy(path)
+    start_point = to_numpy(start_point)
+    end_point = to_numpy(end_point)
     far_distance = 10000
 
     path_cmp = np.copy(path)
-    # pad start
     dp = path[0] - path[1]
-    d_ext = far_distance / np.sqrt(np.sum(dp**2)) * np.array([dp[0], dp[1]])
-    path_cmp[0] += d_ext
-    # pad end
+    path_cmp[0] += far_distance / np.sqrt(np.sum(dp**2)) * dp
     dp = path[-1] - path[-2]
-    d_ext = far_distance / np.sqrt(np.sum(dp**2)) * np.array([dp[0], dp[1]])
-    path_cmp[-1] += d_ext
+    path_cmp[-1] += far_distance / np.sqrt(np.sum(dp**2)) * dp
 
     intersections = [sg.Point(path[0]), sg.Point(path[-1])]
     distances: list[float] = []
     ls = sg.LineString(path_cmp)
     for i, angle, point in [(0, start_angle, start_point), (1, end_angle, end_point)]:
         if angle:
-            # get intersection
-            angle_rad = np.deg2rad(angle)
-            dx_far = np.cos(angle_rad) * far_distance
-            dy_far = np.sin(angle_rad) * far_distance
-            d_far = np.array([dx_far, dy_far])
+            angle_rad = np.deg2rad(to_float(angle))
+            d_far = np.array([np.cos(angle_rad), np.sin(angle_rad)]) * far_distance
             ls_ray = sg.LineString([point - d_far, point + d_far])
             intersection = ls.intersection(ls_ray)
-
             if not isinstance(intersection, sg.Point):
                 if not isinstance(intersection, sg.MultiPoint):
                     raise ValueError(
                         f"Expected intersection to be a point, but got {intersection}"
                     )
-                _, nearest = shapely.ops.nearest_points(sg.Point(point), intersection)
-                intersection = nearest
+                _, intersection = shapely.ops.nearest_points(sg.Point(point), intersection)
             intersections[i] = intersection
         else:
             intersection = intersections[i]
-        distance = ls.project(intersection)
-        distances.append(distance)
-    # when trimming the start, start counting at the intersection point, then
-    # add all subsequent points
+        distances.append(ls.project(intersection))
     points = [np.array(intersections[0].coords[0])]
     points.extend(
-        [
-            np.array(point)
-            for point in path[1:-1]
-            if distances[0] < ls.project(sg.Point(point)) < distances[1]
-        ]
+        np.array(point)
+        for point in path[1:-1]
+        if distances[0] < ls.project(sg.Point(point)) < distances[1]
     )
     points.append(np.array(intersections[1].coords[0]))
-    return np.array(points)
+    return asarray(np.array(points))
 
 
 # Floor on the angular resolution of an auto-computed bend, in degrees per point.
-# The arc-length based npoints formula underflows for small radii, so a tight bend
-# would otherwise collapse to a 2-point chord (#4557). This floor keeps it curved.
-# It is bounded (<= 360 / _MAX_DEG_PER_BEND_POINT points per turn) so it can't blow
-# up near angle=0, unlike the inverted 360 / abs(angle) floor removed in #4337.
 _MAX_DEG_PER_BEND_POINT = 5.0
 
 
@@ -1824,20 +1413,12 @@ def arc(
         start_angle: initial angle of the curve for drawing, default -90 degrees.
         angular_step: If provided, determines the angular step (in degrees) between points. \
                 This overrides npoints calculation.
-
-    Example:
-        ```python
-        import gdsfactory as gf
-
-        p = gf.path.arc(radius=10, angle=45)
-        p.plot()
-        ```
     """
     from gdsfactory.pdk import get_active_pdk
 
     PDK = get_active_pdk()
 
-    if not radius:
+    if radius is None or (not is_tracer(radius) and not radius):
         raise ValueError("arc() requires a radius argument")
 
     if npoints is not None and angular_step is not None:
@@ -1846,23 +1427,23 @@ def arc(
             "Use angular_step for angular discretization."
         )
 
+    angle_f = to_float(angle)
     if angular_step is not None:
-        npoints = math.ceil(abs(angle / angular_step)) + 1
+        npoints = math.ceil(abs(angle_f / to_float(angular_step))) + 1
     elif not npoints:
-        npoints = int(abs(angle) / 360 * radius / PDK.bend_points_distance / 2)
-        npoints = max(npoints, _bend_npoints_floor(angle), 2)
+        npoints = int(abs(angle_f) / 360 * to_float(radius) / PDK.bend_points_distance / 2)
+        npoints = max(npoints, _bend_npoints_floor(angle_f), 2)
     else:
         npoints = max(int(npoints), 2)
 
-    t = np.linspace(
-        start_angle * np.pi / 180, (angle + start_angle) * np.pi / 180, npoints
+    t = jnp.linspace(
+        start_angle * jnp.pi / 180, (angle + start_angle) * jnp.pi / 180, npoints
     )
-    x = radius * np.cos(t)
-    y = radius * (np.sin(t) + 1)
-    points = np.array((x, y)).T * np.sign(angle)
+    x = radius * jnp.cos(t)
+    y = radius * (jnp.sin(t) + 1)
+    points = jnp.stack([x, y]).T * np.sign(angle_f)
 
     path = Path()
-    # Manually add points & adjust start and end angles
     path.points = points
     path.start_angle = start_angle + 90
     path.end_angle = start_angle + angle + 90
@@ -1873,44 +1454,48 @@ _SQRT_HALF_PI: float = float(np.sqrt(np.pi / 2))
 _SQRT_2_OVER_PI: float = float(np.sqrt(2 / np.pi))
 
 
-def _fresnel_scipy(t: npt.NDArray[np.floating]) -> npt.NDArray[np.floating]:
-    """Evaluate Fresnel integrals via scipy.special.fresnel.
-
-    Args:
-        t: 1-D array of normalised clothoid parameter values.
-
-    Returns:
-        Array of shape (2, len(t)): [x_coords, y_coords].
-    """
+def _scipy_fresnel(z: npt.NDArray[np.float64]) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
     from scipy.special import fresnel
 
+    s, c = fresnel(np.asarray(z, dtype=np.float64))
+    return np.asarray(s, dtype=np.float64), np.asarray(c, dtype=np.float64)
+
+
+@jax.custom_jvp
+def fresnel(z: Array) -> tuple[Array, Array]:
+    """Differentiable Fresnel integrals (S(z), C(z)) = scipy.special.fresnel(z)."""
+    shape = jax.ShapeDtypeStruct(jnp.shape(z), jnp.float64)
+    return jax.pure_callback(_scipy_fresnel, (shape, shape), z, vmap_method="expand_dims")
+
+
+@fresnel.defjvp
+def _fresnel_jvp(primals: tuple[Array], tangents: tuple[Array]) -> tuple[Any, Any]:
+    (z,) = primals
+    (dz,) = tangents
+    s, c = fresnel(z)
+    arg = jnp.pi * z**2 / 2
+    return (s, c), (jnp.sin(arg) * dz, jnp.cos(arg) * dz)
+
+
+def _fresnel_xy(t: Array) -> Array:
+    """[x, y] of the normalised clothoid for parameter values t."""
     sin_fresnel, cos_fresnel = fresnel(t * _SQRT_2_OVER_PI)
-    return np.array([cos_fresnel * _SQRT_HALF_PI, sin_fresnel * _SQRT_HALF_PI])
+    return jnp.stack([cos_fresnel * _SQRT_HALF_PI, sin_fresnel * _SQRT_HALF_PI])
 
 
-def _fresnel(
-    R0: float, s: float, num_pts: int, n_iter: int = 8
-) -> npt.NDArray[np.floating]:
-    """Fresnel integral using scipy.
-
-    The n_iter parameter is accepted for compatibility but ignored.
-    """
-    t = np.linspace(0, s / float(np.sqrt(2) * R0), num_pts)
-    return cast("npt.NDArray[np.floating]", np.sqrt(2) * R0 * _fresnel_scipy(t))
+def _fresnel(R0: float, s: Any, num_pts: int, n_iter: int = 8) -> Array:
+    """Clothoid points with uniform arc-length sampling."""
+    t = jnp.linspace(0, s / (np.sqrt(2) * R0), num_pts)
+    return np.sqrt(2) * R0 * _fresnel_xy(t)
 
 
-def _fresnel_angular(
-    R0: float, s: float, num_pts: int, n_iter: int = 8
-) -> npt.NDArray[np.floating]:
-    """Fresnel integral with uniform angular sampling via scipy.
-
-    The n_iter parameter is accepted for compatibility but ignored.
-    """
-    t_max = s / float(np.sqrt(2) * R0)
+def _fresnel_angular(R0: float, s: Any, num_pts: int, n_iter: int = 8) -> Array:
+    """Clothoid points with uniform angular sampling."""
+    t_max = s / (np.sqrt(2) * R0)
     theta_max = t_max**2 / 2
-    thetas = np.linspace(0, theta_max, num_pts)
-    t = np.sqrt(2 * thetas)
-    return cast("npt.NDArray[np.floating]", np.sqrt(2) * R0 * _fresnel_scipy(t))
+    thetas = jnp.linspace(0, theta_max, num_pts)
+    t = jnp.sqrt(2 * thetas)
+    return np.sqrt(2) * R0 * _fresnel_xy(t)
 
 
 def euler(
@@ -1939,14 +1524,6 @@ def euler(
         npoints: Number of points used per 360 degrees.
         angular_step: If provided, determines the angular step (in degrees) between points. \
                 This overrides npoints calculation.
-
-    Example:
-        ```python
-        import gdsfactory as gf
-
-        p = gf.path.euler(radius=10, angle=45, p=1, use_eff=True, npoints=720)
-        p.plot()
-        ```
     """
     from gdsfactory.pdk import get_active_pdk
 
@@ -1956,60 +1533,52 @@ def euler(
             "Use angular_step for angular discretization."
         )
 
-    if not radius:
+    if radius is None or (not is_tracer(radius) and not radius):
         raise ValueError("euler() requires a radius argument")
 
-    if (p < 0) or (p > 1):
+    p_f = to_float(p)
+    if (p_f < 0) or (p_f > 1):
         raise ValueError(f"euler requires argument `p` be between 0 and 1. Got {p}")
-    if p == 0:
+    if p_f == 0:
         path = arc(radius, angle, npoints=npoints, angular_step=angular_step)
         path.info["Reff"] = radius
         path.info["Rmin"] = radius
         return path
 
-    if angle < 0:
+    angle_f = to_float(angle)
+    if angle_f < 0:
         mirror = True
-        angle = np.abs(angle)
+        angle = -angle
+        angle_f = -angle_f
     else:
         mirror = False
 
     R0 = 1
-    alpha = np.radians(angle)
-    sp = float(R0 * np.sqrt(p * alpha))
-    # Rp = inf at alpha=0, but all usages are guarded by is_small_angle
-    with np.errstate(divide="ignore"):
-        Rp = R0 / np.sqrt(p * alpha)
+    alpha = jnp.radians(asarray(angle))
+    sp = R0 * jnp.sqrt(p * alpha)
+    is_small_angle = abs(angle_f) <= 1e-6
+    Rp = R0 / jnp.sqrt(p * alpha) if not is_small_angle else asarray(np.inf)
 
     pdk = get_active_pdk()
     if angular_step is not None:
-        npoints = math.ceil(abs(angle / angular_step)) + 1
-        # For angular discretization, distribute points based on angle proportion
-        euler_angle = p * angle / 2  # Angle covered by each Euler section
-        arc_angle = (
-            (1 - p) * angle / 2
-        )  # Angle covered by arc section (half, then mirrored)
-        num_pts_euler = max(2, math.ceil(euler_angle / angular_step))
-        num_pts_arc = max(2, math.ceil(arc_angle / angular_step) + 1)
-        npoints = (
-            2 * num_pts_euler + num_pts_arc - 2
-        )  # Total points (avoiding duplicates)
+        step = to_float(angular_step)
+        euler_angle = p_f * angle_f / 2
+        arc_angle = (1 - p_f) * angle_f / 2
+        num_pts_euler = max(2, math.ceil(euler_angle / step))
+        num_pts_arc = max(2, math.ceil(arc_angle / step) + 1)
+        npoints = 2 * num_pts_euler + num_pts_arc - 2
     else:
         if not npoints:
-            npoints = abs(int(angle / 360 * radius / pdk.bend_points_distance / 2))
-            npoints = max(npoints, _bend_npoints_floor(angle), 2)
+            npoints = abs(int(angle_f / 360 * to_float(radius) / pdk.bend_points_distance / 2))
+            npoints = max(npoints, _bend_npoints_floor(angle_f), 2)
         else:
             npoints = max(int(npoints), 2)
-        # Use simplified form: sp/(s0/2) = 2p/(p+1), avoids 0/0 at alpha=0
-        num_pts_euler = int(np.round(2 * p / (p + 1) * npoints))
+        num_pts_euler = int(np.round(2 * p_f / (p_f + 1) * npoints))
         num_pts_arc = npoints - num_pts_euler
 
-    # Ensure a minimum of 2 points for each euler/arc section
     if npoints <= 2:
         num_pts_euler = 0
         num_pts_arc = 2
-
-    # Small angle threshold in degrees (matches arc() convention)
-    is_small_angle = abs(angle) <= 1e-6
 
     if num_pts_euler > 0:
         if angular_step is not None:
@@ -2017,69 +1586,55 @@ def euler(
         else:
             xbend1, ybend1 = _fresnel(R0, sp, num_pts_euler)
         xp, yp = xbend1[-1], ybend1[-1]
-        # Sinc-based formulas avoid Rp*sin (inf*0 at alpha=0)
-        # Rp * sin(p*a/2) = sp/2 * sinc(p*a/(2*pi))
-        # Rp * (1-cos(p*a/2)) = (sp^3/8) * sinc^2(p*a/(4*pi))  [using 1-cos=2sin^2]
-        # Using sinc(2x) = sinc(x)*cos(pi*x) to compute both from one sinc call
-        sinc_quarter = np.sinc(p * alpha / (4 * np.pi))
-        dx = xp - sp / 2 * sinc_quarter * np.cos(p * alpha / 4)
+        sinc_quarter = jnp.sinc(p * alpha / (4 * jnp.pi))
+        dx = xp - sp / 2 * sinc_quarter * jnp.cos(p * alpha / 4)
         dy = yp - (sp**3 / 8) * sinc_quarter**2
     else:
-        xbend1 = ybend1 = np.asarray([], dtype=float)
-        dx = 0
-        dy = 0
+        xbend1 = ybend1 = jnp.zeros((0,))
+        dx = 0.0
+        dy = 0.0
 
     if not is_small_angle:
         if angular_step is not None:
-            # Original angular_step behavior (different from npoints mode)
             arc_angle_section = alpha * (1 - p) / 2
-            theta = np.linspace(0, arc_angle_section, num_pts_arc)
+            theta = jnp.linspace(0, arc_angle_section, num_pts_arc)
             arc_angles = theta + p * alpha / 2
         else:
-            # Direct linspace replaces: s = linspace(sp, s0/2), arc_angles = (s-sp)*sqrt(p*a)/R0 + p*a/2
-            arc_angles = np.linspace(p * alpha / 2, alpha / 2, num_pts_arc)
-        xbend2 = Rp * np.sin(arc_angles) + dx
-        ybend2 = Rp * (1 - np.cos(arc_angles)) + dy
+            arc_angles = jnp.linspace(p * alpha / 2, alpha / 2, num_pts_arc)
+        xbend2 = Rp * jnp.sin(arc_angles) + dx
+        ybend2 = Rp * (1 - jnp.cos(arc_angles)) + dy
     else:
-        # Limit is 0 by L'Hopital: Rp*sin(t) ~ sin(a)/sqrt(a) -> 0
-        xbend2 = np.zeros(num_pts_arc) + dx
-        # Limit is 0: Rp*(1-cos(t)) ~ (1/sqrt(a))*(a^2/2) = a^(3/2)/2 -> 0
-        ybend2 = np.zeros(num_pts_arc) + dy
+        xbend2 = jnp.zeros(num_pts_arc) + dx
+        ybend2 = jnp.zeros(num_pts_arc) + dy
 
-    x = np.concatenate([xbend1, xbend2[1:]])
-    y = np.concatenate([ybend1, ybend2[1:]])
-    points1 = np.array([x, y]).T
-    points2 = np.flipud(np.array([x, -y]).T)
+    x = jnp.concatenate([xbend1, xbend2[1:]])
+    y = jnp.concatenate([ybend1, ybend2[1:]])
+    points1 = jnp.stack([x, y]).T
+    points2 = jnp.flipud(jnp.stack([x, -y]).T)
 
     points2 = rotate_points(points2, angle - 180)
-    points2 += -points2[0, :] + points1[-1, :]
+    points2 = points2 - points2[0, :] + points1[-1, :]
 
-    # Use [:-1] to remove duplicate junction point, but [:None] if only 1 point
-    points = np.concatenate([points1[: -1 if len(points1) > 1 else None], points2])
+    points = jnp.concatenate([points1[: -1 if len(points1) > 1 else None], points2])
 
-    # Find y-axis intersection point to compute Reff
-    start_angle = 180 * (angle < 0)
+    start_angle = 0.0
     end_angle = start_angle + angle
 
     if is_small_angle:
-        # Degenerate case: curve collapses to a point, radius is infinite
-        Reff = np.inf
-        Rmin = np.inf
-        scale = 0.0
+        Reff: Any = np.inf
+        Rmin: Any = np.inf
+        scale: Any = 0.0
     else:
-        dy = np.tan(np.radians(end_angle - 90)) * points[-1][0]
-        Reff = points[-1][1] - dy
+        dyy = jnp.tan(jnp.radians(end_angle - 90)) * points[-1][0]
+        Reff = points[-1][1] - dyy
         Rmin = Rp
-        # Fix degenerate condition at angle == 180
-        if np.abs(180 - angle) < 1e-3:
+        if abs(180 - angle_f) < 1e-3:
             Reff = points[-1][1] / 2
         scale = radius / Reff if use_eff else radius / Rmin
 
-    points *= scale
+    points = points * scale
 
     path = Path()
-
-    # Manually add points & adjust start and end angles
     path.points = points
     path.start_angle = start_angle
     path.end_angle = end_angle
@@ -2094,22 +1649,10 @@ def _find_root_in_range(
     equation: Callable[[float], float],
     variable_range: tuple[float, float],
 ) -> tuple[float, float]:
-    """Find a root of `equation` within the given range using Brent's method.
+    """Find a root of `equation` within the given range using Brent's method."""
+    from scipy import optimize
 
-    Falls back to a coarse scan if the initial bracket has no sign change.
-
-    Args:
-        equation: a scalar function f(x) whose zero is sought.
-        variable_range: (lower, upper) bounds for the search.
-
-    Returns:
-        (root, residual): the found root and the constraint value at it.
-
-    Raises:
-        RuntimeError: if no sign change is found within the range.
-    """
     var_lo, var_hi = variable_range
-
     try:
         root = float(optimize.brentq(equation, var_lo, var_hi, xtol=1e-9, maxiter=500))
     except ValueError:
@@ -2126,7 +1669,6 @@ def _find_root_in_range(
                 equation, x_vals[sign_changes[0]], x_vals[sign_changes[0] + 1]
             )
         )
-
     return root, float(equation(root))
 
 
@@ -2136,26 +1678,15 @@ def _topic_theta_of_s(s: float, Rc: float, theta_p: float) -> float:
 
 
 def _topic_compute_x0_y0(Rc: float, theta_p: float) -> tuple[float, float]:
-    """Numerically integrate the Fresnel-like integrals for a given Rc.
-
-    Args:
-        Rc: minimum radius of curvature.
-        theta_p: transition angle in radians (= p * theta_t).
-
-    Returns:
-        (x0, y0): center of the circular arc segment.
-    """
     from scipy import integrate
 
     s_max = 2 * Rc * theta_p
-
     x0_int, _ = integrate.quad(
         lambda s: np.cos(_topic_theta_of_s(s, Rc, theta_p)), 0, s_max
     )
     y0_int, _ = integrate.quad(
         lambda s: np.sin(_topic_theta_of_s(s, Rc, theta_p)), 0, s_max
     )
-
     x0 = x0_int - Rc * np.sin(theta_p)
     y0 = y0_int + Rc * np.cos(theta_p)
     return x0, y0
@@ -2164,140 +1695,84 @@ def _topic_compute_x0_y0(Rc: float, theta_p: float) -> tuple[float, float]:
 def _topic_compute_top_coordinates(
     Rc: float, theta_p: float, n_points: int = 300
 ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
-    """Compute (x, y) along the TOP spiral section via Eq. 6 of the paper.
-
-    Integrates:
-        x(l) = integral_0^l cos(theta(s)) ds
-        y(l) = integral_0^l sin(theta(s)) ds
-
-    where theta(s) = (4*Rc*theta_p*s^3 - s^4) / (16 * Rc^4 * theta_p^3)
-    and l ranges from 0 to 2*Rc*theta_p.
-
-    Args:
-        Rc: minimum radius of curvature (from solver).
-        theta_p: transition angle in radians (= p * theta_t).
-        n_points: number of sample points along the curve.
-
-    Returns:
-        x_top: x coordinates.
-        y_top: y coordinates.
-    """
     from scipy import integrate
 
     l_max = 2 * Rc * theta_p
-
     l_vals = np.linspace(0, l_max, n_points)
     theta_vals = np.array([_topic_theta_of_s(s, Rc, theta_p) for s in l_vals])
-
     x_top = integrate.cumulative_trapezoid(np.cos(theta_vals), l_vals, initial=0)
     y_top = integrate.cumulative_trapezoid(np.sin(theta_vals), l_vals, initial=0)
-
     return x_top, y_top
 
 
 def topic(
     radius: float = 10.0, angle: float = 90.0, p: float = 0.1, npoints: int = 100
 ) -> Path:
-    """Returns a Third Order Polynomial Interconnected Circular (TOPIC) bend, as described in this publication https://arxiv.org/html/2411.15025v1.
+    """Returns a Third Order Polynomial Interconnected Circular (TOPIC) bend.
 
-    The bend consists of three parts:
-    a. Initial transition from straight to bend, known as TOP segment.
-    b. Circular part whose center and radius are calculated analytically.
-    c. Mirroring of TOP segment with respect to the bisection of the angle.
+    See https://arxiv.org/html/2411.15025v1.
 
-    The implementation consists of 5 parts.
-    1. Define transition angle as p*angle.
-    2. Calculate the center, (x0, y0), radius (Rc) and angle (angle*(1-2*p)) of the circular path.
-    3. Generate TOP segment.
-    4. Generate circular segment, starting from the end of TOP with center (x0, y0), radius Rc, and angle = angle(1-2*p)
-    5. Generate TOP' segment by mirroring TOP with respect to the bisector of the angle.
+    The geometry is computed for a unit radius and scaled, so it is exactly
+    differentiable with respect to ``radius``; ``angle`` and ``p`` are
+    treated as constants (the inner root solve is not differentiated).
 
     Args:
         radius: radius at the start and end of bend.
         angle: total angle of the curve in degrees.
-        p: used to calculate the angle of the bend at the end of TOP / start of circular arc, as p*angle. It should be within [0, 0.5).
+        p: transition fraction in [0, 0.5).
         npoints: Number of points used per 360 degrees.
-
-    Example:
-        ```python
-        import gdsfactory as gf
-
-        p = gf.path.topic(radius=10, angle=110, p=0.1, npoints=720)
-        p.plot()
-        ```
     """
-    if p < 0.0 or p >= 0.5:
+    p_f = to_float(p)
+    angle_f = to_float(angle)
+    if p_f < 0.0 or p_f >= 0.5:
         raise ValueError(
             "The angle of bend during the transition from the TOP segment to the circular is p*angle . "
             "topic() requires the transition angle to be between 0 (circular bend) and 0.5*angle . "
         )
-    if abs(angle) <= 1e-6:
+    if abs(angle_f) <= 1e-6:
         raise ValueError("The bend's total angle should be larger than 1e-6.")
-    if p < 1e-4:
+    if p_f < 1e-4:
         topic_path = arc(radius=radius, angle=angle, npoints=npoints)
         topic_path.end_angle = angle
         topic_path.info["Rmin"] = radius
         return topic_path
 
-    # 1. Define transition angle as p*angle.
-    theta_t = np.radians(angle)
-    theta_p = p * theta_t
+    unit = 1.0
+    theta_t = np.radians(angle_f)
+    theta_p = p_f * theta_t
 
     def constraint(Rc: float) -> float:
-        """Residual of the first equation of the paper: should equal zero."""
         if Rc <= 0:
             return 1e9
         x0, y0 = _topic_compute_x0_y0(Rc, theta_p)
-        return float(x0 * np.cos(theta_t / 2) + (y0 - radius) * np.sin(theta_t / 2))
+        return float(x0 * np.cos(theta_t / 2) + (y0 - unit) * np.sin(theta_t / 2))
 
-    Rc, _ = _find_root_in_range(constraint, (1e-3 * radius, radius))
-
+    Rc, _ = _find_root_in_range(constraint, (1e-3 * unit, unit))
     x0, y0 = _topic_compute_x0_y0(Rc, theta_p)
 
-    # Split number of points between TOP, circular and TOP' sections.
-    # Circular gets the percentage of total points corresponding to its arc length / the arc length if the whole bend was circular
-    n_points_circ = int(npoints * (Rc * (theta_t - 2 * theta_p)) / (radius * theta_t))
+    n_points_circ = int(npoints * (Rc * (theta_t - 2 * theta_p)) / (unit * theta_t))
     n_points_top = max(2, (npoints - n_points_circ) // 2)
-
-    # Add another point to circular arc if there is one left
     if 2 * n_points_top + n_points_circ == npoints - 1:
         n_points_circ += 1
 
-    # 3. Generate TOP segment.
     x_top, y_top = _topic_compute_top_coordinates(Rc, theta_p, n_points=n_points_top)
-
-    # 4. Generate circular segment, starting from the end of TOP with center (x0, y0), radius Rc, and angle = angle(1-2*p)
-    # In order to avoid overlap between TOP's last point and circ first point, ignore the first and last points of the arc.
-    theta_list = np.linspace(
-        start=theta_p,
-        stop=theta_t - theta_p,
-        num=n_points_circ + 2,
-        endpoint=True,  # n_points_circ+2 to avoid the first and last one
-    )
-
+    theta_list = np.linspace(theta_p, theta_t - theta_p, n_points_circ + 2)
     x_arc = np.array([x0 + Rc * np.sin(theta) for theta in theta_list[1:-1]])
     y_arc = np.array([y0 - Rc * np.cos(theta) for theta in theta_list[1:-1]])
 
-    # 5. Generate TOP' segment by mirroring TOP with respect to the bisector of the angle.
-    # The goal is to do a rotation of each point of TOP, centered to (0,radius).
-    dist = np.sqrt(x_top**2 + (radius - y_top) ** 2)
-    thetas = np.asin(np.clip(x_top / dist, -1, 1))
-    # The first point of TOP corresponds to the last point of TOP', this is why we reverse the vectors
-    x_top_prime = dist * np.sin(theta_t - thetas)
-    x_top_prime = x_top_prime[::-1]
-    y_top_prime = radius - dist * np.cos(theta_t - thetas)
-    y_top_prime = y_top_prime[::-1]
+    dist = np.sqrt(x_top**2 + (unit - y_top) ** 2)
+    thetas = np.arcsin(np.clip(x_top / dist, -1, 1))
+    x_top_prime = (dist * np.sin(theta_t - thetas))[::-1]
+    y_top_prime = (unit - dist * np.cos(theta_t - thetas))[::-1]
 
     x_all = np.concatenate([x_top, x_arc, x_top_prime])
     y_all = np.concatenate([y_top, y_arc, y_top_prime])
-
     points = np.column_stack((x_all, y_all))
 
     topic_path = Path()
-    topic_path.points = points
+    topic_path.points = asarray(points) * radius
     topic_path.end_angle = angle
-    topic_path.info["Rmin"] = Rc
-
+    topic_path.info["Rmin"] = Rc * radius
     return topic_path
 
 
@@ -2309,13 +1784,12 @@ def straight(length: float = 10.0, npoints: int = 2) -> Path:
     Args:
         length: of straight.
         npoints: number of points.
-
     """
-    if length < 0:
+    if to_float(length) < 0:
         raise ValueError(f"length = {length} needs to be > 0")
-    x = np.linspace(0, length, npoints)
+    x = jnp.linspace(0, length, npoints)
     y = x * 0
-    points = np.array((x, y)).T
+    points = jnp.stack([x, y]).T
 
     p = Path()
     p.append(points)
@@ -2329,59 +1803,42 @@ def spiral_archimedean(
 
     Args:
         min_bend_radius: Inner radius of the spiral.
-        separation: Half the radial separation between loops in um. The
-            current formula is retained for compatibility with existing
-            layouts, so adjacent turns are separated by ``2 * separation``.
+        separation: Half the radial separation between loops in um.
         number_of_loops: number of loops.
         npoints: number of Points.
-
-    Example:
-        ```python
-        import gdsfactory as gf
-
-        p = gf.path.spiral_archimedean(min_bend_radius=5, separation=2, number_of_loops=3, npoints=200)
-        p.plot()
-        ```
     """
-    theta = np.linspace(0, number_of_loops * 2 * np.pi, int(npoints))
-    points = (separation / np.pi * theta + min_bend_radius)[:, None] * np.column_stack(
-        (np.sin(theta), np.cos(theta))
+    theta = jnp.linspace(0, number_of_loops * 2 * jnp.pi, int(npoints))
+    points = (separation / jnp.pi * theta + min_bend_radius)[:, None] * jnp.stack(
+        (jnp.sin(theta), jnp.cos(theta)), axis=1
     )
     return Path(points)
 
 
-def _compute_segments(
-    points: npt.NDArray[np.floating[Any]],
-) -> tuple[
-    npt.NDArray[np.floating[Any]],
-    npt.NDArray[np.floating[Any]],
-    npt.NDArray[np.floating[Any]],
-    npt.NDArray[np.floating[Any]],
-    npt.NDArray[np.signedinteger[Any]],
-]:
-    points = np.asarray(points, dtype=float)
-    normals = np.diff(points, axis=0)
+def _compute_segments(points: Any) -> tuple[Array, Array, Array, Array, Array]:
+    points = asarray(points)
+    normals = jnp.diff(points, axis=0)
+    norms = jnp.linalg.norm(normals, axis=1)
 
     tol = 1e-6
-    if np.any(np.linalg.norm(normals, axis=1) < tol):
+    if np.any(to_numpy(norms) < tol):
         warnings.warn(
             "Zero-length segments (duplicate consecutive points)",
             RuntimeWarning,
             stacklevel=3,
         )
 
-    normals = (normals.T / np.linalg.norm(normals, axis=1)).T
-    dx = np.diff(points[:, 0])
-    dy = np.diff(points[:, 1])
-    ds = np.sqrt(dx**2 + dy**2)
-    theta = np.degrees(np.arctan2(dy, dx))
-    dtheta = np.diff(theta)
-    dtheta = dtheta - 360 * np.floor((dtheta + 180) / 360)
+    normals = (normals.T / norms).T
+    dx = jnp.diff(points[:, 0])
+    dy = jnp.diff(points[:, 1])
+    ds = jnp.sqrt(dx**2 + dy**2)
+    theta = jnp.degrees(jnp.arctan2(dy, dx))
+    dtheta = jnp.diff(theta)
+    dtheta = dtheta - 360 * jnp.floor(jax.lax.stop_gradient((dtheta + 180) / 360))
     return points, normals, ds, theta, dtheta
 
 
 def smooth(
-    points: npt.NDArray[np.floating[Any]] | Path,
+    points: Any,
     radius: float = 4.0,
     bend: PathFactory = euler,
     **kwargs: Any,
@@ -2393,67 +1850,60 @@ def smooth(
         radius: radius of curvature, passed to `bend`.
         bend: bend function that returns a path that round corners.
         kwargs: Extra keyword arguments that will be passed to `bend`.
-
-    Example:
-        ```python
-        import gdsfactory as gf
-
-        p = gf.path.smooth(([0, 0], [0, 10], [10, 10]))
-        p.plot()
-        ```
     """
     if isinstance(points, Path):
         points = points.points
 
     points, normals, ds, theta, dtheta = _compute_segments(points)
-    colinear_elements = np.concatenate([[False], np.abs(dtheta) < 1e-6, [False]])
-    if np.any(colinear_elements):
+    dtheta_np = to_numpy(dtheta)
+    colinear = np.concatenate([[False], np.abs(dtheta_np) < 1e-6, [False]])
+    if np.any(colinear):
         points, normals, ds, theta, dtheta = _compute_segments(
-            points[~colinear_elements, :]
+            points[np.nonzero(~colinear)[0], :]
         )
+        dtheta_np = to_numpy(dtheta)
 
-    if np.any(np.abs(np.abs(dtheta) - 180) < 1e-6):
+    if np.any(np.abs(np.abs(dtheta_np) - 180) < 1e-6):
         raise ValueError(
             "smooth() received points which double-back on themselves"
             "--turns cannot be computed when going forwards then exactly backwards."
         )
 
-    # FIXME add caching
-    # Create arcs
     paths: list[Path] = []
-    radii: list[float] = []
-    for dt in dtheta:
+    radii: list[Any] = []
+    for i in range(len(dtheta_np)):
+        dt = dtheta[i]
         P = bend(radius=radius, angle=dt, **kwargs)
-        chord = np.linalg.norm(P.points[-1, :] - P.points[0, :])
-        r = (chord / 2) / np.sin(np.radians(dt / 2))
-        r = np.abs(r)
+        chord = jnp.linalg.norm(P.points[-1, :] - P.points[0, :])
+        r = jnp.abs((chord / 2) / jnp.sin(jnp.radians(dt / 2)))
         radii.append(r)
         paths.append(P)
 
-    d = np.abs(np.array(radii) / np.tan(np.radians(180 - dtheta) / 2))
-    encroachment = np.concatenate([[0], d]) + np.concatenate([d, [0]])
-    if np.any(encroachment > ds):
+    if radii:
+        d = jnp.abs(jnp.stack(radii) / jnp.tan(jnp.radians(180 - dtheta) / 2))
+    else:
+        d = jnp.zeros((0,))
+    encroachment = jnp.concatenate([jnp.zeros(1), d]) + jnp.concatenate([d, jnp.zeros(1)])
+    if np.any(to_numpy(encroachment) > to_numpy(ds) + 1e-12):
         raise ValueError(
             "smooth(): Not enough distance between points to to fit curves."
             "Try reducing the radius or spacing the points out farther"
         )
-    p1 = points[1:-1, :] - normals[:-1, :] * d[:, np.newaxis]
+    p1 = points[1:-1, :] - normals[:-1, :] * d[:, None]
 
-    # Move arcs into position
-    new_points: list[npt.NDArray[np.floating[Any]]] = []
-    new_points.append(np.array([points[0, :]]))
-    for n in range(len(dtheta)):
+    new_points: list[Array] = [points[0:1, :]]
+    for n in range(len(dtheta_np)):
         p = paths[n]
-        p.rotate(theta[n] - 0)
+        p.rotate(theta[n])
         p.move(p1[n])
         new_points.append(p.points)
-    new_points.append(np.array([points[-1, :]]))
-    new_points_np = np.concatenate(new_points)
+    new_points.append(points[-1:, :])
+    new_points_np = jnp.concatenate(new_points)
 
     path = Path()
     path.append(new_points_np)
-    path.rotate(float(theta[0]))
-    path.move(cast("tuple[float, float]", points[0, :]))
+    path.rotate(theta[0])
+    path.move(points[0, :])
     path.start_angle = theta[0]
     path.end_angle = theta[-1]
     return path
@@ -2466,9 +1916,13 @@ __all__ = [
     "euler",
     "extrude",
     "extrude_transition",
+    "fresnel",
     "smooth",
     "spiral_archimedean",
     "straight",
+    "topic",
     "transition",
     "transition_adiabatic",
 ]
+
+_ = (Sequence, overload, Literal)

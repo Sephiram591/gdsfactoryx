@@ -9,25 +9,29 @@ from __future__ import annotations
 import hashlib
 import warnings
 from collections.abc import Callable
-from typing import Any, Self
+from typing import Annotated, Any, Self
 
 import numpy as np
-from kfactory import DCrossSection, SymmetricalCrossSection
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
-    NonNegativeFloat,
     PrivateAttr,
     field_serializer,
     model_validator,
 )
+
+from gdsfactory._jax import float_or_array, jnp, to_float
 
 from gdsfactory import typings
 from gdsfactory.component import Component
 from gdsfactory.config import CONF, ErrorType
 
 nm = 1e-3
+
+# float field that also accepts jax arrays / tracers (for differentiation)
+JFloat = Annotated[Any, BeforeValidator(float_or_array)]
 
 
 port_names_electrical: typings.IOPorts = ("e1", "e2")
@@ -106,9 +110,9 @@ class Section(BaseModel):
             +offset
     """
 
-    width: NonNegativeFloat = 0
-    offset: float = 0
-    insets: tuple[float, float] | None = None
+    width: JFloat = 0.0
+    offset: JFloat = 0.0
+    insets: tuple[JFloat, JFloat] | None = None
     layer: typings.LayerSpec
     port_names: tuple[str | None, str | None] = (None, None)
     port_types: tuple[str, str] = ("optical", "optical")
@@ -120,7 +124,7 @@ class Section(BaseModel):
     width_function: typings.WidthFunction | None = None
     offset_function: typings.OffsetFunction | None = None
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, arbitrary_types_allowed=True)
 
     @model_validator(mode="before")
     @classmethod
@@ -132,7 +136,9 @@ class Section(BaseModel):
 
     @model_validator(mode="after")
     def _require_width_value_or_function(self) -> Self:
-        if self.width == 0 and self.width_function is None:
+        if to_float(self.width) < 0:
+            raise ValueError(f"Section width must be >= 0, got {self.width}")
+        if to_float(self.width) == 0 and self.width_function is None:
             raise ValueError("Section requires `width > 0` or a `width_function`.")
         return self
 
@@ -167,9 +173,9 @@ class ComponentAlongPath(BaseModel):
     """
 
     component: Component
-    spacing: float
-    padding: float = 0.0
-    offset: float = 0.0
+    spacing: JFloat
+    padding: JFloat = 0.0
+    offset: JFloat = 0.0
 
     model_config = ConfigDict(extra="forbid", frozen=True, arbitrary_types_allowed=True)
 
@@ -218,21 +224,20 @@ class CrossSection(BaseModel):
 
     sections: Sections = Field(default_factory=tuple)
     components_along_path: tuple[ComponentAlongPath, ...] = Field(default_factory=tuple)
-    radius: float | None = None
-    radius_min: float | None = None
+    radius: JFloat | None = None
+    radius_min: JFloat | None = None
     bbox_layers: typings.LayerSpecs | None = None
-    bbox_offsets: typings.Floats | None = None
+    bbox_offsets: tuple[JFloat, ...] | None = None
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, arbitrary_types_allowed=True)
     _name: str = PrivateAttr("")
-    _dcross_section: DCrossSection | None = PrivateAttr()
 
     def validate_radius(
         self, radius: float, error_type: ErrorType | None = None
     ) -> None:
-        radius_min = self.radius_min or self.radius
+        radius_min = self.radius_min if self.radius_min is not None else self.radius
 
-        if radius_min and radius < radius_min:
+        if radius_min and to_float(radius) < to_float(radius_min):
             message = (
                 f"min_bend_radius {radius} < CrossSection.radius_min {radius_min}. "
             )
@@ -394,8 +399,8 @@ class CrossSection(BaseModel):
         for section in self.sections:
             width = section.width
             offset = section.offset
-            xmin = min(xmin, offset - width / 2)
-            xmax = max(xmax, offset + width / 2)
+            xmin = jnp.minimum(xmin, offset - width / 2)
+            xmax = jnp.maximum(xmax, offset + width / 2)
 
         return xmin, xmax
 
@@ -510,6 +515,4 @@ type CrossSectionSpec = (
     | str
     | dict[str, Any]
     | CrossSectionFactory
-    | SymmetricalCrossSection
-    | DCrossSection
 )

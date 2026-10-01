@@ -467,7 +467,7 @@ class Pdk(BaseModel):
 
         if callable(component):
             _component = component(**kwargs)
-            return type(_component)(base=_component.base)  # type: ignore[call-overload,no-any-return]
+            return _component  # type: ignore[no-any-return]
         if isinstance(component, str):
             if component not in cells:
                 substring = component

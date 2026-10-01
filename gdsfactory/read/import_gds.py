@@ -9,7 +9,7 @@ from kfactory import utilities
 from kfactory.exceptions import CrossSectionNamingConflictError
 
 from gdsfactory._kcl import temporary_kcl
-from gdsfactory.component import Component, _fix_pin_metadata
+from gdsfactory.component import Component
 from gdsfactory.typings import PostProcesses
 
 
@@ -90,24 +90,23 @@ def import_gds(
         return c
 
 
-def kcell_to_component(kcell: kf.kcell.ProtoTKCell[Any]) -> Component:
-    kcell.set_meta_data()
-    _fix_pin_metadata(kcell)
+def kcell_to_component(kcell: Any) -> Component:
+    """Converts a kfactory cell (and its hierarchy) to a differentiable Component.
 
+    Imported geometry is constant (it carries no derivative information).
+    """
+    from gdsfactory.klayout_bridge import from_kfactory
+
+    try:
+        kcell.get_meta_data()
+    except Exception:
+        pass
     for ci in kcell.called_cells():
-        kcell.kcl[ci].set_meta_data()
-        _fix_pin_metadata(kcell.kcl[ci])
-
-    c = Component()
-    c.name = kcell.name
-    c.kdb_cell.copy_tree(kcell.kdb_cell)
-    c.copy_meta_info(kcell.kdb_cell)
-    c.get_meta_data()
-
-    for ci in c.called_cells():
-        c.kcl[ci].get_meta_data()
-
-    return c
+        try:
+            kcell.kcl[ci].get_meta_data()
+        except Exception:
+            pass
+    return from_kfactory(kcell)
 
 
 def import_gds_with_conflicts(

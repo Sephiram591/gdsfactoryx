@@ -14,6 +14,9 @@ import gdsfactory as gf
 
 type Value = float | Sequence[float] | npt.NDArray[np.floating[Any]]
 
+# Set to False to disable snapping (e.g. for finite-difference gradient checks).
+SNAP_ENABLED = True
+
 
 def is_on_grid(
     x: Value,
@@ -83,7 +86,24 @@ def snap_to_grid[T: npt.NDArray[np.floating[Any]]](
         nm: Optional grid size in nm. If None, uses the default grid size from the PDK.
         grid_factor: multiplies the grid size (`nm`, or the PDK default if `nm` is None) by this factor.
     """
+    from gdsfactory._jax import has_tracers, is_tracer, jnp
+
+    if not SNAP_ENABLED:
+        if isinstance(x, list | tuple):
+            return cast("_T | float", np.asarray(x, dtype=np.float64))
+        return cast("_T | float", x)
+
     grid_um = (nm / 1000 if nm is not None else gf.kcl.dbu) * grid_factor
+
+    if is_tracer(x) or has_tracers(x) or type(x).__module__.startswith("jax"):
+        # straight-through: snapped value, identity gradient
+        import jax
+
+        xa = jnp.asarray(x, dtype=jnp.float64) if not isinstance(x, list | tuple) else jnp.stack(
+            [jnp.asarray(v, dtype=jnp.float64) for v in x]
+        )
+        snapped = grid_um * jnp.floor(jax.lax.stop_gradient(xa) / grid_um + 0.5)
+        return cast("_T | float", xa + jax.lax.stop_gradient(snapped - xa))
 
     # Round half up
     res = grid_um * np.floor(np.asarray(x, dtype=np.float64) / grid_um + 0.5)

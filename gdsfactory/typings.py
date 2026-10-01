@@ -33,7 +33,7 @@ import numpy as np
 import numpy.typing as npt
 from kfactory import DPin as Pin  # runtime re-export of a class
 from kfactory import DPins as Pins  # runtime re-export of a class
-from kfactory import DPort as Port  # runtime re-export of a class
+from gdsfactory._ports import Port  # differentiable port
 from kfactory.layer import LayerEnum
 
 STEP_DIRECTIVES = {
@@ -157,7 +157,7 @@ type PortFactory = Callable[..., Port]
 type PortsFactory = Callable[..., Sequence[Port]]
 type PortSymmetries = dict[str, Sequence[str]]
 type PortDict = dict[str, Port]
-type Ports = kf.DPorts | Sequence[Port] | kf.DInstancePorts
+type Ports = Sequence[Port]
 type SelectPorts = Callable[..., Sequence[Port]]
 
 type PortType = str
@@ -176,7 +176,7 @@ type ConnectivitySpec = ConductorConductorName | ConductorViaConductorName
 type Sparameters = dict[str, npt.NDArray[np.float64]]
 
 type Route = (
-    kf.routing.generic.ManhattanRoute | kf.routing.aa.optical.OpticalAllAngleRoute
+    Any
 )
 type RoutingStrategy = Callable[..., Sequence[Route]]
 type RoutingStrategies = dict[str, RoutingStrategy]
@@ -204,7 +204,7 @@ type ComponentFactoryDict = dict[str, ComponentFactory]
 type ComponentFactories = Sequence[ComponentFactory]
 
 type ComponentSpec = (
-    str | ComponentFactory | dict[str, Any] | kf.DKCell | partial[component.Component]
+    str | ComponentFactory | dict[str, Any] | partial[component.Component]
 )
 type ComponentAllAngleSpec = (
     str | ComponentAllAngleFactory | dict[str, Any] | component.ComponentAllAngle
@@ -225,7 +225,7 @@ type PostProcesses = Sequence[PostProcess]
 
 from gdsfactory.component import ComponentReference as Instance  # noqa: E402
 
-type InstanceOrVInstance = component.ComponentReference | kf.VInstance
+type InstanceOrVInstance = component.ComponentReference
 type ComponentOrPath = PathType | component.Component
 type ComponentOrReference = component.Component | component.ComponentReference
 type NameToFunctionDict = dict[str, ComponentFactory]

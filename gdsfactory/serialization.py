@@ -93,7 +93,15 @@ def clean_value_json(
         serialize_function_as_dict: serialize function as dict. False serializes as string.
         serialization_max_digits: maximum number of digits for float serialization.
     """
+    from gdsfactory._jax import is_tracer, primal
     from gdsfactory.path import Path
+
+    if is_tracer(value):
+        value = primal(value)
+    if type(value).__module__.startswith("jax"):
+        value = np.asarray(value)
+        if value.ndim == 0:
+            value = value.item()
 
     if isinstance(value, pydantic.BaseModel):
         return clean_dict(
