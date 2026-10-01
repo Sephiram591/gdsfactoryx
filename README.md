@@ -1,211 +1,148 @@
-# GDSFactory 9.51.0
+# gdsfactoryx
 
-[![docs](https://github.com/gdsfactory/gdsfactory/actions/workflows/pages.yml/badge.svg)](https://gdsfactory.github.io/gdsfactory/)
-[![PyPI](https://img.shields.io/pypi/v/gdsfactory)](https://pypi.org/project/gdsfactory/)
-[![PyPI Python](https://img.shields.io/pypi/pyversions/gdsfactory.svg)](https://pypi.python.org/pypi/gdsfactory)
-[![Downloads](https://static.pepy.tech/badge/gdsfactory)](https://pepy.tech/project/gdsfactory)
-[![MIT](https://img.shields.io/github/license/gdsfactory/gdsfactory)](https://choosealicense.com/licenses/mit/)
-[![codecov](https://img.shields.io/codecov/c/github/gdsfactory/gdsfactory)](https://codecov.io/gh/gdsfactory/gdsfactory/tree/main/gdsfactory)
-[![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/gdsfactory/binder-sandbox/HEAD)
-[![inspect.software](https://raw.githubusercontent.com/inspect-software/badges/main/v1/g/gdsfactory/gdsfactory.svg)](https://inspect.software/software/gdsfactory/gdsfactory)
+A JAX-differentiable wrapper around [gdsfactory](https://github.com/gdsfactory/gdsfactory).
 
-GDSFactory is a Python library for designing chips (Photonics, Analog, Quantum, MEMS), PCBs, and 3D-printable objects. We aim to make hardware design accessible, intuitive, and fun—empowering everyone to build the future.
+`gdsfactoryx` does not reimplement any geometry. It runs the real, unmodified
+gdsfactory (pinned to `gdsfactory==9.51.0` from PyPI). Every gdsfactory function
+is wrapped so it accepts `jax.Array` arguments and works with `jax.grad`,
+`jax.jacfwd`/`jacrev`, `jax.jit` and `jax.vmap`.
 
-As input you write python code, as an output GDSFactory creates CAD files (GDS, OASIS, STL, GERBER).
+```python
+import jax, jax.numpy as jnp
+jax.config.update("jax_enable_x64", True)
+import gdsfactoryx as gfx
 
-![cad](https://raw.githubusercontent.com/gdsfactory/gdsfactory/main/docs/images/cad.png)
+gfx.activate_pdk(dbu=1e-5)          # generic PDK on a fine grid (see "Accuracy")
 
-## Quick Start
+gfx.components.straight(length=10)  # plain floats -> a normal gf.Component
 
-Here's a simple example to get you started:
+geom = gfx.components.ring(radius=jnp.array(5.0), width=0.5)  # -> gfx.Geometry
+geom.layer("WG")                    # list of (N, 2) vertex arrays (um)
+gfx.components.straight(length=jnp.array(3.0)).ports["o2"].center  # ports too
 
-```bash
-pip install gdsfactory
+area = lambda r: gfx.components.ring(radius=r, width=0.5).area("WG")
+jax.grad(area)(jnp.array(5.0))      # ~ 2*pi*w
 ```
 
-If you prefer a faster setup, you can use the installer package:
+## What gets wrapped
 
-```bash
-pip install gdsfactory_install
-gfi install
-```
+`gfx` mirrors the `gdsfactory` namespace (`gfx.components`, `gfx.containers`,
+`gfx.path`, `gfx.routing`, `gfx.cross_section`, `gfx.functions`, `gfx.samples`,
+plus any other `gf.<name>`):
 
+| gdsfactory attribute | in `gdsfactoryx` |
+| --- | --- |
+| functions / factories | `JaxifiedFunction` (same signature) |
+| submodules | wrapped views of the module |
+| classes, constants (`Component`, `Port`, `gpdk.LAYER`, ...) | re-exported unchanged |
+
+A wrapped function called with **no** floating-point `jax.Array` arguments just
+calls gdsfactory and returns its native result, so `gfx` is a drop-in for
+`gf`. When **any** argument, at any depth of the argument pytree, is a
+floating JAX array or tracer, the function returns a differentiable result:
+
+| gdsfactory returns | differentiable result |
+| --- | --- |
+| `Component` / `ComponentReference` | `gfx.Geometry` (polygons per `(layer, datatype)` + `PortGeometry` per port) |
+| `gf.Path` | `(N, 2)` array of points |
+| pytree of numbers | same pytree of arrays |
+
+### Your own cells
+
+Write ordinary gdsfactory code. The function receives Python floats wherever the
+caller passed JAX arrays, so hierarchy, references, routing and booleans all work:
 
 ```python
 import gdsfactory as gf
 
-# Activate the built-in generic process design kit
-gf.gpdk.PDK.activate()
+@gfx.cell                     # = gf.cell + gfx.jaxify
+def coupler(gap: float = 0.2, length: float = 10.0) -> gf.Component:
+    c = gf.Component()
+    s = gf.components.straight(length=length)
+    a, b = c << s, c << s
+    b.dmove((0, gap + 0.5))
+    c.add_ports(a.ports, prefix="a_")
+    c.add_ports(b.ports, prefix="b_")
+    return c
 
-# Create a new component
-c = gf.Component()
-
-# Add a rectangle
-r = gf.components.rectangle(size=(10, 10), layer=(1, 0))
-rect = c.add_ref(r)
-
-# Add text elements
-t1 = gf.components.text("Hello", size=10, layer=(2, 0))
-t2 = gf.components.text("world", size=10, layer=(2, 0))
-
-text1 = c.add_ref(t1)
-text2 = c.add_ref(t2)
-
-# Position elements
-text1.xmin = rect.xmax + 5
-text2.xmin = text1.xmax + 2
-text2.rotate(30)
-
-# Show the result
-c.show()
+jax.grad(lambda g: coupler(gap=g).ports["b_o1"].y)(jnp.array(0.2))  # 1.0
+coupler.component(gap=jnp.array(0.3))   # real gf.Component, e.g. to write GDS
 ```
 
-**4M+ downloads** · **116+ contributors** · **42+ PDKs**
+`gfx.jaxify(fn)` wraps any function (decorator or call, with options
+`step=`, `merge=`, `layers=`).
 
-![workflow](https://raw.githubusercontent.com/gdsfactory/gdsfactory/main/docs/images/workflow.png)
+### Rasterization
 
-GDSFactory provides a comprehensive end-to-end design flow:
+`gfx.rasterize(geometry, layer, bounds=[[x0, y0], [x1, y1]], shape=(nx, ny))`
+returns the **exact** area fraction of each pixel covered by the polygons,
+computed in pure JAX with Green's theorem. It's differentiable with respect to
+the vertices, so gdsfactory parameters can drive JAX-based FDTD/FDFD solvers
+or pixel losses. See [examples/fit_ring.py](examples/fit_ring.py), which
+recovers a ring's radius and width from a target density map.
 
-- **Design (Layout, Simulation, Optimization)** — Define parametric cell functions in Python to generate components. Test component settings, ports, and geometry to avoid unwanted regressions, and capture design intent in a schematic.
-- **Verify (DRC, DFM, LVS)** — Run simulations directly from the layout using our simulation interfaces, removing the need to redraw your components in simulation tools. Conduct component and circuit simulations, study design for manufacturing. Ensure complex layouts match their design intent through Layout Versus Schematic verification (LVS) and are DRC clean.
-- **Validate** — Define layout and test protocols simultaneously for automated chip analysis post-fabrication. Extract essential component parameters and build data pipelines from raw data to structured data to monitor chip performance.
+`Geometry` also offers differentiable `area`, `bbox`, `translate`, `rotate`
+and `+` (union).
 
-**Input:** Python or YAML. **Output:** GDSII, OASIS, STL, or GERBER files for fabrication, plus component settings and netlists in YAML.
+## How it works
 
-GDSFactory integrates with Ansys, Lumerical, Tidy3d, MEEP, DEVSIM, SAX, MEOW, SPICE, and more.
+```
+params (jax) ──► pure_callback ──► real gdsfactory ──► polygons/ports (numpy) ──► Geometry
+                 custom_jvp: J = central finite differences of the aligned geometry
+```
 
-![tool interfaces](https://raw.githubusercontent.com/gdsfactory/gdsfactory/main/docs/images/tool_interfaces.png)
+* **Forward:** the wrapped call runs gdsfactory inside `jax.pure_callback`.
+  Results are memoized per argument value.
+* **Derivative:** a `jax.custom_jvp` rule computes the Jacobian with central
+  finite differences (2 extra gdsfactory evaluations per scalar input) and returns
+  `J @ tangent`. That's linear in the tangent, so reverse mode (`grad`, `vjp`,
+  `jacrev`) works as well as forward mode.
+* **Alignment:** polygons are matched between evaluations by centroid
+  (Hungarian assignment), and vertices by the best cyclic shift. If the vertex
+  count changes (e.g. arcs whose point count depends on the radius), each
+  reference vertex follows the closest point on the perturbed boundary, which
+  still gives the correct normal motion for area or raster losses. A
+  `gfx.TopologyWarning` is emitted when this happens.
+* **jit / vmap:** output shapes have to be known when tracing. They're taken
+  from the last eager call with the same static arguments, or recorded explicitly
+  with `fn.template(example_args...)`. Otherwise you get a `gfx.TemplateError`.
 
+## Accuracy
 
-## Open-Source PDKs (No NDA Required)
+gdsfactory snaps every vertex to the database unit (1 nm by default). That
+rounding adds noise to finite differences: dA/dR of a 10 µm ring is about 4% off
+at 1 nm. `gfx.activate_pdk(pdk, dbu=1e-5)` activates a copy of any PDK on a
+0.01 nm grid (still ±21 mm of 32-bit coordinate range), which brings the error
+below 0.1%. `dbu=1e-6` brings it to ~0.002%, with ±2.1 mm of range. It must be
+called before any cell is built, and you get a `gfx.GradientAccuracyWarning` if
+you take gradients on a coarse grid. Generate the final GDS for fabrication in a
+session that uses the foundry dbu.
 
-These PDKs are publicly available and do not require an NDA:
+The finite-difference step is `gfx.settings.fd_step` (default 0.02, in the
+units of the argument), or per function via `jaxify(fn, step=...)`. Geometry
+that is linear in a parameter (lengths, widths, offsets, radii) is exact for any
+step.
 
-### Photonics
+## Limitations
 
-| PDK | Code | Docs |
-| :-- | :--: | :--: |
-| Cornerstone PDK | [GitHub](https://github.com/gdsfactory/cspdk) | [Docs](https://gdsfactory.github.io/cspdk/) |
-| SiEPIC Ebeam UBC PDK | [GitHub](https://github.com/gdsfactory/ubc) | [Docs](https://gdsfactory.github.io/ubc) |
-| VTT PDK | [GitHub](https://github.com/gdsfactory/vtt) | [Docs](https://gdsfactory.github.io/vtt) |
-| Luxtelligence GF PDK | [GitHub](https://github.com/Luxtelligence/lxt_pdk_gf) | [Docs](https://gdsfactory.github.io/lxt_pdk_gf) |
+* First-order derivatives only (no Hessians through gdsfactory).
+* Each gradient costs `2n + 1` gdsfactory evaluations for `n` scalar inputs.
+* Every perturbed evaluation creates new cells in the session's layout. Call
+  `gfx.clear_cache()` (gdsfactory's) between long optimization runs if memory
+  grows.
+* Only floating JAX arrays are differentiable. Integers, strings and objects
+  (cross-sections, components passed to containers) are treated as static.
 
-### Quantum
+## Install
 
-| PDK | Code | Docs |
-| :-- | :--: | :--: |
-| Quantum RF PDK | [GitHub](https://github.com/gdsfactory/quantum-rf-pdk) | [Docs](https://gdsfactory.github.io/quantum-rf-pdk/) |
+```bash
+module load miniforge
+conda create -n gdsfactoryx-wrap python=3.12
+conda activate gdsfactoryx-wrap
+pip install -e ".[cuda,dev]"
+pytest
+```
 
-### RF / AMS / Digital / Analog
+## License
 
-| PDK | Code | Docs |
-| :-- | :--: | :--: |
-| IHP | [GitHub](https://github.com/gdsfactory/IHP) | [Docs](https://gdsfactory.github.io/IHP) |
-| GlobalFoundries 180nm MCU CMOS | [GitHub](https://github.com/gdsfactory/gf180mcu) | [Docs](https://gdsfactory.github.io/gf180mcu/) |
-| SkyWater 130nm CMOS | [GitHub](https://github.com/gdsfactory/skywater130) | [Docs](https://gdsfactory.github.io/skywater130/) |
-
-## Foundry PDKs (NDA Required)
-
-Access PDKs under NDA require a **GDSFactory+** subscription.
-To sign up, visit [GDSFactory.com](https://gdsfactory.com/).
-See list of available PDKs under NDA [here](https://gdsfactory.com/pdks/).
-
-## GDSFactory+
-
-**GDSFactory+** offers Graphical User Interface for chip design, built on top of GDSFactory and VSCode. It provides you:
-
-- Foundry PDK access
-- Schematic capture
-- Device and circuit Simulations
-- Design verification (DRC, LVS)
-- Data analytics
-
-
-## Getting Started
-
-- [See slides](https://docs.google.com/presentation/d/1_ZmUxbaHWo_lQP17dlT1FWX-XD8D9w7-FcuEih48d_0/edit#slide=id.g11711f50935_0_5)
-- [Read docs](https://gdsfactory.github.io/gdsfactory/)
-- [![Video Tutorials](https://img.shields.io/badge/youtube-Video_Tutorials-red.svg?logo=youtube)](https://www.youtube.com/@gdsfactory/playlists)
-- See announcements on [GitHub](https://github.com/gdsfactory/gdsfactory/discussions/547), [google-groups](https://groups.google.com/g/gdsfactory) or [LinkedIn](https://www.linkedin.com/company/gdsfactory)
-- [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://github.com/codespaces/new?hide_repo_select=true&ref=main&repo=250169028)
-- [PIC training](https://gdsfactory.github.io/gdsfactory-photonics-training/)
-- Online course [UBCx: Silicon Photonics Design, Fabrication and Data Analysis](https://www.edx.org/learn/engineering/university-of-british-columbia-silicon-photonics-design-fabrication-and-data-ana), where students can use GDSFactory to create a design, have it fabricated, and tested.
-- [Visit website](https://gdsfactory.com)
-
-## Who is using GDSFactory?
-
-Hundreds of organisations are using GDSFactory. Some companies and organizations around the world using GDSFactory include:
-
-![logos](https://raw.githubusercontent.com/gdsfactory/gdsfactory/main/docs/images/logos.png)
-
-"I've used **GDSFactory** since 2017 for all my chip tapeouts. I love that it is fast, easy to use, and easy to extend. It's the only tool that allows us to have an end-to-end chip design flow (design, verification and validation)."
-
-<div style="text-align: right; margin-right: 10%;">Joaquin Matres - <strong>Google</strong></div>
-
----
-
-"I've relied on **GDSFactory** for several tapeouts over the years. It's the only tool I've found that gives me the flexibility and scalability I need for a variety of projects."
-
-<div style="text-align: right; margin-right: 10%;">Alec Hammond - <strong>Meta Reality Labs Research</strong></div>
-
----
-
-"The best photonics layout tool I've used so far and it is leaps and bounds ahead of any commercial alternatives out there. Feels like GDSFactory is freeing photonics."
-
-<div style="text-align: right; margin-right: 10%;">Hasitha Jayatilleka - <strong>LightIC Technologies</strong></div>
-
----
-
-"As an academic working on large scale silicon photonics at CMOS foundries I've used GDSFactory to go from nothing to full-reticle layouts rapidly (in a few days). I particularly appreciate the full-system approach to photonics, with my layout being connected to circuit simulators which are then connected to device simulators. Moving from legacy tools such as gdspy and phidl to GDSFactory has sped up my workflow at least an order of magnitude."
-
-<div style="text-align: right; margin-right: 10%;">Alex Sludds - <strong>MIT</strong></div>
-
----
-
-"I use GDSFactory for all of my photonic tape-outs. The Python interface makes it easy to version control individual photonic components as well as entire layouts, while integrating seamlessly with KLayout and most standard photonic simulation tools, both open-source and commercial."
-
-<div style="text-align: right; margin-right: 10%;">Thomas Dorch - <strong>Freedom Photonics</strong></div>
-
-## Why Use GDSFactory?
-
-- **Fast, extensible, and easy to use** – designed for efficiency and flexibility.
-- **Free and open-source** – no licensing fees, giving you the freedom to modify and extend it.
-- **A thriving ecosystem** – the most popular EDA tool with a growing community of users, developers, and integrations with other tools.
-- **Built on the open-source advantage** – just like the best machine learning libraries, GDSFactory benefits from continuous contributions, transparency, and innovation.
-
-GDSFactory is really fast thanks to KLayout C++ library for manipulating GDS objects. You will notice this when reading/writing big GDS files or doing large boolean operations.
-
-| Benchmark      |  gdspy  | GDSFactory | Gain |
-| :------------- | :-----: | :--------: | :--: |
-| 10k_rectangles | 80.2 ms |  4.87 ms   | 16.5 |
-| boolean-offset | 187 μs  |  44.7 μs   | 4.19 |
-| bounding_box   | 36.7 ms |   170 μs   | 216  |
-| flatten        | 465 μs  |  8.17 μs   | 56.9 |
-| read_gds       | 2.68 ms |   94 μs    | 28.5 |
-
-## Contributors
-
-A huge thanks to all the contributors who make this project possible!
-
-We welcome all contributions—whether you're adding new features, improving documentation, or even fixing a small typo. Every contribution helps make GDSFactory better!
-
-Join us and be part of the community. 🚀
-
-![contributors](https://raw.githubusercontent.com/gdsfactory/gdsfactory/main/docs/images/contributors.png)
-
-## LLM-Friendly Documentation
-
-GDSFactory provides machine-readable documentation optimized for LLM agents and AI-assisted development:
-
-- [llms.txt](https://gdsfactory.github.io/gdsfactory/llms.txt) — concise overview with links to all documentation sections
-- [llms-full.txt](https://gdsfactory.github.io/gdsfactory/llms-full.txt) — complete API reference and usage guide in a single document
-
-These follow the [llms.txt standard](https://llmstxt.org/) for making documentation easily ingestable by large language models.
-
-## Community
-
-Join our growing community:
-- [GitHub Discussions](https://github.com/gdsfactory/gdsfactory/discussions)
-- [Google Group](https://groups.google.com/g/gdsfactory)
-- [LinkedIn](https://www.linkedin.com/company/gdsfactory)
-- [Slack community channel](https://join.slack.com/t/gdsfactory-community/shared_invite/zt-3aoygv7cg-r5BH6yvL4YlHfY8~UXp0Wg)
+MIT, same as gdsfactory (see [LICENSE](LICENSE)).

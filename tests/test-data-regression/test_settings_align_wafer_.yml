@@ -1,8 +1,0 @@
-info: {}
-name: align_wafer_gdsfactorypcomponentspdiespalign_W10_S10_CL_f057b528
-settings:
-  cross_length: 80
-  layer: WG
-  spacing: 10
-  square_corner: bottom_left
-  width: 10

@@ -1,8 +1,0 @@
-info: {}
-name: crossing_linear_taper_gdsfactorypcomponentspwaveguidesp_720cf0b8
-settings:
-  cross_section: strip
-  length: 3
-  taper: taper
-  width1: 2.5
-  width2: 0.5

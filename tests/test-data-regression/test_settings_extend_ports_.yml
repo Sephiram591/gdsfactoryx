@@ -1,9 +1,0 @@
-info: {}
-name: extend_ports_gdsfactorypcomponentspcontainerspextension_2c372e90
-settings:
-  allow_width_mismatch: false
-  auto_taper: true
-  centered: false
-  component: mmi1x2
-  length: 5
-  port_type: optical

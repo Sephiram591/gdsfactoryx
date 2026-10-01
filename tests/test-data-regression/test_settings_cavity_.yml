@@ -1,7 +1,0 @@
-info: {}
-name: cavity_gdsfactorypcomponentsppcmspcavity_Cdbr_Ccoupler_L0p1_G0p2
-settings:
-  component: dbr
-  coupler: coupler
-  gap: 0.2
-  length: 0.1

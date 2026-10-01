@@ -1,9 +1,0 @@
-info:
-  radius: 10
-name: coupler_ring_gdsfactorypcomponentspcouplerspcoupler_rin_9cdfdde6
-settings:
-  bend: bend_euler
-  cross_section: strip
-  gap: 0.2
-  length_x: 4
-  straight: straight

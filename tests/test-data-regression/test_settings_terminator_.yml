@@ -1,9 +1,0 @@
-info: {}
-name: terminator_gdsfactorypcomponentspfilterspterminator_L50_a505b160
-settings:
-  cross_section_input: strip
-  doping_layers:
-  - NPP
-  doping_offset: 1
-  length: 50
-  tapered_width: 0.2

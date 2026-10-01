@@ -1,9 +1,0 @@
-info:
-  components: 8
-name: staircase_gdsfactorypcomponentsppcmspcutback_bend_Cbend_02142e80
-settings:
-  component: bend_euler
-  length_h: 5
-  length_v: 5
-  rows: 4
-  straight: straight

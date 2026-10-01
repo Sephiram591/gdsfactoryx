@@ -1,9 +1,0 @@
-info: {}
-name: taper_parabolic_gdsfactorypcomponentsptapersptaper_para_eab4e7ad
-settings:
-  exp: 0.5
-  layer: WG
-  length: 20
-  npoints: 100
-  width1: 0.5
-  width2: 5
