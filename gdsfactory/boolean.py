@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-import kfactory as kf
+import numpy as np
+import numpy.typing as npt
 
+from gdsfactory import klayout_bridge as kb
 from gdsfactory.component import Component, ComponentReference, boolean_operations
 
 if TYPE_CHECKING:
@@ -67,33 +69,21 @@ def boolean(
     layer_index2 = get_layer(layer2)
     layer_index = get_layer(layer)
 
-    if isinstance(A, kf.DKCell):
-        ar = kf.kdb.Region(A.begin_shapes_rec(layer_index1))
-    else:
-        ar = get_ref_shapes(A, layer_index1)
-    if isinstance(B, kf.DKCell):
-        br = kf.kdb.Region(B.begin_shapes_rec(layer_index2))
-    else:
-        br = get_ref_shapes(B, layer_index2)
-    c.shapes(layer_index).insert(boolean_operations[operation](ar, br))
+    ar = kb.arrays_to_region(_get_polygons(A, layer_index1))
+    br = kb.arrays_to_region(_get_polygons(B, layer_index2))
+    region = boolean_operations[operation](ar, br)
+    for points in kb.region_to_arrays(region):
+        c.add_polygon(points, layer=layer_index)
 
     return c
 
 
-def get_ref_shapes(ref: ComponentReference, layer_index: int) -> kf.kdb.Region:
-    if ref.is_regular_array():
-        base_inst_region = kf.kdb.Region(ref.cell.begin_shapes_rec(layer_index))
-
-        br = kf.kdb.Region()
-        for ia in range(ref.na):
-            for ib in range(ref.nb):
-                br.insert(
-                    base_inst_region.transformed(
-                        ref.cplx_trans * kf.kdb.ICplxTrans(ia * ref.a + ib * ref.b)
-                    )
-                )
+def _get_polygons(
+    obj: ComponentOrReference, layer_index: int
+) -> list[npt.NDArray[np.floating[Any]]]:
+    """Returns the flattened polygons of a Component or reference on a layer."""
+    if isinstance(obj, ComponentReference):
+        polys = obj.get_polygons_points(layer=layer_index)
     else:
-        br = kf.kdb.Region(ref.cell.begin_shapes_rec(layer_index)).transformed(
-            ref.cplx_trans
-        )
-    return br
+        polys = obj.get_polygons_points(layers=[layer_index])
+    return list(polys.get(int(layer_index), []))

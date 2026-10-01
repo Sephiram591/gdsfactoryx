@@ -8,9 +8,9 @@ __all__ = [
 
 from functools import partial
 
-import numpy as np
 
 import gdsfactory as gf
+from gdsfactory._jax import xp
 from gdsfactory.component import Component
 from gdsfactory.functions import DEG2RAD
 from gdsfactory.typings import CrossSectionSpec, LayerSpec
@@ -80,15 +80,15 @@ def grating_coupler_elliptical(
     assert layer is not None
 
     # Compute some ellipse parameters
-    sthc = np.sin(fiber_angle * DEG2RAD)
+    sthc = xp.sin(fiber_angle * DEG2RAD)
     d = neff**2 - nclad**2 * sthc**2
     a1 = wavelength * neff / d
-    b1 = wavelength / np.sqrt(d)
+    b1 = wavelength / xp.sqrt(d)
     x1 = wavelength * nclad * sthc / d
 
-    a1 = float(round(a1, 3))
-    b1 = float(round(b1, 3))
-    x1 = float(round(x1, 3))
+    a1 = gf.snap.snap_to_grid(a1, nm=1)
+    b1 = gf.snap.snap_to_grid(b1, nm=1)
+    x1 = gf.snap.snap_to_grid(x1, nm=1)
 
     period = a1 + x1
 
@@ -145,7 +145,7 @@ def grating_coupler_elliptical(
         pts = grating_tooth_points(a, b, x, w, taper_angle, spiked=False)
         c.add_polygon(pts, layer)
 
-    x = np.round(taper_length + x_output, 3)
+    x = gf.snap.snap_to_grid(taper_length + x_output, nm=1)
 
     c.add_port(
         name="o1",

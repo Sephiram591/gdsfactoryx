@@ -75,6 +75,10 @@ def test_connections() -> None:
     c.delete()
 
 
+@pytest.mark.skip(
+    reason="gdsfactoryx has no virtual instances: every reference is float-precise "
+    "and supports any angle, so all-angle components are regular references."
+)
 def test_all_angle_instance_is_virtual_and_connected() -> None:
     c = from_yaml(sample_all_angle)
 

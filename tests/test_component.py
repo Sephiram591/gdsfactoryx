@@ -153,11 +153,10 @@ def test_locked_cell() -> None:
     with pytest.raises(LockedError):
         c.add_port(name="o1", center=(0, 0), width=0.5, orientation=0, layer="WG")
 
-    with pytest.raises(LockedError):
-        c.get_polygons_points(merge=True)
-
-    with pytest.raises(LockedError):
-        c.get_polygons(merge=True)
+    # gdsfactoryx: merging returns new polygons and does not modify the cell,
+    # so it is allowed on locked cells (upstream merges the layout in place).
+    c.get_polygons_points(merge=True)
+    c.get_polygons(merge=True)
 
     with pytest.raises(LockedError):
         c.add_ref(gf.Component())
@@ -348,7 +347,7 @@ def test_component_references_iter() -> None:
     assert len(refs) == 2
     assert refs[0].instance == ref.instance
     assert refs[1].instance == ref2.instance
-    assert all(isinstance(r, kf.DInstance) for r in refs)
+    assert all(isinstance(r, gf.ComponentReference) for r in refs)
 
 
 def test_component_references_delitem() -> None:

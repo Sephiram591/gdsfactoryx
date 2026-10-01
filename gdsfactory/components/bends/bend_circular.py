@@ -7,6 +7,7 @@ from functools import partial
 from typing import Literal, overload
 
 import gdsfactory as gf
+from gdsfactory._jax import maybe_float, to_float
 from gdsfactory.component import Component, ComponentAllAngle
 from gdsfactory.path import arc
 from gdsfactory.snap import snap_to_grid
@@ -90,12 +91,12 @@ def _bend_circular(
     p = arc(radius=radius, angle=angle, npoints=npoints, angular_step=angular_step)
     c = p.extrude(x, all_angle=all_angle)
 
-    c.info["length"] = float(snap_to_grid(p.length()))
-    c.info["dy"] = float(abs(p.points[0][0] - p.points[-1][0]))
-    c.info["radius"] = float(radius)
+    c.info["length"] = maybe_float(snap_to_grid(p.length()))
+    c.info["dy"] = maybe_float(abs(p.points[0][0] - p.points[-1][0]))
+    c.info["radius"] = maybe_float(radius)
     c.info["width"] = width or x.width
-    top = None if int(angle) in {180, -180, -90} else 0
-    bottom = 0 if int(angle) in {-90} else None
+    top = None if int(to_float(angle)) in {180, -180, -90} else 0
+    bottom = 0 if int(to_float(angle)) in {-90} else None
     x.add_bbox(c, top=top, bottom=bottom)
     if not allow_min_radius_violation:
         x.validate_radius(radius)
@@ -136,7 +137,7 @@ def bend_circular(
         cross_section: spec (CrossSection, string or dict).
         allow_min_radius_violation: if True allows radius to be smaller than cross_section radius.
     """
-    if abs(angle) not in {90, 180}:
+    if abs(to_float(angle)) not in {90, 180}:
         warnings.warn(
             f"bend_euler angle should be 90 or 180. Got {angle}. Use bend_euler_all_angle instead.",
             UserWarning,

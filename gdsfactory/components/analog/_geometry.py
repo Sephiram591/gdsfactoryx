@@ -8,6 +8,7 @@ from collections.abc import Callable
 from numpy import floor
 
 from gdsfactory import Component, ComponentReference
+from gdsfactory._jax import to_float
 
 Poly = list[tuple[float, float]]
 
@@ -25,6 +26,7 @@ def _mirror_x(p: Poly) -> Poly:
 
 
 def _sign(x: float) -> int:
+    x = to_float(x)
     return (x > 0) - (x < 0)
 
 
@@ -94,8 +96,8 @@ def _add_via_array(
     """
     w, h, _enclosure, pitch_x, pitch_y = _via_component_info(via_component)
 
-    nb_vias_x = int(floor((avail_x - w) / pitch_x + 1)) or 1
-    nb_vias_y = int(floor((avail_y - h) / pitch_y + 1)) or 1
+    nb_vias_x = int(floor(to_float((avail_x - w) / pitch_x + 1))) or 1
+    nb_vias_y = int(floor(to_float((avail_y - h) / pitch_y + 1))) or 1
     nb_vias_x = max(nb_vias_x, 1)
     nb_vias_y = max(nb_vias_y, 1)
 
@@ -146,7 +148,7 @@ def _pgs(D: float, w: float, s: float) -> list[Poly]:
     pitch = w + s
     sections: list[Poly] = []
     sections.append([(-w / 2, -R), (-w / 2, R), (w / 2, R), (w / 2, -R)])
-    k_max = math.floor((R - w / 2) / pitch)
+    k_max = math.floor(to_float((R - w / 2) / pitch))
     for k in range(-k_max, k_max + 1):
         yc = k * pitch
         yb, yt = yc - w / 2, yc + w / 2

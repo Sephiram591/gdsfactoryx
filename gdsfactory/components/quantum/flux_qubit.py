@@ -2,9 +2,9 @@ from __future__ import annotations
 
 __all__ = ["flux_qubit", "flux_qubit_asymmetric"]
 
-import numpy as np
 
 import gdsfactory as gf
+from gdsfactory._jax import xp
 from gdsfactory.component import Component
 from gdsfactory.typings import LayerSpec
 
@@ -263,8 +263,8 @@ def flux_qubit_asymmetric(
     """
     c = Component()
 
-    angle_rad = np.radians(asymmetry_angle)
-    x_offset = loop_height * np.tan(angle_rad)
+    angle_rad = xp.radians(asymmetry_angle)
+    x_offset = loop_height * xp.tan(angle_rad)
 
     # Create asymmetric loop as outer/inner polygon boolean
     # The right side is tilted by asymmetry_angle
@@ -278,10 +278,10 @@ def flux_qubit_asymmetric(
     # Offset the slanted wall along its normal.  Simply subtracting
     # ``wire_width`` from x (as for a rectangular loop) produces a different
     # wire width on the slanted side.
-    right_inset = wire_width / np.cos(angle_rad)
+    right_inset = wire_width / xp.cos(angle_rad)
 
     def right_edge(y: float) -> float:
-        return loop_width / 2 + (y + loop_height / 2) * np.tan(angle_rad)
+        return loop_width / 2 + (y + loop_height / 2) * xp.tan(angle_rad)
 
     inner_points = [
         (-loop_width / 2 + wire_width, -loop_height / 2 + wire_width),
@@ -313,9 +313,9 @@ def flux_qubit_asymmetric(
         center: tuple[float, float], width: float, height: float
     ) -> list[tuple[float, float]]:
         """Returns a rectangle with width normal to the slanted right edge."""
-        normal = np.array((np.cos(angle_rad), -np.sin(angle_rad)))
-        tangent = np.array((np.sin(angle_rad), np.cos(angle_rad)))
-        center_array = np.asarray(center)
+        normal = xp.array((xp.cos(angle_rad), -xp.sin(angle_rad)))
+        tangent = xp.array((xp.sin(angle_rad), xp.cos(angle_rad)))
+        center_array = xp.asarray(center)
         return [
             tuple(center_array + sx * width / 2 * normal + sy * height / 2 * tangent)
             for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1))
@@ -344,8 +344,8 @@ def flux_qubit_asymmetric(
     )
 
     right_edge_at_junction = right_edge(0)
-    right_normal = np.array((np.cos(angle_rad), -np.sin(angle_rad)))
-    right_junction_center = np.asarray((right_edge_at_junction, 0.0)) - (
+    right_normal = xp.array((xp.cos(angle_rad), -xp.sin(angle_rad)))
+    right_junction_center = xp.asarray((right_edge_at_junction, 0.0)) - (
         wire_width / 2 * right_normal
     )
     beta_gap_right = Component()

@@ -26,6 +26,8 @@ ComponentParams = ParamSpec("ComponentParams")
 
 MAX_NAME_LENGTH = 99
 _CACHES: list[dict[Any, Any]] = []
+factories: dict[str, Callable[..., Any]] = {}
+"""Registry of cell functions (name -> decorated function)."""
 
 
 class ComponentFunc(Protocol[ComponentParams]):
@@ -79,9 +81,36 @@ def get_cell_name(cell_type: str, max_cellname_length: int | None = None, **kwar
     return _kf_get_cell_name(cell_type, max_cellname_length=max_cellname_length, **params)
 
 
+def _metadata(value: Any) -> Any:
+    """Settings value as kfactory stores it (functions -> names); keeps jax values."""
+    from kfactory.serialization import convert_metadata_type
+
+    if has_tracers(value) or type(value).__module__.startswith("jax"):
+        return value
+    if isinstance(value, dict):
+        return {k: _metadata(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_metadata(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_metadata(v) for v in value)
+    try:
+        return convert_metadata_type(value)
+    except Exception:
+        return value
+
+
 def _freeze(value: Any) -> Any:
     """Hashable key for caching (only called without tracers)."""
+    import pydantic
+
     from gdsfactory.serialization import clean_value_json
+
+    if isinstance(value, pydantic.BaseModel):
+        # exact field values (clean_value_json rounds floats)
+        try:
+            return ("__model__", type(value).__name__, _freeze(dict(value)))
+        except Exception:
+            return ("__id__", id(value))
 
     try:
         hash(value)
@@ -112,6 +141,11 @@ def _freeze(value: Any) -> Any:
 def clear_cache() -> None:
     for c in _CACHES:
         c.clear()
+
+
+def cached_cells() -> list[Any]:
+    """Components currently stored in the cell caches."""
+    return [c for cache in _CACHES for c in cache.values()]
 
 
 def cell(
@@ -185,7 +219,9 @@ def cell(
             if set_name:
                 c._name = get_cell_name(_basename or function_name, **params)
             if set_settings:
-                c.settings = type(c.settings)(params)
+                c.settings = type(c.settings)(
+                    {k: _metadata(v) for k, v in params.items()}
+                )
                 c.function_name = function_name
                 c.basename = _basename
                 c.module = func.__module__
@@ -207,6 +243,15 @@ def cell(
         wrapper.tags = tags or []  # type: ignore[attr-defined]
         if schematic_function is not None:
             wrapper.schematic_function = schematic_function  # type: ignore[attr-defined]
+
+        def get_schematic(*args: Any, **kwargs: Any) -> Any:
+            if schematic_function is None:
+                raise ValueError(f"{func.__name__} has no schematic_function")
+            return schematic_function(*args, **kwargs)
+
+        wrapper.get_schematic = get_schematic  # type: ignore[attr-defined]
+        if register_factory:
+            factories[_basename or func.__name__] = wrapper
         return wrapper
 
     if _func is not None:
@@ -214,7 +259,20 @@ def cell(
     return decorator
 
 
-vcell = cell
+def vcell(_func: Callable[..., Any] | None = None, /, **kwargs: Any) -> Any:
+    """Like ``cell`` (all components support any angle in gdsfactoryx)."""
+    kwargs = {k: v for k, v in kwargs.items() if k in _CELL_KWARGS_EARLY}
+
+    def mark(f: Callable[..., Any]) -> Callable[..., Any]:
+        f.is_gf_vcell = True  # type: ignore[attr-defined]
+        return f
+
+    if _func is not None:
+        return mark(cell(_func, **kwargs))
+    return lambda f: mark(cell(**kwargs)(f))
+
+
+_CELL_KWARGS_EARLY = set(inspect.signature(cell).parameters) - {"_func"}
 
 
 def cell_with_module_name(_func: Callable[..., Any] | None = None, /, **kwargs: Any) -> Any:
@@ -247,6 +305,8 @@ __all__ = [
     "cell",
     "cell_with_module_name",
     "clean_name",
+    "cached_cells",
+    "factories",
     "clear_cache",
     "get_cell_name",
     "schematic_cell",

@@ -3,9 +3,10 @@ from __future__ import annotations
 __all__ = ["ring"]
 
 import numpy as np
-from numpy import cos, pi, sin
+from numpy import pi
 
 import gdsfactory as gf
+from gdsfactory._jax import to_float, xp
 from gdsfactory.component import Component
 from gdsfactory.typings import LayerSpec
 
@@ -55,16 +56,16 @@ def ring(
     outer_radius = radius + width / 2
     if distance_resolution is not None:
         num_points = int(
-            np.ceil(2 * pi * outer_radius * angle / 360 / distance_resolution)
+            np.ceil(to_float(2 * pi * outer_radius * angle / 360 / distance_resolution))
         )
     else:
-        num_points = int(np.ceil(angle / angle_resolution))
-    t = np.linspace(0, angle, num_points + 1) * pi / 180
-    inner_points_x = inner_radius * cos(t)
-    inner_points_y = inner_radius * sin(t)
-    outer_points_x = outer_radius * cos(t)
-    outer_points_y = outer_radius * sin(t)
-    xpts = np.concatenate([inner_points_x, outer_points_x[::-1]])
-    ypts = np.concatenate([inner_points_y, outer_points_y[::-1]])
-    D.add_polygon(points=list(zip(xpts, ypts, strict=False)), layer=layer)
+        num_points = int(np.ceil(to_float(angle / angle_resolution)))
+    t = xp.linspace(0, angle, num_points + 1) * pi / 180
+    inner_points_x = inner_radius * xp.cos(t)
+    inner_points_y = inner_radius * xp.sin(t)
+    outer_points_x = outer_radius * xp.cos(t)
+    outer_points_y = outer_radius * xp.sin(t)
+    xpts = xp.concatenate([inner_points_x, outer_points_x[::-1]])
+    ypts = xp.concatenate([inner_points_y, outer_points_y[::-1]])
+    D.add_polygon(points=xp.stack([xpts, ypts], axis=1), layer=layer)
     return D

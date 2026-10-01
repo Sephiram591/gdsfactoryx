@@ -3,14 +3,15 @@ from __future__ import annotations
 import warnings
 from collections.abc import Callable, Sequence
 from functools import partial
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal
 
 import kfactory as kf
 import numpy as np
 import numpy.typing as npt
-from numpy import cos, float64, sin
+from numpy import float64
 
 import gdsfactory as gf
+from gdsfactory._jax import round_st, to_float, xp, xset
 
 if TYPE_CHECKING:
     from gdsfactory.component import Component, ComponentReference
@@ -43,8 +44,8 @@ def move_port_to_zero(
     if mirror:
         ref.dmirror()
 
-    movement = np.array(ref.ports[port_name].center)
-    ref.move(tuple(-movement))
+    movement = ref.ports[port_name].center
+    ref.move((-movement[0], -movement[1]))
     c.add_ports(ref.ports)
     c.copy_child_info(component)
     return c
@@ -56,11 +57,7 @@ def get_layers(component: Component) -> list[tuple[int, int]]:
     Args:
         component: to get the layers from.
     """
-    return [
-        (info.layer, info.datatype)
-        for info in component.kcl.layer_infos()
-        if not component.bbox(component.kcl.layer(info)).empty()
-    ]
+    return [tuple(layer) for layer in component.layers]  # type: ignore[misc]
 
 
 def extract(
@@ -89,13 +86,10 @@ def extract(
                 stacklevel=3,
             )
 
-    for layer_tuple in component_layers:
-        if layer_tuple in layer_tuples:
-            layer_index = c.kcl.layer(*layer_tuple)
-            if recursive:
-                c.shapes(layer_index).insert(component.begin_shapes_rec(layer_index))
-            else:
-                c.shapes(layer_index).insert(component.shapes(layer_index))
+    layers_found = [lt for lt in component_layers if lt in layer_tuples]
+    src = component.extract(layers=layers_found, recursive=recursive)
+    for k, polys in src.polygons.items():
+        c.polygons[k] = list(polys)
 
     return c
 
@@ -103,7 +97,8 @@ def extract(
 def move_to_center(component: Component, dx: float = 0, dy: float = 0) -> gf.Component:
     """Moves the component to the center of the bounding box."""
     c = component
-    c.transform(gf.kdb.DTrans(-c.dbbox().center().x + dx, -c.dbbox().center().y + dy))
+    b = c.dbbox()
+    c.move((-(b.left + b.right) / 2 + dx, -(b.bottom + b.top) / 2 + dy))
     return c
 
 
@@ -121,11 +116,11 @@ def move_port(
         dy: to move the port.
     """
     c = component
-    c.transform(gf.kdb.DTrans(-c.ports[port_name].x + dx, -c.ports[port_name].y + dy))
+    c.move((-c.ports[port_name].x + dx, -c.ports[port_name].y + dy))
     return c
 
 
-type GetPolygonsResult = "dict[LayerSpec, list[kf.kdb.Polygon]]"
+type GetPolygonsResult = "dict[LayerSpec, list[npt.NDArray[np.floating[Any]]]]"
 
 
 def get_polygons(
@@ -135,7 +130,7 @@ def get_polygons(
     layers: LayerSpecs | None = None,
     smooth: float | None = None,
 ) -> GetPolygonsResult:
-    """Returns a dict of Polygons per layer.
+    """Returns a dict of polygons ((N, 2) point arrays in um) per layer.
 
     Args:
         component_or_instance: to extract the polygons.
@@ -155,34 +150,38 @@ def get_polygons(
     else:
         raise ValueError("argument 'by' should be 'index' | 'name' | 'tuple'")
 
+    from gdsfactory import klayout_bridge as kb
+
     polygons: GetPolygonsResult = {}
 
     c = component_or_instance
+    if isinstance(c, gf.Component):
+        flat = c.get_polygons_points(by="index", layers=layers)
+    else:
+        t = c.transform
+        flat = {
+            k: [t.apply(p) for p in v]
+            for k, v in c.cell.get_polygons_points(by="index", layers=layers).items()
+        }
     if layers is None:
-        layers = [
-            (info.layer, info.datatype)
-            for info in c.kcl.layer_infos()
-            if not c.bbox(c.kcl.layer(info)).empty()
-        ]
+        layers = sorted(k for k, v in flat.items() if v)
 
     layer_indexes = [get_layer(layer) for layer in layers]
 
     for layer_index in layer_indexes:
         layer_key = get_key(layer_index)
-        if isinstance(component_or_instance, gf.Component):
-            r = gf.kdb.Region(c.begin_shapes_rec(layer_index))
-        else:
-            r = kf.kdb.Region(c.cell.begin_shapes_rec(layer_index)).transformed(
-                c.cplx_trans
-            )
         if layer_key not in polygons:
             polygons[layer_key] = []
-        if smooth:
-            r.smooth(round(smooth / c.kcl.dbu))
-        if merge:
-            r.merge()
-        for p in r.each():
-            polygons[layer_key].append(p)
+        polys = flat.get(int(layer_index), [])
+        if smooth or merge:
+            # non-differentiable: goes through a KLayout region
+            r = kb.arrays_to_region(polys)
+            if smooth:
+                r.smooth(round(smooth / gf.kcl.dbu))
+            if merge:
+                r.merge()
+            polys = kb.region_to_arrays(r)
+        polygons[layer_key].extend(polys)
     return polygons
 
 
@@ -205,19 +204,9 @@ def get_polygons_points(
     polygons_dict = get_polygons(
         component_or_instance=component_or_instance, merge=merge, by=by, layers=layers
     )
-    dbu = component_or_instance.kcl.dbu
     scale = scale or 1
     return {
-        layer: [
-            scale
-            * np.array(
-                [
-                    (point.x, point.y)
-                    for point in polygon.to_simple_polygon().to_dtype(dbu).each_point()
-                ]
-            )
-            for polygon in polygons
-        ]
+        layer: [scale * xp.asarray(polygon) for polygon in polygons]
         for layer, polygons in polygons_dict.items()
     }
 
@@ -232,34 +221,38 @@ def get_point_inside(
         layer: to find a point inside.
     """
     layer = gf.get_layer(layer)
-    return np.array(
+    return xp.asarray(
         get_polygons_points(component_or_instance, layers=[layer])[layer][0][0]
     )
 
 
 def sign_shape(pts: npt.NDArray[np.floating[Any]]) -> float:
-    pts2 = np.roll(pts, 1, axis=0)
+    pts = xp.asarray(pts)
+    pts2 = xp.roll(pts, 1, axis=0)
     dx = pts2[:, 0] - pts[:, 0]
     y = pts2[:, 1] + pts[:, 1]
-    return float(np.sign((dx * y).sum()))
+    return to_float(xp.sign((dx * y).sum()))
 
 
 def area(pts: npt.NDArray[np.floating[Any]]) -> float:
     """Returns the area."""
-    pts2 = np.roll(pts, 1, axis=0)
+    pts = xp.asarray(pts)
+    pts2 = xp.roll(pts, 1, axis=0)
     dx = pts2[:, 0] - pts[:, 0]
     y = pts2[:, 1] + pts[:, 1]
-    return float(np.sum(dx * y) / 2)
+    return xp.sum(dx * y) / 2  # type: ignore[return-value]
 
 
 def centered_diff(a: npt.NDArray[np.floating[Any]]) -> npt.NDArray[np.floating[Any]]:
-    d = (np.roll(a, -1, axis=0) - np.roll(a, 1, axis=0)) / 2
-    return np.array(d)[1:-1]
+    a = xp.asarray(a)
+    d = (xp.roll(a, -1, axis=0) - xp.roll(a, 1, axis=0)) / 2
+    return d[1:-1]  # type: ignore[return-value]
 
 
 def centered_diff2(a: npt.NDArray[np.floating[Any]]) -> npt.NDArray[np.floating[Any]]:
-    d = (np.roll(a, -1, axis=0) - a) - (a - np.roll(a, 1, axis=0))
-    return np.array(d[1:-1])
+    a = xp.asarray(a)
+    d = (xp.roll(a, -1, axis=0) - a) - (a - xp.roll(a, 1, axis=0))
+    return d[1:-1]  # type: ignore[return-value]
 
 
 def curvature(
@@ -291,8 +284,7 @@ def curvature(
     dy2 = dp2[:, 1] / dt**2
 
     res = (dx * dy2 - dx2 * dy) / (dx**2 + dy**2) ** (3 / 2)
-    assert isinstance(res, np.ndarray)
-    return res
+    return res  # type: ignore[no-any-return]
 
 
 def radius_of_curvature(
@@ -307,9 +299,10 @@ def path_length(points: npt.NDArray[np.floating[Any]]) -> float:
     Args:
         points: With shape (N, 2) representing N points with coordinates x, y.
     """
+    points = xp.asarray(points)
     dpts = points[1:, :] - points[:-1, :]
     _d = dpts**2
-    return float(np.sum(np.sqrt(_d[:, 0] + _d[:, 1])))
+    return xp.sum(xp.sqrt(_d[:, 0] + _d[:, 1]))  # type: ignore[return-value]
 
 
 def snap_angle(a: float) -> float:
@@ -318,7 +311,7 @@ def snap_angle(a: float) -> float:
     a: angle in deg
     Return angle snapped along manhattan angle
     """
-    a = a % 360
+    a = to_float(a) % 360
     if -45 < a < 45:
         return 0
     if 45 < a < 135:
@@ -332,8 +325,9 @@ def snap_angle(a: float) -> float:
 
 def angles_rad(pts: npt.NDArray[np.floating[Any]]) -> npt.NDArray[np.floating[Any]]:
     """Returns the angles (radians) of the connection between each point and the next."""
-    _pts = np.roll(pts, -1, 0)
-    return np.array(np.arctan2(_pts[:, 1] - pts[:, 1], _pts[:, 0] - pts[:, 0]))
+    pts = xp.asarray(pts)
+    _pts = xp.roll(pts, -1, 0)
+    return xp.arctan2(_pts[:, 1] - pts[:, 1], _pts[:, 0] - pts[:, 0])  # type: ignore[return-value]
 
 
 def angles_deg(pts: npt.NDArray[np.floating[Any]]) -> npt.NDArray[np.floating[Any]]:
@@ -369,7 +363,8 @@ def extrude_path(
     assert grid is not None
 
     if isinstance(points, list):
-        points = np.stack([(p[0], p[1]) for p in points], axis=0)
+        points = xp.stack([xp.stack([p[0], p[1]]) for p in points], axis=0)
+    points = xp.asarray(points, dtype=xp.float64)
 
     a = angles_deg(points)
     if with_manhattan_facing_angles:
@@ -386,30 +381,30 @@ def extrude_path(
     assert end_angle_ is not None
 
     a2 = angles_rad(points) * 0.5
-    a1 = np.roll(a2, 1)
+    a1 = xp.roll(a2, 1)
 
-    a2[-1] = end_angle_ * DEG2RAD - a2[-2]
-    a1[0] = start_angle_ * DEG2RAD - a1[1]
+    a2 = xset(a2, -1, end_angle_ * DEG2RAD - a2[-2])
+    a1 = xset(a1, 0, start_angle_ * DEG2RAD - a1[1])
 
     a_plus = a2 + a1
-    cos_a_min = np.cos(a2 - a1)
-    offsets = np.column_stack((-sin(a_plus) / cos_a_min, cos(a_plus) / cos_a_min)) * (
+    cos_a_min = xp.cos(a2 - a1)
+    offsets = xp.column_stack((-xp.sin(a_plus) / cos_a_min, xp.cos(a_plus) / cos_a_min)) * (
         0.5 * width
     )
 
-    points_back = np.flipud(points - offsets)
-    if spike_length != 0:
+    points_back = xp.flipud(points - offsets)
+    if to_float(spike_length) != 0:
         d = spike_length
         a_start = start_angle_ * DEG2RAD
         a_end = end_angle_ * DEG2RAD
-        p_start_spike = points[0] + d * np.array([[cos(a_start), sin(a_start)]])
-        p_end_spike = points[-1] + d * np.array([[cos(a_end), sin(a_end)]])
+        p_start_spike = points[0] + d * xp.array([[xp.cos(a_start), xp.sin(a_start)]])
+        p_end_spike = points[-1] + d * xp.array([[xp.cos(a_end), xp.sin(a_end)]])
 
-        pts = np.vstack((p_start_spike, points + offsets, p_end_spike, points_back))
+        pts = xp.vstack((p_start_spike, points + offsets, p_end_spike, points_back))
     else:
-        pts = np.vstack((points + offsets, points_back))
+        pts = xp.vstack((points + offsets, points_back))
 
-    return np.array(np.round(pts / grid) * grid)
+    return round_st(pts, step=grid)  # type: ignore[no-any-return]
 
 
 def trim(
@@ -440,7 +435,22 @@ def trim(
     dummy.add_polygon(domain, layer=(1, 0))
     dbbox = dummy.dbbox()
     left, bottom, right, top = dbbox.left, dbbox.bottom, dbbox.right, dbbox.top
-    component.trim(left=left, right=right, bottom=bottom, top=top, flatten=flatten)
+    from gdsfactory import klayout_bridge as kb
+
+    # Clipping is a (non-differentiable) KLayout boolean: the component is
+    # flattened and every layer is AND-ed with the domain bounding box.
+    component.flatten()
+    box = gf.kdb.Box(
+        round(to_float(left) / gf.kcl.dbu),
+        round(to_float(bottom) / gf.kcl.dbu),
+        round(to_float(right) / gf.kcl.dbu),
+        round(to_float(top) / gf.kcl.dbu),
+    )
+    clip = gf.kdb.Region(box)
+    component.polygons = {
+        k: kb.region_to_arrays(kb.arrays_to_region(v) & clip)
+        for k, v in component.polygons.items()
+    }
     return component
 
 
@@ -513,22 +523,21 @@ def remove_shapes_near_exclusion(
     Returns:
         Modified component with shapes removed/clipped.
     """
-    import klayout.db as kdb
+    from gdsfactory import klayout_bridge as kb
 
     if flatten:
         c.flatten()
 
     # Convert margin to database units
-    margin_dbu = c.kcl.to_dbu(margin)
+    margin_dbu = round(to_float(margin) / gf.kcl.dbu)
 
     # Get the exclusion region and expand it
-    exclusion_layer_kdb = gf.get_layer(exclusion_layer)
-    exclusion_region = kdb.Region(c.begin_shapes_rec(exclusion_layer_kdb))
+    exclusion_region = c.get_region(exclusion_layer)
     halo_region = exclusion_region.sized(margin_dbu)
 
-    # Get target shapes
-    target_layer_kdb = gf.get_layer(target_layer)
-    target_region = kdb.Region(cast(kf.kdb.Shapes, c.shapes(target_layer_kdb)))  # type: ignore[redundant-cast]
+    # Get target shapes (non-recursive, like the cell's own shapes)
+    target_layer_kdb = int(gf.get_layer(target_layer))
+    target_region = kb.arrays_to_region(c.polygons.get(target_layer_kdb, []))
 
     if remove_entire_shapes:
         # Remove entire shapes that interact with the exclusion halo
@@ -540,6 +549,5 @@ def remove_shapes_near_exclusion(
         cleaned_region = target_region - halo_region
 
     # Clear target layer and add cleaned geometry
-    cast(kdb.Shapes, c.shapes(target_layer_kdb)).clear()  # type: ignore[redundant-cast]
-    c.shapes(target_layer_kdb).insert(cleaned_region)
+    c.polygons[target_layer_kdb] = kb.region_to_arrays(cleaned_region)
     return c

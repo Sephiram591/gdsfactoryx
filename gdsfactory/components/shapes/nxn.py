@@ -4,9 +4,8 @@ __all__ = ["nxn"]
 
 from typing import Any
 
-import numpy as np
-
 import gdsfactory as gf
+from gdsfactory._jax import xp
 from gdsfactory.component import Component
 from gdsfactory.typings import LayerSpec
 
@@ -57,7 +56,7 @@ def nxn(
             [ysize / 2]
             if west == 1
             else list(
-                np.linspace(
+                xp.linspace(
                     wg_margin + wg_width / 2, ysize - wg_margin - wg_width / 2, west
                 )
             )
@@ -67,7 +66,7 @@ def nxn(
         for i, yi in enumerate(y_west):
             c.add_port(
                 f"W{i}",
-                center=(float(x_west), float(yi)),
+                center=(x_west, yi),
                 width=wg_width,
                 orientation=orientation,
                 layer=layer,
@@ -80,7 +79,7 @@ def nxn(
             [ysize / 2]
             if east == 1
             else list(
-                np.linspace(
+                xp.linspace(
                     wg_margin + wg_width / 2, ysize - wg_margin - wg_width / 2, east
                 )
             )
@@ -90,7 +89,7 @@ def nxn(
         for i, yi in enumerate(y_east):
             c.add_port(
                 f"E{i}",
-                center=(float(x_east), float(yi)),
+                center=(x_east, yi),
                 width=wg_width,
                 orientation=orientation,
                 layer=layer,
@@ -103,7 +102,7 @@ def nxn(
             [xsize / 2]
             if north == 1
             else list(
-                np.linspace(
+                xp.linspace(
                     wg_margin + wg_width / 2, xsize - wg_margin - wg_width / 2, north
                 )
             )
@@ -113,7 +112,7 @@ def nxn(
         for i, xi in enumerate(x_north):
             c.add_port(
                 f"N{i}",
-                center=(float(xi), float(y_north)),
+                center=(xi, y_north),
                 width=wg_width,
                 orientation=orientation,
                 layer=layer,
@@ -125,7 +124,7 @@ def nxn(
             [xsize / 2]
             if south == 1
             else list(
-                np.linspace(
+                xp.linspace(
                     wg_margin + wg_width / 2, xsize - wg_margin - wg_width / 2, south
                 )
             )
@@ -135,7 +134,7 @@ def nxn(
         for i, xi in enumerate(x_south):
             c.add_port(
                 f"S{i}",
-                center=(float(xi), float(y_south)),
+                center=(xi, y_south),
                 width=wg_width,
                 orientation=orientation,
                 layer=layer,

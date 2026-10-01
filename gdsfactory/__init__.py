@@ -12,12 +12,16 @@ from aenum import constant
 
 import kfactory as kf
 from kfactory.layout import Constants
-from kfactory import LayerEnum, show, Instance
+from kfactory import LayerEnum
 from kfactory.layout import kcl
 from kfactory import logger
 import klayout.db as kdb
 from kfactory import DSchematic as Schematic
-from kfactory import DPin, ProtoPin
+
+from gdsfactory import _jax  # enables float64 and provides tracer helpers
+from gdsfactory._ports import Pin as DPin
+from gdsfactory._ports import Pin as ProtoPin
+from gdsfactory.transform import Transform
 
 from gdsfactory._cell import cell, vcell, cell_with_module_name, schematic_cell
 from gdsfactory._kcl import clear_cache
@@ -27,6 +31,7 @@ from gdsfactory.component import (
     ComponentBase,
     ComponentAllAngle,
     ComponentReference,
+    ComponentReference as Instance,
     container,
 )
 from gdsfactory.config import CONF, PATH, __version__
@@ -84,6 +89,9 @@ from gdsfactory.pdk import (
 from gdsfactory.get_factories import get_cells
 from gdsfactory.grid import grid, grid_with_text
 
+from gdsfactory import rasterize
+from gdsfactory.klayout_bridge import show
+
 c = components
 Region = kdb.Region
 
@@ -121,6 +129,7 @@ __all__ = (
     "Region",
     "Schematic",
     "Section",
+    "Transform",
     "__version__",
     "add_padding",
     "add_padding_container",
@@ -171,6 +180,7 @@ __all__ = (
     "read",
     "routing",
     "schematic_cell",
+    "rasterize",
     "show",
     "snap",
     "technology",

@@ -2,9 +2,8 @@ from __future__ import annotations
 
 __all__ = ["torus"]
 
-import numpy as np
-
 import gdsfactory as gf
+from gdsfactory._jax import xp
 from gdsfactory.component import Component
 from gdsfactory.typings import LayerSpec
 
@@ -38,17 +37,17 @@ def torus(
     c = Component()
     sweep = end_angle - start_angle
     n_points = max(int(abs(sweep) / angle_resolution), 2) + 1
-    theta = np.deg2rad(np.linspace(start_angle, end_angle, n_points, endpoint=True))
+    theta = xp.deg2rad(xp.linspace(start_angle, end_angle, n_points, endpoint=True))
 
-    outer_x = outer_radius * np.cos(theta)
-    outer_y = outer_radius * np.sin(theta)
-    inner_x = inner_radius * np.cos(theta[::-1])
-    inner_y = inner_radius * np.sin(theta[::-1])
+    outer_x = outer_radius * xp.cos(theta)
+    outer_y = outer_radius * xp.sin(theta)
+    inner_x = inner_radius * xp.cos(theta[::-1])
+    inner_y = inner_radius * xp.sin(theta[::-1])
 
     points = list(
         zip(
-            np.concatenate([outer_x, inner_x]),
-            np.concatenate([outer_y, inner_y]),
+            xp.concatenate([outer_x, inner_x]),
+            xp.concatenate([outer_y, inner_y]),
             strict=False,
         )
     )
@@ -58,11 +57,11 @@ def torus(
         width = outer_radius - inner_radius
         mid_r = (inner_radius + outer_radius) / 2
         prefix = "o" if port_type == "optical" else "e"
-        sa_rad = np.deg2rad(start_angle)
-        ea_rad = np.deg2rad(end_angle)
+        sa_rad = xp.deg2rad(start_angle)
+        ea_rad = xp.deg2rad(end_angle)
         c.add_port(
             f"{prefix}1",
-            center=(mid_r * np.cos(sa_rad), mid_r * np.sin(sa_rad)),
+            center=(mid_r * xp.cos(sa_rad), mid_r * xp.sin(sa_rad)),
             width=width,
             orientation=start_angle + 90,
             layer=layer,
@@ -70,7 +69,7 @@ def torus(
         )
         c.add_port(
             f"{prefix}2",
-            center=(mid_r * np.cos(ea_rad), mid_r * np.sin(ea_rad)),
+            center=(mid_r * xp.cos(ea_rad), mid_r * xp.sin(ea_rad)),
             width=width,
             orientation=end_angle - 90,
             layer=layer,

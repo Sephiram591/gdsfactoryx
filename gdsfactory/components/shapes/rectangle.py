@@ -6,9 +6,8 @@ from collections.abc import Sequence
 from functools import partial
 from typing import Any
 
-import numpy as np
-
 import gdsfactory as gf
+from gdsfactory._jax import xp
 from gdsfactory.component import Component
 from gdsfactory.typings import Ints, LayerSpec, LayerSpecs, Size
 
@@ -86,7 +85,7 @@ def rectangles(
 
     """
     c = Component()
-    size_np = np.array(size, dtype=np.float64)
+    size_np = xp.array(size, dtype=xp.float64)
     ref0 = None
     offsets = offsets or [0] * len(layers)
 

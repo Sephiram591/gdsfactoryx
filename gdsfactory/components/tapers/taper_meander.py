@@ -12,6 +12,7 @@ from math import pi
 import numpy as np
 
 import gdsfactory as gf
+from gdsfactory._jax import maybe_float, round_st, xp
 from gdsfactory.component import Component
 from gdsfactory.typings import LayerSpec
 
@@ -52,7 +53,7 @@ def taper_meander(
 
     def taper_width(x: float) -> float:
         """Interpolate width at a given x position."""
-        return float(np.interp(x, x_taper_arr, w_taper_arr))
+        return maybe_float(xp.interp(x, x_taper_arr, w_taper_arr))  # type: ignore[no-any-return]
 
     @gf.cell(tags=["tapers"])
     def taper_section(
@@ -71,16 +72,16 @@ def taper_meander(
         """
         c = gf.Component()
         length = x_end - x_start
-        x = np.linspace(0, length, num_pts)
-        widths = np.linspace(taper_width(x_start), taper_width(x_end), num_pts)
-        xpts = np.concatenate([x, x[::-1]])
-        ypts = np.concatenate([widths / 2, -widths[::-1] / 2])
-        points = np.column_stack((xpts, ypts))
+        x = xp.linspace(0, length, num_pts)
+        widths = xp.linspace(taper_width(x_start), taper_width(x_end), num_pts)
+        xpts = xp.concatenate([x, x[::-1]])
+        ypts = xp.concatenate([widths / 2, -widths[::-1] / 2])
+        points = xp.column_stack((xpts, ypts))
         c.add_polygon(points, layer=layer)
 
         # Snap port widths to even multiples of 0.002 um (2 dbu)
-        width1_snapped = round(widths[0] / 0.002) * 0.002
-        width2_snapped = round(widths[-1] / 0.002) * 0.002
+        width1_snapped = round_st(widths[0], step=0.002)
+        width2_snapped = round_st(widths[-1], step=0.002)
         c.add_port(
             name="o1",
             center=(0, 0),
@@ -126,8 +127,8 @@ def taper_meander(
             angular_step=angle_resolution,
         )
         # Snap widths to even multiples of 0.002 um (2 dbu)
-        width1_snapped = round(width1 / 0.002) * 0.002
-        width2_snapped = round(width2 / 0.002) * 0.002
+        width1_snapped = round_st(width1, step=0.002)
+        width2_snapped = round_st(width2, step=0.002)
         # Extrude the path with the first width
         arc_component = gf.path.extrude(path1, width=width1_snapped, layer=layer)
         c.add_ref(arc_component)

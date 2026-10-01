@@ -2,11 +2,14 @@ from __future__ import annotations
 
 __all__ = ["array_polar"]
 
-import numpy as np
+import math
+
 from kfactory.conf import CheckInstances
 
 import gdsfactory as gf
+from gdsfactory._jax import to_float, xp
 from gdsfactory.component import Component
+from gdsfactory.transform import Transform
 from gdsfactory.typings import ComponentSpec
 
 
@@ -40,15 +43,15 @@ def array_polar(
     c = Component()
     comp = gf.get_component(component)
 
-    if abs(end_angle - start_angle) >= 360.0:
-        angles = np.linspace(start_angle, end_angle, n_items, endpoint=False)
+    if abs(to_float(end_angle) - to_float(start_angle)) >= 360.0:
+        angles = xp.linspace(start_angle, end_angle, n_items, endpoint=False)
     else:
-        angles = np.linspace(start_angle, end_angle, n_items, endpoint=True)
+        angles = xp.linspace(start_angle, end_angle, n_items, endpoint=True)
 
     for i, angle_deg in enumerate(angles):
-        angle_rad = np.radians(angle_deg)
-        x = radius * np.cos(angle_rad)
-        y = radius * np.sin(angle_rad)
+        angle_rad = xp.radians(angle_deg)
+        x = radius * xp.cos(angle_rad)
+        y = radius * xp.sin(angle_rad)
 
         ref = c.add_ref(comp)
         if rotate_items:
@@ -56,9 +59,20 @@ def array_polar(
         ref.move((x, y))
 
         if add_ports and comp.ports:
+            # upstream copies the ports with the instance's simple (integer)
+            # transformation `ref.trans`: rotation floored to a multiple of 90 deg
+            # and displacement on the dbu grid.
+            t = ref.transform
+            rot90 = 90 * (math.floor((to_float(t.rotation) % 360) / 90 + 1e-9) % 4)
+            trans = Transform(
+                gf.snap.snap_to_grid(t.x),
+                gf.snap.snap_to_grid(t.y),
+                rot90,
+                t.mirror,
+            )
             for port in comp.ports:
                 name = f"{port.name}_{i + 1}"
-                c.add_port(name, port=port.copy(ref.trans))
+                c.add_port(name, port=port.copy(trans))
 
     elec_ports = [p for p in c.ports if p.name and p.port_type == "electrical"]
     for p in elec_ports:

@@ -2,9 +2,8 @@ from __future__ import annotations
 
 __all__ = ["taper_parabolic"]
 
-import numpy as np
-
 import gdsfactory as gf
+from gdsfactory._jax import xp
 from gdsfactory.path import transition_exponential
 from gdsfactory.typings import LayerSpec
 
@@ -30,13 +29,13 @@ def taper_parabolic(
         npoints: number of points.
         layer: layer spec.
     """
-    x = np.linspace(0, 1, npoints)
+    x = xp.linspace(0, 1, npoints)
     y = transition_exponential(y1=width1, y2=width2, exp=exp)(x) / 2
 
     x = length * x
-    points1 = np.array([x, y]).T
-    points2 = np.flipud(np.array([x, -y]).T)
-    points = np.concatenate([points1, points2])
+    points1 = xp.stack([x, y]).T
+    points2 = xp.flipud(xp.stack([x, -y]).T)
+    points = xp.concatenate([points1, points2])
 
     c = gf.Component()
     c.add_polygon(points, layer=layer)

@@ -32,11 +32,11 @@ from collections.abc import Sequence
 from typing import Any, Literal, cast
 
 import kfactory as kf
-from kfactory.routing.generic import ManhattanRoute
-from kfactory.routing.optical import place_manhattan
 
 import gdsfactory as gf
+from gdsfactory._jax import to_float
 from gdsfactory.component import Component
+from gdsfactory.routing._kf_router import ManhattanRoute, route_bundle_kf
 from gdsfactory.config import CONF
 from gdsfactory.routing.auto_taper import add_auto_tapers
 from gdsfactory.typings import (
@@ -162,15 +162,6 @@ def route_single(
         xs = kwargs.pop("cross_section", cross_section)
         return gf.get_component(straight, length=length, cross_section=xs, **kwargs)
 
-    def straight_dbu(width: int, length: int, **kwargs: Any) -> gf.Component:
-        xs = kwargs.pop("cross_section", cross_section)
-        return straight_(
-            c.kcl.to_um(width),
-            c.kcl.to_um(length),
-            cross_section=xs,
-            **kwargs,
-        )
-
     if steps and waypoints:
         raise ValueError("Provide only one of steps or waypoints")
 
@@ -195,10 +186,11 @@ def route_single(
 
     if waypoints_list and steps and len(waypoints_list) < 2:
         p = waypoints_list[-1]
-        x, y = (p.x, p.y) if isinstance(p, kf.kdb.DPoint) else (p[0], p[1])
+        x, y = (p.x, p.y) if hasattr(p, "x") and hasattr(p, "y") else (p[0], p[1])
         x1, y1 = p1.center
         x2, y2 = p2.center
         orientation = p2.orientation
+        orientation = None if orientation is None else round(to_float(orientation))
         if orientation is not None and int(orientation) in {0, 180}:
             yt = y1 + (y2 - y1) / 3
             ytt = y1 + 2 * (y2 - y1) / 3
@@ -209,96 +201,41 @@ def route_single(
             waypoints_list = [(xt, y), (xtt, y)]
 
     if waypoints_list:
-        w: list[kf.kdb.Point] = []
-        if not isinstance(waypoints_list[0], kf.kdb.DPoint):
-            w.append(c.kcl.to_dbu(kf.kdb.DPoint(*p1.center)))
-            for p in waypoints_list:
-                if isinstance(p, tuple):
-                    w.append(c.kcl.to_dbu(kf.kdb.DPoint(p[0], p[1])))
-                else:
-                    w.append(p.to_itype(c.kcl.dbu))
-            w.append(c.kcl.to_dbu(kf.kdb.DPoint(*p2.center)))
-        else:
-            w = [
-                p.to_itype(c.kcl.dbu)
-                for p in cast("Sequence[gf.kdb.DPoint]", waypoints_list)
-            ]
-
+        w = [
+            (p.x, p.y) if hasattr(p, "x") and hasattr(p, "y") else (p[0], p[1])
+            for p in waypoints_list
+        ]
+        # place the route through exactly these points (start, waypoints, end)
+        pts = [(p1.x, p1.y), *w, (p2.x, p2.y)]
         kf_on_placer_error = (
             "error" if on_placer_error == "warning" else on_placer_error
         )
         try:
-            return place_manhattan(
-                component.to_itype(),
-                p1=p1.to_itype(),
-                p2=p2.to_itype(),
-                straight_factory=straight_dbu,
-                bend90_cell=bend90.to_itype(),
-                pts=w,
+            return place_manhattan_points(
+                component,
+                p1,
+                p2,
+                pts,
+                straight_factory=straight_,
+                bend90=bend90,
                 port_type=port_type,
                 allow_width_mismatch=allow_width_mismatch,
-                route_width=c.kcl.to_dbu(width),
+                route_width=width,
+                radius=radius,
             )
         except Exception as e:
             if on_placer_error == "error":
                 raise kf.routing.generic.PlacerError(
                     f"Error while trying to place route from {p1.name} to {p2.name} at"
-                    f" points (dbu): {w}"
+                    f" points (um): {[(to_float(a), to_float(b)) for a, b in pts]}"
                 ) from e
-
             if on_placer_error == "show_error":
-                ps = p1
-                pe = p2
-                c = component
-                pts = w
-                db = kf.rdb.ReportDatabase("Route Placing Errors")
-                cell = db.create_cell(
-                    (
-                        c.kcl._future_cell_name or c.name
-                        if c.name is not None and c.name.startswith("Unnamed_")
-                        else c.name
-                    )
-                    or ""
-                )
-                cat = db.create_category(f"{ps.name} - {pe.name}")
-                it = db.create_item(cell=cell, category=cat)
-                it.add_value(
-                    f"Error while trying to place route from {ps.name} to {pe.name} at"
-                    f" points (dbu): {pts}"
-                )
-                it.add_value(f"Exception: {e}")
-                if route_width is not None:
-                    path = kf.kdb.Path(pts, c.kcl.to_dbu(route_width))
-                else:
-                    path = kf.kdb.Path(pts, c.kcl.to_dbu(ps.width))
-                it.add_value(c.kcl.to_um(path.polygon()))
-                c.name = (
-                    c.kcl._future_cell_name or c.name
-                    if c.name is not None and c.name.startswith("Unnamed_")
-                    else c.name
-                ) or ""
-                c.show(lyrdb=db)
-                raise kf.routing.generic.PlacerError(
-                    f"Error while trying to place route from {ps.name} to {pe.name} at"
-                    f" points (dbu): {pts}"
-                ) from e
-
+                raise
             if on_placer_error == "warning":
                 gf.logger.error(f"Error in route_single: {e}")
                 warnings.warn(f"Routing failed: {e}", stacklevel=2)
-
-            layer_error = gf.CONF.layer_error_path
-            layer_index = c.kcl.layer(*layer_error)
-            if route_width is not None:
-                path = kf.kdb.Path(w, c.kcl.to_dbu(route_width))
-            else:
-                path = kf.kdb.Path(w, c.kcl.to_dbu(p1.width))
-            c.shapes(layer_index).insert(path)
-            return ManhattanRoute(
-                backbone=w,
-                start_port=p1.to_itype(),
-                end_port=p2.to_itype(),
-            )
+            _ = kf_on_placer_error
+            return _error_path(component, p1, p2, pts, route_width or p1.width)
 
     else:
         kf_on_collision = "error" if on_collision == "warning" else on_collision
@@ -306,20 +243,23 @@ def route_single(
             "error" if on_placer_error == "warning" else on_placer_error
         )
         try:
-            return kf.routing.optical.route_bundle(
-                c=component,
-                start_ports=[p1],
-                end_ports=[p2],
+            return route_bundle_kf(
+                component,
+                [p1],
+                [p2],
+                router="optical",
                 straight_factory=straight_,
-                bend90_cell=bend90,
+                bend90=bend90,
                 starts=start_straight_length,
                 ends=end_straight_length,
                 separation=0,
                 place_port_type=port_type,
                 allow_width_mismatch=allow_width_mismatch,
                 route_width=route_width,
+                radius=radius,
                 on_collision=kf_on_collision,
                 on_placer_error=kf_on_placer_error,
+                obstacles=component,
             )[0]
         except Exception as e:
             if on_placer_error == "error" or on_collision == "error":
@@ -332,20 +272,76 @@ def route_single(
                 gf.logger.error(f"Error in route_single: {e}")
                 warnings.warn(f"Routing failed: {e}", stacklevel=2)
 
-            layer_error_path = gf.get_layer_info(gf.CONF.layer_error_path)
-            route = kf.routing.electrical.route_bundle(
+            route = route_bundle_kf(
                 component,
                 [p1],
                 [p2],
+                router="electrical",
                 separation=0,
                 starts=start_straight_length,
                 ends=end_straight_length,
                 on_collision=None,
                 on_placer_error=None,
                 route_width=width,
-                place_layer=layer_error_path,
+                place_layer=gf.CONF.layer_error_path,
             )
             return route[0]
+
+
+def _error_path(
+    component: Component, p1: Port, p2: Port, pts: Sequence[Any], width: Any
+) -> ManhattanRoute:
+    """Draws the requested backbone on the error layer."""
+    import klayout.db as kdb
+
+    from gdsfactory._jax import asarray, jnp
+    from gdsfactory.path import Path
+
+    pts_arr = jnp.stack([jnp.stack([asarray(a), asarray(b)]) for a, b in pts])
+    path = Path(pts_arr)
+    w = asarray(width)
+    q1 = path.centerpoint_offset_curve(pts_arr, w / 2, path.start_angle, path.end_angle)
+    q2 = path.centerpoint_offset_curve(pts_arr, -w / 2, path.start_angle, path.end_angle)
+    component.add_polygon(jnp.concatenate([q1, q2[::-1]]), layer=gf.CONF.layer_error_path)
+    return ManhattanRoute(
+        backbone=[kdb.Point(round(to_float(a) * 1000), round(to_float(b) * 1000)) for a, b in pts],
+        backbone_um=pts_arr,
+        start_port=p1,
+        end_port=p2,
+    )
+
+
+def place_manhattan_points(
+    component: Component,
+    p1: Port,
+    p2: Port,
+    pts: Sequence[Any],
+    straight_factory: Any,
+    bend90: Component,
+    port_type: str = "optical",
+    allow_width_mismatch: bool = False,
+    route_width: Any = None,
+    radius: Any = None,
+) -> ManhattanRoute:
+    """Places bends and straights along a manhattan backbone (differentiable).
+
+    Uses kfactory's ``place_manhattan`` on concrete values for the topology and the
+    differentiable rebuild of :mod:`gdsfactory.routing._kf_router`.
+    """
+    from gdsfactory.routing._kf_router import place_manhattan_kf
+
+    return place_manhattan_kf(
+        component,
+        p1,
+        p2,
+        pts,
+        straight_factory=straight_factory,
+        bend90=bend90,
+        port_type=port_type,
+        allow_width_mismatch=allow_width_mismatch,
+        route_width=route_width,
+        radius=radius,
+    )
 
 
 def route_single_electrical(
@@ -375,15 +371,16 @@ def route_single_electrical(
     layer = layer or xs.layer
     width = width or xs.width
     layer = gf.get_layer(layer)
-    kf.routing.electrical.route_bundle(
-        c=component,
-        start_ports=[port1],
-        end_ports=[port2],
+    route_bundle_kf(
+        component,
+        [port1],
+        [port2],
+        router="electrical",
         separation=0,
         route_width=width,
-        place_layer=kf.kdb.LayerInfo(layer[0], layer[1])
-        if isinstance(layer, tuple)
-        else None,
+        # upstream passes a layer only for tuple specs, which get_layer never returns,
+        # so the wire is drawn on the layer of port1
+        place_layer=None,
         starts=start_straight_length,
         ends=end_straight_length,
     )

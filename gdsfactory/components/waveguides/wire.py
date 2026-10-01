@@ -14,6 +14,7 @@ from typing import Any
 import numpy as np
 
 import gdsfactory as gf
+from gdsfactory._jax import maybe_float, round_st
 from gdsfactory.component import Component
 from gdsfactory.cross_section import (
     port_names_electrical,
@@ -169,7 +170,7 @@ def wire_corner45(
         )
 
     else:
-        w = float(np.round(width * np.sqrt(2), 3))
+        w = maybe_float(round_st(width * np.sqrt(2), 3))
 
         c.add_port(
             name="e1",
@@ -187,7 +188,7 @@ def wire_corner45(
             layer=layer,
             port_type="electrical",
         )
-    c.info["length"] = float(np.sqrt(2) * radius)
+    c.info["length"] = maybe_float(np.sqrt(2) * radius)
     for port in c.ports:
         if port.port_type == "electrical":
             c.create_pin(ports=[port], name=port.name)

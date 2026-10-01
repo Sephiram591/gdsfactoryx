@@ -4,9 +4,8 @@ from __future__ import annotations
 
 __all__ = ["die"]
 
-import numpy as np
-
 import gdsfactory as gf
+from gdsfactory._jax import xp
 from gdsfactory.typings import ComponentSpec, Float2, LayerSpec, Size
 
 
@@ -45,7 +44,7 @@ def die(
     if layer:
         if not draw_corners:
             street_length = sx
-        xpts = np.array(
+        xpts = xp.array(
             [
                 sx,
                 sx,
@@ -57,7 +56,7 @@ def die(
         )
         if not draw_corners:
             street_length = sy
-        ypts = np.array(
+        ypts = xp.array(
             [
                 sy,
                 sy - street_length,
@@ -67,10 +66,10 @@ def die(
                 sy,
             ]
         )
-        c.add_polygon(list(zip(xpts, ypts, strict=False)), layer=layer)
-        c.add_polygon(list(zip(-xpts, ypts, strict=False)), layer=layer)
-        c.add_polygon(list(zip(xpts, -ypts, strict=False)), layer=layer)
-        c.add_polygon(list(zip(-xpts, -ypts, strict=False)), layer=layer)
+        c.add_polygon(xp.stack([xpts, ypts], axis=1), layer=layer)
+        c.add_polygon(xp.stack([-xpts, ypts], axis=1), layer=layer)
+        c.add_polygon(xp.stack([xpts, -ypts], axis=1), layer=layer)
+        c.add_polygon(xp.stack([-xpts, -ypts], axis=1), layer=layer)
 
     if bbox_layer:
         c.add_polygon([(sx, sy), (sx, -sy), (-sx, -sy), (-sx, sy)], layer=bbox_layer)

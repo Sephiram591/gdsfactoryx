@@ -5,6 +5,7 @@ __all__ = ["resistance_meander"]
 import numpy as np
 
 import gdsfactory as gf
+from gdsfactory._jax import to_float
 from gdsfactory.component import Component
 from gdsfactory.typings import LayerSpec, Size
 
@@ -96,7 +97,7 @@ def resistance_meander(
         raise ValueError("Width of cell must be a positive real number")
 
     # Performing preliminary calculations
-    num_rows = int(np.floor(z / (2 * width)))
+    num_rows = int(np.floor(to_float(z) / (2 * to_float(width))))
     if num_rows % 2 == 0:
         num_rows -= 1
     num_columns = num_rows - 1

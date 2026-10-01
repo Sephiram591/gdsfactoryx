@@ -64,6 +64,7 @@ import yaml
 from gdsfactory import typings
 from gdsfactory.add_pins import add_instance_label
 from gdsfactory.component import Component, ComponentAllAngle, ComponentReference
+from gdsfactory.transform import Transform
 from gdsfactory.schematic import (
     Bundle,
     GridArray,
@@ -350,7 +351,7 @@ def place(
             if mirror is True and port:
                 ref.dmirror_x(x=_get_anchor_value_from_name(ref, port, "x") or 0)
             elif mirror is True:
-                ref.dcplx_trans *= kf.kdb.DCplxTrans(1, 0, True, 0, 0)
+                ref.transform = ref.transform * Transform(0.0, 0.0, 0.0, mirror=True)
             elif mirror is False:
                 pass
             elif isinstance(mirror, str):
@@ -1036,11 +1037,7 @@ def _add_ports(
             raise ValueError(f"{i!r} not in {list(refs)}")
 
         # Optimize: Check port presence directly in mapping (faster than building list)
-        ports_keys = (
-            ref.ports._ports.keys()
-            if hasattr(ref.ports, "_ports")
-            else [p.name for p in ref.ports]
-        )
+        ports_keys = ref.ports.keys()
         if p not in ports_keys:
             raise ValueError(f"{p!r} not in {list(ports_keys)} for {i!r}.")
 
@@ -1106,7 +1103,7 @@ def _update_reference_by_placement(
                 assert anchor_x is not None, f"anchor_x is None for {port!r}"
                 ref.dmirror_x(x=anchor_x)
             else:
-                ref.dcplx_trans *= kf.kdb.DCplxTrans(1, 0, True, 0, 0)
+                ref.transform = ref.transform * Transform(0.0, 0.0, 0.0, mirror=True)
         elif isinstance(mirror, str) and mirror in port_names:
             x_mirror = ref.ports[mirror].x
             ref.dmirror_x(x_mirror)

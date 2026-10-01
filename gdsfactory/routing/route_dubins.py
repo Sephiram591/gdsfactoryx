@@ -3,15 +3,14 @@
 https://quentinwach.com/blog/2024/02/15/dubins-paths-for-waveguide-routing.html
 """
 
-import math as m
-from math import cos, radians, sin
-from typing import Literal
+from typing import Any, Literal
 
-import kfactory as kf
-from kfactory.routing.aa.optical import OpticalAllAngleRoute
+import jax.numpy as m
 
 import gdsfactory as gf
-from gdsfactory.component import Component
+from gdsfactory._jax import to_float
+from gdsfactory.component import Component, ComponentReference
+from gdsfactory.routing._kf_router import ManhattanRoute
 from gdsfactory.components.bends import bend_circular_all_angle
 from gdsfactory.components.waveguides import straight_all_angle
 from gdsfactory.typings import CrossSectionSpec, Port
@@ -22,8 +21,11 @@ def route_dubins(
     port1: Port,
     port2: Port,
     cross_section: CrossSectionSpec,
-) -> OpticalAllAngleRoute:
+) -> ManhattanRoute:
     """Route between ports using Dubins paths with radius from cross-section.
+
+    Differentiable with respect to the port positions/orientations and the radius
+    (the choice of the path type LSL/RSR/... is made on concrete values).
 
     Args:
         component: component to add the route to.
@@ -33,13 +35,13 @@ def route_dubins(
     """
     # Get start position and orientation
     x1, y1 = port1.center
-    angle1 = float(port1.orientation)
+    angle1 = port1.orientation
     START = (x1, y1, angle1)  # Convert to um
 
     # Get end position and orientation
     x2, y2 = port2.center
-    angle2 = float(port2.orientation)
-    angle2 = (angle2 + 180) % 360  # Adjust for input connection
+    angle2 = port2.orientation
+    angle2 = m.mod(angle2 + 180, 360)  # Adjust for input connection
     END = (x2, y2, angle2)  # Convert to um
 
     xs = gf.get_cross_section(cross_section)
@@ -48,19 +50,23 @@ def route_dubins(
     instances = place_dubins_path(component, xs, port1, solution=path)
     length = dubins_path_length(START, END, xs)
 
-    backbone = [gf.kdb.DPoint(x1, y1), gf.kdb.DPoint(x2, y2)]  # TODO: fix this
-    return OpticalAllAngleRoute(
+    backbone = [
+        gf.kdb.DPoint(to_float(x1), to_float(y1)),
+        gf.kdb.DPoint(to_float(x2), to_float(y2)),
+    ]  # TODO: fix this
+    return ManhattanRoute(
         backbone=backbone,
-        start_port=port1.to_itype(),
-        end_port=port2.to_itype(),
+        backbone_um=m.stack([m.stack([x1, y1]), m.stack([x2, y2])]),
+        start_port=port1,
+        end_port=port2,
         length=length,
         instances=instances,
     )
 
 
 def general_planner(
-    planner: str, alpha: float, beta: float, d: float
-) -> tuple[list[float | Literal[0]], list[str], float] | None:
+    planner: str, alpha: Any, beta: Any, d: Any
+) -> tuple[list[Any], list[str], Any] | None:
     """Finds the optimal path between two points using various planning methods."""
     sa = m.sin(alpha)
     sb = m.sin(beta)
@@ -135,7 +141,7 @@ def general_planner(
         if planner[i].islower():
             path[i] = (2 * m.pi) - path[i]
 
-    cost = sum(map(abs, path))
+    cost = sum(m.abs(v) for v in path)
 
     return (path, mode, cost)
 
@@ -198,7 +204,7 @@ def dubins_path(
 
     # Find best path
     planners = ["LSL", "RSR", "LSR", "RSL", "RLR", "LRL"]
-    bcost = float("inf")
+    bcost: Any = float("inf")
     bt, bp, bq, bmode = None, None, None, None
 
     for planner in planners:
@@ -207,7 +213,7 @@ def dubins_path(
             continue
         (path, mode, cost) = solution
         (t, p, q) = path
-        if bcost > cost:
+        if to_float(bcost) > to_float(cost):
             bt, bp, bq, bmode = t, p, q, mode
             bcost = cost
 
@@ -219,7 +225,9 @@ def dubins_path(
 
 def mod_to_pi(angle: float) -> float:
     """Normalizes an angle to the range [0, 2*pi)."""
-    return angle - 2.0 * m.pi * m.floor(angle / 2.0 / m.pi)
+    import jax
+
+    return angle - 2.0 * m.pi * jax.lax.stop_gradient(m.floor(angle / 2.0 / m.pi))
 
 
 def pi_to_pi(angle: float) -> float:
@@ -250,9 +258,9 @@ def linear(
 
 def arrow_orientation(angle: float) -> tuple[float, float]:
     """Returns x, y setoffs for a given angle to orient the arrows marking the yaw of the start and end points."""
-    rad = radians(angle)
-    alpha_x = cos(rad)
-    alpha_y = sin(rad)
+    rad = m.radians(angle)
+    alpha_x = m.cos(rad)
+    alpha_y = m.sin(rad)
     return alpha_x, alpha_y
 
 
@@ -261,7 +269,7 @@ def place_dubins_path(
     xs: CrossSectionSpec,
     port1: Port,
     solution: list[tuple[str, float, float]],
-) -> list[kf.VInstance]:
+) -> list[ComponentReference]:
     """Creates GDS component with Dubins path.
 
     Args:
@@ -273,7 +281,7 @@ def place_dubins_path(
     c = component
     current_position = port1
 
-    instances: list[kf.VInstance] = []
+    instances: list[ComponentReference] = []
 
     for mode, length, radius in solution:
         if mode == "L":

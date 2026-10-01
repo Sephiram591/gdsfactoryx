@@ -4,6 +4,7 @@ import math
 
 import gdsfactory as gf
 from gdsfactory import Component
+from gdsfactory._jax import to_float
 from gdsfactory.technology import LayerStack
 from gdsfactory.typings import ComponentSpec, LayerSpec, LayerSpecs
 
@@ -803,7 +804,7 @@ def _stacked_half(
                 (-sep_total / 2 - width / 2, h - 3 * width / 2 - spacing),
                 (sep_total / 2 + width / 2, h - width / 2),
             ]:
-                dx = math.copysign(1, cx) * (extend - width) / 2
+                dx = math.copysign(1, to_float(cx)) * (extend - width) / 2
                 _add_via_array(
                     c,
                     via_component,

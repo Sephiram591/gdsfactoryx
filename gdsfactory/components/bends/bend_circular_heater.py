@@ -3,6 +3,7 @@ from __future__ import annotations
 __all__ = ["bend_circular_heater"]
 
 import gdsfactory as gf
+from gdsfactory._jax import maybe_float
 from gdsfactory.component import Component
 from gdsfactory.path import arc
 from gdsfactory.typings import CrossSectionSpec, LayerSpec
@@ -58,9 +59,9 @@ def bend_circular_heater(
     path = p.extrude(xs)
     ref = c << path
     c.add_ports(ref.ports)
-    c.info["length"] = p.length()
-    c.info["dx"] = float(abs(p.points[0][0] - p.points[-1][0]))
-    c.info["dy"] = float(abs(p.points[0][0] - p.points[-1][0]))
+    c.info["length"] = maybe_float(p.length())
+    c.info["dx"] = maybe_float(abs(p.points[0][0] - p.points[-1][0]))
+    c.info["dy"] = maybe_float(abs(p.points[0][0] - p.points[-1][0]))
     if not allow_min_radius_violation:
         x.validate_radius(radius)
     c.flatten()

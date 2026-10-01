@@ -106,7 +106,9 @@ def kcell_to_component(kcell: Any) -> Component:
             kcell.kcl[ci].get_meta_data()
         except Exception:
             pass
-    return from_kfactory(kcell)
+    c = from_kfactory(kcell)
+    c.locked = False  # like upstream, the imported top cell is editable
+    return c
 
 
 def import_gds_with_conflicts(

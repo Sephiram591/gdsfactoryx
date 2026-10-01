@@ -1,8 +1,8 @@
 __all__ = ["coupler_bent"]
 
-import numpy as np
 
 import gdsfactory as gf
+from gdsfactory._jax import round_st, xp
 
 from .._schematic import coupler_schematic
 
@@ -32,7 +32,7 @@ def coupler_bent_half(
     """
     radius_outer = radius + (width1 + gap) / 2
     radius_inner = radius - (width2 + gap) / 2
-    alpha = round(np.rad2deg(length / (2 * radius)), 4)
+    alpha = round_st(xp.rad2deg(length / (2 * radius)), 4)
     beta = alpha
 
     c = gf.Component()

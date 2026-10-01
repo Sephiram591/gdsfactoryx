@@ -20,6 +20,7 @@ from gdsfactory._jax import (
     cos_deg,
     is_tracer,
     jnp,
+    xp,
     maybe_float,
     sin_deg,
     to_float,
@@ -65,6 +66,7 @@ class Port:
         "mirror",
         "name",
         "port_type",
+        "__dict__",  # allows extra attributes (e.g. name_original)
     )
 
     def __init__(
@@ -83,7 +85,7 @@ class Port:
         self._center = _point(center)
         self._width = maybe_float(width)
         self._orientation = _angle(orientation)
-        self.layer = layer
+        self.layer = _layer_enum(layer)
         self.port_type = port_type
         self.info = PortInfo(info or {})
         self.mirror = mirror
@@ -93,8 +95,16 @@ class Port:
 
     # ------------------------------------------------------------------ props
     @property
-    def center(self) -> Array:
+    def center(self) -> tuple[Any, Any]:
+        """(x, y) tuple (entries are floats/numpy scalars, or tracers when traced)."""
+        return (self._center[0], self._center[1])
+
+    @property
+    def center_array(self) -> Array:
+        """Center as a (2,) array (numpy, or jax when traced)."""
         return self._center
+
+    xy = center_array
 
     @center.setter
     def center(self, value: Any) -> None:
@@ -106,7 +116,7 @@ class Port:
 
     @x.setter
     def x(self, value: Any) -> None:
-        self._center = jnp.stack([asarray(value), self._center[1]])
+        self._center = xp.stack([asarray(value), self._center[1]])
 
     @property
     def y(self) -> Any:
@@ -114,7 +124,7 @@ class Port:
 
     @y.setter
     def y(self, value: Any) -> None:
-        self._center = jnp.stack([self._center[0], asarray(value)])
+        self._center = xp.stack([self._center[0], asarray(value)])
 
     @property
     def orientation(self) -> Any:
@@ -165,7 +175,31 @@ class Port:
 
     @property
     def cross_section(self) -> Any:
-        return self.info.get("cross_section")
+        """Cross-section of the port (object with ``.name`` and ``.width``).
+
+        The PDK CrossSection named in ``info["cross_section"]`` if registered,
+        otherwise a minimal description derived from layer and width.
+        """
+        from types import SimpleNamespace
+
+        name = self.info.get("cross_section")
+        if isinstance(name, str):
+            try:
+                from gdsfactory.pdk import get_cross_section
+
+                return get_cross_section(name)
+            except Exception:
+                return SimpleNamespace(name=name, width=self.width, layer=self.layer)
+        if name is not None and hasattr(name, "name"):
+            return name
+        try:
+            from gdsfactory.pdk import get_layer_name
+
+            layer_name = get_layer_name(self.layer)
+        except Exception:
+            layer_name = str(self.layer)
+        auto = f"{layer_name}_{round(to_float(self.width) * 1000)}"
+        return SimpleNamespace(name=auto, width=self.width, layer=self.layer)
 
     @property
     def layer_info(self) -> Any:
@@ -176,18 +210,18 @@ class Port:
     @property
     def direction(self) -> Array:
         """Unit vector pointing out of the port."""
-        return jnp.stack([cos_deg(self._orientation), sin_deg(self._orientation)])
+        return xp.stack([cos_deg(self._orientation), sin_deg(self._orientation)])
 
     @property
     def normal(self) -> Array:
         """Unit vector along the port face (90 deg ccw from the direction)."""
-        return jnp.stack([-sin_deg(self._orientation), cos_deg(self._orientation)])
+        return xp.stack([-sin_deg(self._orientation), cos_deg(self._orientation)])
 
     @property
     def endpoints(self) -> Array:
         """The two corners of the port face."""
         half = asarray(self._width) / 2
-        return jnp.stack(
+        return xp.stack(
             [self._center - half * self.normal, self._center + half * self.normal]
         )
 
@@ -245,7 +279,7 @@ class Port:
         ``angle`` is the extra rotation in multiples of 90 degrees (2 flips it).
         """
         p = self.copy()
-        p.center = self.center + d * self.direction + d_orth * self.normal
+        p.center = self._center + d * self.direction + d_orth * self.normal
         p.orientation = self._orientation + 90 * angle
         p.mirror = self.mirror != mirror
         return p
@@ -264,7 +298,7 @@ class Port:
     def move(self, *args: Any) -> Port:
         """Moves in place: move((dx, dy)) or move(dx, dy) or move(origin, dest)."""
         dx, dy = _move_args(args)
-        self._center = self._center + jnp.stack([asarray(dx), asarray(dy)])
+        self._center = self._center + xp.stack([asarray(dx), asarray(dy)])
         return self
 
     def moved(self, *args: Any) -> Port:
@@ -280,7 +314,7 @@ class Port:
         return self
 
     def flip(self) -> Port:
-        self._orientation = jnp.mod(asarray(self._orientation) + 180.0, 360.0)
+        self._orientation = xp.mod(asarray(self._orientation) + 180.0, 360.0)
         return self
 
     def flipped(self) -> Port:
@@ -586,15 +620,27 @@ def filter_ports(
     return out
 
 
+def _layer_enum(layer: Any) -> Any:
+    """Layer index as the PDK LayerEnum member when one exists (kfactory semantics)."""
+    if isinstance(layer, int) and not hasattr(layer, "layer"):
+        try:
+            import kfactory as kf
+
+            return kf.kcl.layers(layer)  # type: ignore[call-arg]
+        except Exception:
+            return layer
+    return layer
+
+
 def _point(value: Any) -> Array:
     if hasattr(value, "x") and hasattr(value, "y") and not isinstance(value, Port):
         value = (value.x, value.y)
     if isinstance(value, Port):
-        return value.center
+        return value.center_array
     if is_tracer(value) or hasattr(value, "shape"):
         arr = asarray(value)
     elif isinstance(value, Sequence) and any(is_tracer(v) for v in value):
-        arr = jnp.stack([asarray(value[0]), asarray(value[1])])
+        arr = xp.stack([asarray(value[0]), asarray(value[1])])
     else:
         arr = asarray(np.asarray([to_float(value[0]), to_float(value[1])]))
     if arr.shape != (2,):
@@ -606,7 +652,7 @@ def _angle(value: Any) -> Any:
     if value is None:
         return None
     if is_tracer(value) or hasattr(value, "shape"):
-        return jnp.mod(asarray(value), 360.0)
+        return xp.mod(asarray(value), 360.0)
     return float(value) % 360
 
 

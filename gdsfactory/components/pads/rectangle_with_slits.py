@@ -2,9 +2,8 @@ from __future__ import annotations
 
 __all__ = ["rectangle_with_slits"]
 
-import numpy as np
-
 import gdsfactory as gf
+from gdsfactory._jax import xp
 from gdsfactory.component import Component
 from gdsfactory.typings import LayerSpec, Size
 
@@ -66,8 +65,8 @@ def rectangle_with_slits(
     )
     r = c << rectangle
     c.add_ports(r.ports)
-    columns = int(np.floor((size[0] - 2 * slit_enclosure) / slit_column_pitch))
-    rows = int(np.floor((size[1] - 2 * slit_enclosure) / slit_row_pitch))
+    columns = int(xp.floor((size[0] - 2 * slit_enclosure) / slit_column_pitch))
+    rows = int(xp.floor((size[1] - 2 * slit_enclosure) / slit_row_pitch))
 
     if layer_slit is None:
         layer2 = (layer_tuple[0], layer_tuple[1] + 1)

@@ -2,9 +2,8 @@ from __future__ import annotations
 
 __all__ = ["dash"]
 
-import numpy as np
-
 import gdsfactory as gf
+from gdsfactory._jax import xp
 from gdsfactory.component import Component
 from gdsfactory.typings import LayerSpec
 
@@ -13,7 +12,7 @@ def _bezier3(
     px: list[float], py: list[float], n: int = 30
 ) -> tuple[list[float], list[float]]:
     """Cubic Bezier from 4 control points."""
-    t = np.linspace(0, 1, n)
+    t = xp.linspace(0, 1, n)
     x = (
         (1 - t) ** 3 * px[0]
         + 3 * (1 - t) ** 2 * t * px[1]
@@ -61,11 +60,11 @@ def dash(
     Ltap = taper_length
     Lt = tip_length
 
-    alpha = np.pi / 2 - np.arctan((W - Wend) / (2 * Ltap))
+    alpha = xp.pi / 2 - xp.arctan((W - Wend) / (2 * Ltap))
 
     # Top tip
-    pxup = Lt * np.cos(alpha)
-    pyup = Lt * np.sin(alpha)
+    pxup = Lt * xp.cos(alpha)
+    pyup = Lt * xp.sin(alpha)
     px = [-Wend / 2, -Wend / 2 + pxup, Wend / 2 - pxup, Wend / 2]
     py = [L / 2 + Ltap, L / 2 + Ltap + pyup, L / 2 + Ltap + pyup, L / 2 + Ltap]
     xtip_t, ytip_t = _bezier3(px, py, n_bezier_points)

@@ -2,9 +2,8 @@ from __future__ import annotations
 
 __all__ = ["snspd"]
 
-import numpy as np
-
 import gdsfactory as gf
+from gdsfactory._jax import xp
 from gdsfactory.component import Component
 from gdsfactory.typings import LayerSpec, Port, Size
 
@@ -44,14 +43,14 @@ def snspd(
     xsize, ysize = size
     if num_squares is not None:
         if xsize is None and ysize is None:
-            xy = np.sqrt(num_squares * wire_pitch * wire_width)
+            xy = xp.sqrt(num_squares * wire_pitch * wire_width)
             xsize, ysize = xy, xy
         elif xsize is None:
             xsize = num_squares * wire_pitch * wire_width / ysize
         elif ysize is None:
             ysize = num_squares * wire_pitch * wire_width / xsize
 
-    num_meanders = int(np.ceil(ysize / wire_pitch))
+    num_meanders = int(xp.ceil(ysize / wire_pitch))
 
     D = Component()
     hairpin = optimal_hairpin(

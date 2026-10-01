@@ -28,6 +28,81 @@ import numpy.typing as npt  # noqa: E402
 Array = jax.Array
 
 
+def _is_jax(x: Any) -> bool:
+    return isinstance(x, jax.Array | jax.core.Tracer)
+
+
+def _any_jax(args: Any, kwargs: Any) -> bool:
+    for a in (*args, *kwargs.values()):
+        if _is_jax(a):
+            return True
+        if isinstance(a, list | tuple):
+            for b in a:
+                if _is_jax(b):
+                    return True
+                if isinstance(b, list | tuple) and any(_is_jax(v) for v in b):
+                    return True
+    return False
+
+
+class _DualNamespace:
+    """numpy-compatible namespace that only uses jax.numpy when needed.
+
+    ``xp.f(*args)`` calls ``jax.numpy.f`` if any argument is a jax array or a
+    tracer (so derivatives flow), and plain ``numpy.f`` otherwise (fast, no
+    dispatch overhead). Results computed from concrete inputs are numpy arrays.
+    """
+
+    def __init__(self, jmod: Any, nmod: Any) -> None:
+        self._jmod = jmod
+        self._nmod = nmod
+
+    def __getattr__(self, name: str) -> Any:
+        jf = getattr(self._jmod, name)
+        nf = getattr(self._nmod, name, None)
+        if name == "linalg":
+            ns = _DualNamespace(jf, nf)
+            setattr(self, name, ns)
+            return ns
+        if nf is None:
+            setattr(self, name, jf)
+            return jf
+        if not callable(jf) or isinstance(jf, type):
+            setattr(self, name, nf)
+            return nf
+
+        def f(*args: Any, **kwargs: Any) -> Any:
+            if _any_jax(args, kwargs):
+                return jf(*args, **kwargs)
+            return nf(*args, **kwargs)
+
+        f.__name__ = name
+        f.__doc__ = getattr(nf, "__doc__", None)
+        setattr(self, name, f)
+        return f
+
+
+xp: Any = _DualNamespace(jnp, np)
+
+
+def xset(a: Any, index: Any, value: Any) -> Any:
+    """Functional ``a[index] = value`` for numpy and jax arrays."""
+    if _is_jax(a) or _is_jax(value):
+        return jnp.asarray(a).at[index].set(value)
+    out = np.array(a, dtype=np.float64, copy=True)
+    out[index] = value
+    return out
+
+
+def xmul(a: Any, index: Any, value: Any) -> Any:
+    """Functional ``a[index] *= value`` for numpy and jax arrays."""
+    if _is_jax(a) or _is_jax(value):
+        return jnp.asarray(a).at[index].multiply(value)
+    out = np.array(a, dtype=np.float64, copy=True)
+    out[index] *= value
+    return out
+
+
 def is_tracer(x: Any) -> bool:
     """Returns True if x is a JAX tracer (i.e. carries derivative information)."""
     return isinstance(x, jax.core.Tracer)
@@ -98,24 +173,32 @@ def maybe_float(x: Any) -> Any:
     return x
 
 
-def asarray(x: Any) -> Array:
-    """Returns a float64 jax array."""
-    return jnp.asarray(x, dtype=jnp.float64)
+def asarray(x: Any) -> Any:
+    """Returns a float64 array: numpy for concrete values, jax if traced.
+
+    numpy results are read-only (geometry is immutable, like jax arrays).
+    """
+    if _is_jax(x) or (isinstance(x, list | tuple) and _any_jax(x, {})):
+        if isinstance(x, list | tuple) and not _is_jax(x):
+            return jnp.stack([jnp.asarray(v, dtype=jnp.float64) for v in x]) if x else jnp.zeros((0,))
+        return jnp.asarray(x, dtype=jnp.float64)
+    arr = np.array(x, dtype=np.float64)
+    arr.flags.writeable = False
+    return arr
 
 
 def points_array(points: Any) -> Array:
-    """Returns an (N, 2) float64 jax array from a sequence of points."""
+    """Returns an (N, 2) float64 array (numpy, or jax if traced) from points."""
     if isinstance(points, jax.Array | np.ndarray):
-        arr = jnp.asarray(points, dtype=jnp.float64)
+        arr = asarray(points)
     else:
         pts = list(points)
-        if pts and any(is_tracer(c) for p in pts for c in _iter_coords(p)):
-            arr = jnp.stack([jnp.stack([asarray(p[0]), asarray(p[1])]) for p in pts])
-        else:
-            arr = jnp.asarray(
-                np.asarray([[to_float(p[0]), to_float(p[1])] for p in pts]),
-                dtype=jnp.float64,
+        if pts and any(_is_jax(c) for p in pts for c in _iter_coords(p)):
+            arr = jnp.stack(
+                [jnp.stack([jnp.asarray(p[0], dtype=jnp.float64), jnp.asarray(p[1], dtype=jnp.float64)]) for p in pts]
             )
+        else:
+            arr = asarray([[to_float(p[0]), to_float(p[1])] for p in pts])
     if arr.ndim != 2 or arr.shape[-1] != 2:
         raise ValueError(f"Expected (N, 2) points, got shape {arr.shape}")
     return arr
@@ -162,6 +245,11 @@ def round_st(x: Any, decimals: int = 0, step: float | None = None) -> Any:
     return xa + jax.lax.stop_gradient(rounded - xa)
 
 
+def stop_gradient(x: Any) -> Any:
+    """jax.lax.stop_gradient that leaves numpy/python values untouched."""
+    return jax.lax.stop_gradient(x) if _is_jax(x) else x
+
+
 def stop_gradient_tree(tree: Any) -> Any:
     return jax.tree_util.tree_map(
         lambda v: jax.lax.stop_gradient(v) if isinstance(v, jax.Array) else v, tree
@@ -178,12 +266,12 @@ def deg2rad(angle: Any) -> Any:
 
 def cos_deg(angle: Any) -> Any:
     """Exact cosine for multiples of 90 degrees (keeps gradients)."""
-    return _trig_deg(angle, jnp.cos, (1.0, 0.0, -1.0, 0.0))
+    return _trig_deg(angle, xp.cos, (1.0, 0.0, -1.0, 0.0))
 
 
 def sin_deg(angle: Any) -> Any:
     """Exact sine for multiples of 90 degrees (keeps gradients)."""
-    return _trig_deg(angle, jnp.sin, (0.0, 1.0, 0.0, -1.0))
+    return _trig_deg(angle, xp.sin, (0.0, 1.0, 0.0, -1.0))
 
 
 def _trig_deg(
@@ -192,8 +280,13 @@ def _trig_deg(
     a = primal(angle)
     a_f = float(np.asarray(a))
     q = a_f / 90.0
-    value = f(deg2rad(asarray(angle)))
-    if abs(q - round(q)) < 1e-12:
+    is_exact = abs(q - round(q)) < 1e-12
+    if not _is_jax(angle):
+        if is_exact:
+            return exact[round(q) % 4]
+        return float(f(np.deg2rad(a_f)))
+    value = f(deg2rad(jnp.asarray(angle, dtype=jnp.float64)))
+    if is_exact:
         # exact value with the derivative of the smooth function
         exact_v = exact[round(q) % 4]
         return value - jax.lax.stop_gradient(value) + exact_v
@@ -215,4 +308,7 @@ __all__ = [
     "sin_deg",
     "to_float",
     "to_numpy",
+    "xmul",
+    "xp",
+    "xset",
 ]

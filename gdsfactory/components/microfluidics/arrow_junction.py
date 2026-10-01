@@ -2,9 +2,8 @@ from __future__ import annotations
 
 __all__ = ["arrow_junction"]
 
-import numpy as np
-
 import gdsfactory as gf
+from gdsfactory._jax import xp
 from gdsfactory.component import Component
 from gdsfactory.typings import LayerSpec
 
@@ -41,7 +40,7 @@ def arrow_junction(
     c = Component()
     mhw = main_width / 2
     bhw = branch_width / 2
-    angle_rad = np.radians(branch_angle)
+    angle_rad = xp.radians(branch_angle)
 
     # Main horizontal channel from origin going right
     c.add_polygon(
@@ -58,8 +57,8 @@ def arrow_junction(
     for sign in [1, -1]:
         a = sign * angle_rad
         # Branch direction (pointing left/away from junction)
-        dx = -np.cos(a)
-        dy = np.sin(a)
+        dx = -xp.cos(a)
+        dy = xp.sin(a)
         # Perpendicular to branch direction
         nx = -dy
         ny = dx
@@ -79,21 +78,21 @@ def arrow_junction(
         c.add_polygon(pts, layer=layer)
 
     # Branch endpoint positions
-    upper_end_x = -branch_length * np.cos(angle_rad)
-    upper_end_y = branch_length * np.sin(angle_rad)
-    lower_end_x = -branch_length * np.cos(angle_rad)
-    lower_end_y = -branch_length * np.sin(angle_rad)
+    upper_end_x = -branch_length * xp.cos(angle_rad)
+    upper_end_y = branch_length * xp.sin(angle_rad)
+    lower_end_x = -branch_length * xp.cos(angle_rad)
+    lower_end_y = -branch_length * xp.sin(angle_rad)
 
     # Reservoir circles at endpoints
     if reservoir_radius > 0:
-        angles = np.linspace(0, 2 * np.pi, n_reservoir_points, endpoint=False)
+        angles = xp.linspace(0, 2 * xp.pi, n_reservoir_points, endpoint=False)
         for cx, cy in [
             (main_length, 0),
             (upper_end_x, upper_end_y),
             (lower_end_x, lower_end_y),
         ]:
             pts = [
-                (cx + reservoir_radius * np.cos(a), cy + reservoir_radius * np.sin(a))
+                (cx + reservoir_radius * xp.cos(a), cy + reservoir_radius * xp.sin(a))
                 for a in angles
             ]
             c.add_polygon(pts, layer=layer)

@@ -22,7 +22,7 @@ from pydantic import (
     model_validator,
 )
 
-from gdsfactory._jax import float_or_array, jnp, to_float
+from gdsfactory._jax import float_or_array, to_float, xp
 
 from gdsfactory import typings
 from gdsfactory.component import Component
@@ -399,8 +399,8 @@ class CrossSection(BaseModel):
         for section in self.sections:
             width = section.width
             offset = section.offset
-            xmin = jnp.minimum(xmin, offset - width / 2)
-            xmax = jnp.maximum(xmax, offset + width / 2)
+            xmin = xp.minimum(xmin, offset - width / 2)
+            xmax = xp.maximum(xmax, offset + width / 2)
 
         return xmin, xmax
 

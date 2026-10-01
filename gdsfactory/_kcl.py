@@ -37,6 +37,9 @@ def clear_cache(kcl: kf.KCLayout = kf.kcl) -> None:
     Only factories registered on `kcl` are reachable.
     Those decorated with `register_factory=False` keep their cache.
     """
+    from gdsfactory._cell import clear_cache as _clear_cell_caches
+
+    _clear_cell_caches()
     kcl.clear_kcells()
     for factory in kcl.factories.all():
         factory.cache.clear()

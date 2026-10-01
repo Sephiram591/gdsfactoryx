@@ -34,7 +34,8 @@ from typing import TYPE_CHECKING, Any, Literal, TypedDict, Unpack, cast
 
 import kfactory as kf
 import numpy as np
-from kfactory import DPort as Port  # runtime re-export of a class
+from gdsfactory._jax import to_float
+from gdsfactory._ports import Port  # differentiable port
 from rich.console import Console
 from rich.table import Table
 
@@ -100,10 +101,10 @@ def pprint_ports(ports: Ports) -> None:
             str(i)
             for i in [
                 port.name,
-                np.round(port.width, 3),
-                port.orientation,
+                round(to_float(port.width), 3),
+                to_float(port.orientation) if port.orientation is not None else None,
                 port.layer_info,
-                port.center,
+                tuple(round(to_float(v), 4) for v in port.center),
                 port.port_type,
             ]
         ]
@@ -112,7 +113,7 @@ def pprint_ports(ports: Ports) -> None:
     console.print(table)
 
 
-def to_dict(port: kf.port.ProtoPort[Any]) -> dict[str, Any]:
+def to_dict(port: Port) -> dict[str, Any]:
     """Returns dict."""
     return {
         "name": port.name,
@@ -150,25 +151,21 @@ def port_array(
         kwargs: additional arguments.
 
     """
-    from gdsfactory import kcl
     from gdsfactory.pdk import get_cross_section, get_layer
 
-    pitch_array = np.array(pitch)
+    from gdsfactory._jax import asarray
+
+    pitch_array = asarray(pitch)
     if "layer" in kwargs:
         kwargs["layer"] = get_layer(kwargs["layer"])
     if "cross_section" in kwargs:
         cross_section = kwargs.pop("cross_section")
         xs = get_cross_section(cross_section)
-        if width != xs.width:
+        if to_float(width) != to_float(xs.width):
             xs = get_cross_section(xs.copy(width=width))
-        try:
-            sym_xs: kf.SymmetricalCrossSection | None = (
-                kcl.get_symmetrical_cross_section(xs.name)
-            )
-        except KeyError:
-            sym_xs = None
 
         kwargs.pop("cross_section", None)
+        port_layer = kwargs.pop("layer", None) or get_layer(xs.layer)
         info = kwargs.get("info", {})
         info["cross_section"] = xs.name
         kwargs["info"] = info
@@ -176,14 +173,10 @@ def port_array(
         return [
             Port(
                 name=str(i),
-                center=cast(
-                    "tuple[float, float]",
-                    tuple(
-                        np.array(center) + i * pitch_array - (n - 1) / 2 * pitch_array
-                    ),
-                ),
+                center=asarray(center) + i * pitch_array - (n - 1) / 2 * pitch_array,
                 orientation=orientation,
-                cross_section=cast(Any, sym_xs),
+                width=xs.width,
+                layer=port_layer,
                 **kwargs,
             )  # type: ignore[call-overload]
             for i in range(n)
@@ -191,10 +184,7 @@ def port_array(
     return [
         Port(
             name=str(i),
-            center=cast(
-                "tuple[float, float]",
-                tuple(np.array(center) + i * pitch_array - (n - 1) / 2 * pitch_array),
-            ),
+            center=asarray(center) + i * pitch_array - (n - 1) / 2 * pitch_array,
             orientation=orientation,
             width=width,
             **kwargs,
@@ -367,13 +357,18 @@ def select_ports(
     if suffix:
         ports_ = [p for p in ports_ if p.name and p.name.endswith(suffix)]
     if orientation is not None:
-        ports_ = [p for p in ports_ if np.isclose(p.orientation, orientation)]
+        ports_ = [
+            p
+            for p in ports_
+            if p.orientation is not None
+            and np.isclose(to_float(p.orientation), to_float(orientation))
+        ]
 
     if layers_excluded:
         excluded_layers = {get_layer(layer) for layer in layers_excluded}
         ports_ = [p for p in ports_ if p.layer not in excluded_layers]
     if width:
-        ports_ = [p for p in ports_ if p.width == width]
+        ports_ = [p for p in ports_ if np.isclose(to_float(p.width), to_float(width))]
     if port_type:
         ports_ = [p for p in ports_ if p.port_type == port_type]
     if names:
@@ -402,9 +397,7 @@ get_ports_list = select_ports_list
 
 
 def flipped(port: typings.Port) -> typings.Port:
-    p = port.copy()
-    p.trans *= kf.kdb.Trans.R180
-    return p
+    return port.flipped()
 
 
 def move_copy(port: typings.Port, x: int = 0, y: int = 0) -> typings.Port:

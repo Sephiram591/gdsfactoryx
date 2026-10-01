@@ -2,9 +2,9 @@ import warnings
 from functools import partial
 from typing import Literal, overload
 
-import numpy as np
 
 import gdsfactory as gf
+from gdsfactory._jax import maybe_float, to_float, xp
 from gdsfactory.component import Component, ComponentAllAngle
 from gdsfactory.typings import AnyComponent, CrossSectionSpec, LayerSpec
 
@@ -150,18 +150,18 @@ def _bend_modified_hermite(
     width2 = xsec.width if width2 is None else width2
     layer = xsec.layer if layer is None else layer
 
-    end_point_unit_vector = np.array(
-        [np.cos(np.deg2rad(angle)), np.sin(np.deg2rad(angle))]
+    end_point_unit_vector = xp.array(
+        [xp.cos(xp.deg2rad(angle)), xp.sin(xp.deg2rad(angle))]
     )
-    end_tangent_unit_vector = np.array(
-        [-np.sin(np.deg2rad(angle)), np.cos(np.deg2rad(angle))]
+    end_tangent_unit_vector = xp.array(
+        [-xp.sin(xp.deg2rad(angle)), xp.cos(xp.deg2rad(angle))]
     )
 
-    t = np.linspace(0, 1, npoints)
+    t = xp.linspace(0, 1, npoints)
 
     # polygon points for inner bend
-    inner_bend_init_point = np.array([radius - width1 / 2, 0])
-    inner_bend_init_tangent = np.array([0, inner_tangent_magnitude])
+    inner_bend_init_point = xp.array([radius - width1 / 2, 0])
+    inner_bend_init_tangent = xp.array([0, inner_tangent_magnitude])
     inner_bend_end_point = (radius - width2 / 2) * end_point_unit_vector
     inner_bend_end_tangent = inner_tangent_magnitude * end_tangent_unit_vector
 
@@ -174,8 +174,8 @@ def _bend_modified_hermite(
     )
 
     # polygon points for outer bend
-    outer_bend_init_point = np.array([radius + width1 / 2, 0])
-    outer_bend_init_tangent = np.array([0, outer_tangent_magnitude])
+    outer_bend_init_point = xp.array([radius + width1 / 2, 0])
+    outer_bend_init_tangent = xp.array([0, outer_tangent_magnitude])
     outer_bend_end_point = (radius + width2 / 2) * end_point_unit_vector
     outer_bend_end_tangent = outer_tangent_magnitude * end_tangent_unit_vector
 
@@ -191,13 +191,13 @@ def _bend_modified_hermite(
     interior_points = (inner_bend_points + outer_bend_points) / 2
     interior_path = gf.Path(interior_points)
     _, curvature = interior_path.curvature()
-    min_bend_radius = np.min(1 / np.abs(curvature))
+    min_bend_radius = maybe_float(xp.min(1 / xp.abs(curvature)))
 
     if not allow_min_radius_violation:
         xsec.validate_radius(radius=min_bend_radius)
 
-    polygon_points = np.concat(
-        (inner_bend_points, np.flip(outer_bend_points, axis=0)), axis=0
+    polygon_points = xp.concatenate(
+        (inner_bend_points, xp.flip(outer_bend_points, axis=0)), axis=0
     )
 
     result = gf.ComponentAllAngle() if all_angle else gf.Component()
@@ -258,7 +258,7 @@ def bend_modified_hermite(
         port1: name of input port.
         port2: name of output port.
     """
-    if angle not in {90, 180, 270}:
+    if to_float(angle) not in {90, 180, 270}:
         warnings.warn(
             f"bend_modified_hermite angle should be 90 or 180 or 270. Got {angle}. Use bend_modified_hermite_all_angle instead.",
             UserWarning,

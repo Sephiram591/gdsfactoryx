@@ -84,7 +84,7 @@ def array(
         for ix in range(ref.na or 1):
             for iy in range(ref.nb or 1):
                 for port in component.ports:
-                    port = port.copy(ref.trans * gf.kdb.Trans(ix * ref.a + iy * ref.b))
+                    port = port.copy(ref.array_transform(ix, iy))
                     name = f"{port.name}_{iy + 1}_{ix + 1}"
                     c.add_port(name, port=port)
 

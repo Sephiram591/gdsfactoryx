@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy as _copy
 import itertools
+import weakref
 import pathlib
 import warnings
 from collections.abc import Callable, Iterable, Iterator, Sequence
@@ -26,8 +27,10 @@ from gdsfactory._jax import (
     has_tracers,
     is_tracer,
     jnp,
+    xp,
     maybe_float,
     points_array,
+    stop_gradient,
     to_float,
     to_numpy,
 )
@@ -45,11 +48,15 @@ if TYPE_CHECKING:
     from gdsfactory.typings import Layer, LayerSpec, LayerSpecs, PathType
 
 
-class LockedError(AttributeError):
+from kfactory.exceptions import LockedError as _KFLockedError  # noqa: E402
+
+
+class LockedError(_KFLockedError):
     """Raised when modifying a locked (cached) Component."""
 
     def __init__(self, component: Any) -> None:
-        super().__init__(
+        AttributeError.__init__(
+            self,
             f"Component {getattr(component, 'name', component)!r} is locked "
             "(it was returned by a cell function and may be cached). "
             "Use `component.copy()` to get a modifiable copy."
@@ -61,7 +68,13 @@ class AddPortError(ValueError):
 
 
 class Info(dict[str, Any]):
-    """Attribute-accessible dict used for Component.info and Component.settings."""
+    """Attribute-accessible dict used for Component.info and Component.settings.
+
+    Like kfactory's pydantic settings, iterating yields ``(name, value)`` pairs.
+    """
+
+    def __iter__(self) -> Iterator[Any]:  # type: ignore[override]
+        return iter(self.items())
 
     def __getattr__(self, key: str) -> Any:
         try:
@@ -72,7 +85,9 @@ class Info(dict[str, Any]):
     def __setattr__(self, key: str, value: Any) -> None:
         self[key] = value
 
-    def model_dump(self, **kwargs: Any) -> dict[str, Any]:
+    def model_dump(self, exclude_none: bool = False, **kwargs: Any) -> dict[str, Any]:
+        if exclude_none:
+            return {k: v for k, v in self.items() if v is not None}
         return dict(self)
 
     def model_copy(self, deep: bool = False, update: dict[str, Any] | None = None) -> Info:
@@ -137,20 +152,20 @@ class Box:
         return self.top - self.bottom
 
     def center(self) -> Array:
-        return jnp.stack(
+        return xp.stack(
             [asarray((self.left + self.right) / 2), asarray((self.bottom + self.top) / 2)]
         )
 
     @property
     def p1(self) -> Array:
-        return jnp.stack([asarray(self.left), asarray(self.bottom)])
+        return xp.stack([asarray(self.left), asarray(self.bottom)])
 
     @property
     def p2(self) -> Array:
-        return jnp.stack([asarray(self.right), asarray(self.top)])
+        return xp.stack([asarray(self.right), asarray(self.top)])
 
     def to_array(self) -> Array:
-        return jnp.stack([self.p1, self.p2])
+        return xp.stack([self.p1, self.p2])
 
     def inside(self, other: Box) -> bool:
         return (
@@ -164,6 +179,15 @@ class Box:
         dy = dx if dy is None else dy
         return Box(self.left - dx, self.bottom - dy, self.right + dx, self.top + dy)
 
+    def __eq__(self, other: object) -> bool:
+        if not all(hasattr(other, a) for a in ("left", "bottom", "right", "top")):
+            return NotImplemented
+        mine = (self.left, self.bottom, self.right, self.top)
+        theirs = (other.left, other.bottom, other.right, other.top)  # type: ignore[attr-defined]
+        return all(abs(to_float(a) - to_float(b)) < 1e-9 for a, b in zip(mine, theirs, strict=True))
+
+    __hash__ = None  # type: ignore[assignment]
+
     def __repr__(self) -> str:
         return (
             f"Box({to_float(self.left):.6g}, {to_float(self.bottom):.6g}, "
@@ -172,8 +196,8 @@ class Box:
 
 
 def _box_from_points(pts: Array) -> Box:
-    mn = jnp.min(pts, axis=0)
-    mx = jnp.max(pts, axis=0)
+    mn = xp.min(pts, axis=0)
+    mx = xp.max(pts, axis=0)
     return Box(mn[0], mn[1], mx[0], mx[1])
 
 
@@ -229,8 +253,9 @@ class _BBoxMixin:
         return (b.bottom + b.top) / 2
 
     @property
-    def center(self) -> Array:
-        return self.dbbox().center()
+    def center(self) -> tuple[Any, Any]:
+        c = self.dbbox().center()
+        return (c[0], c[1])
 
     @property
     def xsize(self) -> Any:
@@ -262,6 +287,10 @@ class SizeInfo:
     def __init__(self, box: Box) -> None:
         self._b = box
 
+    def _bf(self) -> tuple[float, float, float, float]:
+        b = self._b
+        return (to_float(b.left), to_float(b.bottom), to_float(b.right), to_float(b.top))
+
     @property
     def west(self) -> Any:
         return self._b.left
@@ -287,40 +316,41 @@ class SizeInfo:
         return self._b.height()
 
     @property
-    def center(self) -> Array:
-        return self._b.center()
+    def center(self) -> tuple[Any, Any]:
+        c = self._b.center()
+        return (c[0], c[1])
 
     @property
     def sw(self) -> Array:
-        return jnp.stack([asarray(self.west), asarray(self.south)])
+        return xp.stack([asarray(self.west), asarray(self.south)])
 
     @property
     def nw(self) -> Array:
-        return jnp.stack([asarray(self.west), asarray(self.north)])
+        return xp.stack([asarray(self.west), asarray(self.north)])
 
     @property
     def se(self) -> Array:
-        return jnp.stack([asarray(self.east), asarray(self.south)])
+        return xp.stack([asarray(self.east), asarray(self.south)])
 
     @property
     def ne(self) -> Array:
-        return jnp.stack([asarray(self.east), asarray(self.north)])
+        return xp.stack([asarray(self.east), asarray(self.north)])
 
     @property
     def cw(self) -> Array:
-        return jnp.stack([asarray(self.west), self.center[1]])
+        return xp.stack([asarray(self.west), self.center[1]])
 
     @property
     def ce(self) -> Array:
-        return jnp.stack([asarray(self.east), self.center[1]])
+        return xp.stack([asarray(self.east), self.center[1]])
 
     @property
     def sc(self) -> Array:
-        return jnp.stack([self.center[0], asarray(self.south)])
+        return xp.stack([self.center[0], asarray(self.south)])
 
     @property
     def nc(self) -> Array:
-        return jnp.stack([self.center[0], asarray(self.north)])
+        return xp.stack([self.center[0], asarray(self.north)])
 
     @property
     def cc(self) -> Array:
@@ -386,13 +416,22 @@ class ComponentReference(_BBoxMixin):
     # ------------------------------------------------------------ naming
     @property
     def name(self) -> str:
+        """Instance name (kfactory default: cell name + position in dbu + angle)."""
         if self._name is not None:
             return self._name
-        if self.parent_cell is not None:
-            insts = self.parent_cell.insts._insts
-            idx = next((i for i, r in enumerate(insts) if r is self), 0)
-            return f"{self.cell.name}_{idx}"
-        return self.cell.name
+        t = self.transform
+        x = round(to_float(t.x) * 1000)
+        y = round(to_float(t.y) * 1000)
+        name = f"{self.cell.name}_{x}_{y}"
+        angle = round(to_float(t.rotation) % 360, 9) % 360
+        if angle != 0:
+            if float(angle).is_integer():
+                name += f"_A{int(angle)}"
+            else:
+                name += f"_A{str(float(angle)).replace('.', 'p')}"
+        if t.mirror:
+            name += "_M"
+        return name
 
     @name.setter
     def name(self, value: str) -> None:
@@ -445,6 +484,10 @@ class ComponentReference(_BBoxMixin):
         t.y = t.y + off[1]
         return t
 
+    def array_transform(self, ia: int = 0, ib: int = 0) -> Transform:
+        """Transform of array element (ia, ib)."""
+        return self._array_transform(ia, ib)
+
     def array_transforms(self) -> list[Transform]:
         return [
             self._array_transform(ia, ib) for ia in range(self.na) for ib in range(self.nb)
@@ -464,13 +507,27 @@ class ComponentReference(_BBoxMixin):
 
     @property
     def trans(self) -> Any:
-        return self.transform.to_klayout()
+        """Integer (dbu) simple transformation, like kfactory's ``Instance.trans``."""
+        return self.transform.to_klayout().s_trans().to_itype(1e-3)
 
     @trans.setter
     def trans(self, value: Any) -> None:
+        import klayout.db as kdb
+
+        if isinstance(value, kdb.Trans):
+            value = kdb.DCplxTrans(value.to_dtype(1e-3))
+        elif isinstance(value, kdb.DTrans):
+            value = kdb.DCplxTrans(value)
         self.dcplx_trans = value
 
-    dtrans = trans
+    @property
+    def dtrans(self) -> Any:
+        """Simple transformation in um (kdb.DTrans)."""
+        return self.transform.to_klayout().s_trans()
+
+    @dtrans.setter
+    def dtrans(self, value: Any) -> None:
+        self.trans = value
 
     @property
     def magnification(self) -> Any:
@@ -526,7 +583,7 @@ class ComponentReference(_BBoxMixin):
     def rotate(self, angle: Any, center: Any = None) -> Self:
         """Rotates (degrees, counter-clockwise) around center (default origin)."""
         if isinstance(center, Port):
-            center = center.center
+            center = center.center_array
         elif isinstance(center, str):
             center = self.ports[center].center
         c = asarray((0.0, 0.0) if center is None else center)
@@ -538,13 +595,13 @@ class ComponentReference(_BBoxMixin):
     def mirror(self, p1: Any = (0.0, 1.0), p2: Any = (0.0, 0.0)) -> Self:
         """Mirrors across the line through p1 and p2."""
         if isinstance(p1, Port):
-            p1 = p1.center
+            p1 = p1.center_array
         if isinstance(p2, Port):
-            p2 = p2.center
+            p2 = p2.center_array
         p1 = asarray(p1)
         p2 = asarray(p2)
         d = p2 - p1
-        theta = jnp.degrees(jnp.arctan2(d[1], d[0]))
+        theta = xp.degrees(xp.arctan2(d[1], d[0]))
         # mirror across line at angle theta through p1: T(p1) R(theta) M R(-theta) T(-p1)
         t = (
             Transform(p1[0], p1[1])
@@ -591,11 +648,11 @@ class ComponentReference(_BBoxMixin):
             raise TypeError(f"Cannot connect to {type(other)}")
 
         if isinstance(port, Port):
-            local = next(
-                (p for p in self.cell.ports if p.name == port.name), None
-            )
-            if local is None:
-                raise KeyError(f"{port.name!r} not in {self.cell.name} ports")
+            # a port of this reference (possibly of an array element): map it back
+            # into the cell frame (kfactory semantics)
+            local = port.copy(self.transform.inverted())
+        elif isinstance(port, tuple):
+            local = self.ports[port].copy(self.transform.inverted())
         else:
             local = self.cell.ports[port]
 
@@ -615,22 +672,18 @@ class ComponentReference(_BBoxMixin):
                 f"!= {op.name} ({op.port_type})"
             )
 
-        mag = self.transform.magnification
-        p_frame = Transform(local.x, local.y, local.orientation, False, 1.0)
-        mirror_flag = mirror != (use_mirror and op.mirror)
-        q_frame = Transform(op.x, op.y, op.orientation + 180.0, mirror_flag, 1.0)
-        t = q_frame * p_frame.inverted()
-        if not isinstance(mag, int | float) or mag != 1:
-            # keep magnification: scale around the connected port
-            t = t * Transform(local.x, local.y) * Transform(0, 0, 0, False, mag) * Transform(
-                -asarray(local.x), -asarray(local.y)
-            )
-        a_local = self.transform.inverted().apply_vector(self.a) if self.is_regular_array() else None
-        b_local = self.transform.inverted().apply_vector(self.b) if self.is_regular_array() else None
-        self.transform = t
-        if a_local is not None:
-            self.a = t.apply_vector(a_local) / (asarray(mag))
-            self.b = t.apply_vector(b_local) / (asarray(mag))
+        # kfactory semantics: T = op_trans * conn * p_trans^-1 (magnification reset).
+        # With use_mirror=False the other port's mirror is ignored and the
+        # current mirror of this reference is kept (xor'ed with `mirror`).
+        if not use_angle:
+            self.transform = Transform(op.x - local.x, op.y - local.y)
+            return self
+        op_mirror = op.mirror if use_mirror else False
+        conn_mirror = mirror if use_mirror else (mirror != self.transform.mirror)
+        op_t = Transform(op.x, op.y, op.orientation, op_mirror, 1.0)
+        conn = Transform(0.0, 0.0, 180.0, conn_mirror, 1.0)
+        p_t = Transform(local.x, local.y, local.orientation, local.mirror, 1.0)
+        self.transform = op_t * conn * p_t.inverted()
         return self
 
     # -------------------------------------------------------------- geometry
@@ -642,7 +695,7 @@ class ComponentReference(_BBoxMixin):
                 boxes.append(pts)
         if not boxes:
             return Box.empty_box()
-        return _box_from_points(jnp.concatenate(boxes))
+        return _box_from_points(xp.concatenate(boxes))
 
     def ibbox(self, layer: Any = None) -> Box:
         return self.dbbox(layer)
@@ -696,6 +749,10 @@ class ComponentReference(_BBoxMixin):
     dx = x
     dy = y
     dcenter = center
+
+    def get_polygons_points(self, layer: Any = None) -> dict[int, list[Array]]:
+        """Differentiable (N, 2) point arrays of the referenced geometry, per layer."""
+        return self.get_polygons(layer)
 
     def get_polygons(self, layer: Any = None) -> dict[int, list[Array]]:
         out: dict[int, list[Array]] = {}
@@ -824,6 +881,29 @@ class Instances:
 # Component
 # --------------------------------------------------------------------------
 _unnamed_counter = itertools.count()
+_LIVE_COMPONENTS: weakref.WeakSet[Component] = weakref.WeakSet()
+
+
+def live_components() -> list[Component]:
+    """All Components that are still alive (for layer bookkeeping)."""
+    return list(_LIVE_COMPONENTS)
+
+
+def remap_layer_index(old: int, new: int) -> None:
+    """Moves geometry of all live components from layer index old to new."""
+    for c in live_components():
+        if old in c.polygons:
+            c.polygons.setdefault(new, []).extend(c.polygons.pop(old))
+        if old in c._paths:
+            c._paths.setdefault(new, []).extend(c._paths.pop(old))
+        for lab in c.labels:
+            if lab.layer == old:
+                lab.layer = new
+        for p in c.ports:
+            if int(p.layer) == old:
+                from gdsfactory._ports import _layer_enum
+
+                p.layer = _layer_enum(new)
 
 
 class Component(_BBoxMixin):
@@ -835,10 +915,20 @@ class Component(_BBoxMixin):
     - can write to GDS/OASIS and show in KLayout (via an export to kfactory)
     """
 
-    def __init__(self, name: str | None = None, **kwargs: Any) -> None:
+    def __new__(cls, name: str | None = None, base: Any = None, **kwargs: Any) -> Any:
+        if isinstance(base, Component):
+            # kfactory idiom ``Component(base=other.base)``: same cell
+            return base
+        return super().__new__(cls)
+
+    def __init__(self, name: str | None = None, base: Any = None, **kwargs: Any) -> None:
+        if isinstance(base, Component):
+            return
         self._name = name or f"Unnamed_{next(_unnamed_counter)}"
+        _LIVE_COMPONENTS.add(self)
         self.polygons: dict[int, list[Array]] = {}
         self.labels: list[Label] = []
+        self._paths: dict[int, list[tuple[Array, float]]] = {}
         self.insts = Instances(self)
         self.ports = Ports()
         self.info = Info()
@@ -853,7 +943,7 @@ class Component(_BBoxMixin):
         self.child: Component | None = None
         self._has_tracers_cache: bool | None = None
         self.lvs_equivalent_ports: list[list[str]] | None = None
-        self.vinsts = self.insts
+        self.vinsts: tuple[ComponentReference, ...] = ()
         if kwargs:
             for k, v in kwargs.items():
                 setattr(self, k, v)
@@ -891,6 +981,19 @@ class Component(_BBoxMixin):
         return kcl
 
     @property
+    def base(self) -> Component:
+        """kfactory compatibility: the component itself."""
+        return self
+
+    @property
+    def factory_name(self) -> str:
+        """Name of the factory (cell function) that created this component."""
+        name = self.basename or self.function_name
+        if name is None:
+            raise ValueError(f"Component {self.name!r} was not created by a cell function")
+        return name
+
+    @property
     def references(self) -> list[ComponentReference]:
         return list(self.insts)
 
@@ -913,7 +1016,7 @@ class Component(_BBoxMixin):
             if any(is_tracer(p) for p in polys):
                 return True
         for p in self.ports:
-            if is_tracer(p.center) or is_tracer(p.orientation) or is_tracer(p.width):
+            if is_tracer(p.center_array) or is_tracer(p.orientation) or is_tracer(p.width):
                 return True
         for r in self.insts:
             t = r.transform
@@ -1026,8 +1129,6 @@ class Component(_BBoxMixin):
             raise AddPortError("Must specify width or cross_section")
         if center is None:
             raise AddPortError("Must specify center or port")
-        if name is not None and name in self.ports:
-            raise AddPortError(f"Port {name!r} already exists in {self.name!r}")
 
         _port = Port(
             name=name,
@@ -1155,8 +1256,8 @@ class Component(_BBoxMixin):
             parent=self,
             na=columns,
             nb=rows,
-            a=jnp.stack([asarray(column_pitch), asarray(0.0)]),
-            b=jnp.stack([asarray(0.0), asarray(row_pitch)]),
+            a=xp.stack([asarray(column_pitch), asarray(0.0)]),
+            b=xp.stack([asarray(0.0), asarray(row_pitch)]),
         )
         self.insts.append(ref)
         return ref
@@ -1249,7 +1350,7 @@ class Component(_BBoxMixin):
         pts = [p for ps in polys.values() for p in ps]
         if not pts:
             return None
-        return jnp.concatenate(pts)
+        return xp.concatenate(pts)
 
     def _is_empty(self, layer: Any = None) -> bool:
         if layer is None:
@@ -1274,7 +1375,7 @@ class Component(_BBoxMixin):
                     pts.append(rp)
         if not pts:
             return Box.empty_box()
-        return _box_from_points(jnp.concatenate(pts))
+        return _box_from_points(xp.concatenate(pts))
 
     ibbox = dbbox
 
@@ -1284,28 +1385,44 @@ class Component(_BBoxMixin):
         by: str = "index",
         layers: LayerSpecs | None = None,
         smooth: float | None = None,
-    ) -> dict[Any, list[Array]]:
-        """Returns a dict of polygon point arrays per layer (flattened, transformed).
+        layer: LayerSpec | None = None,
+    ) -> Any:
+        """Returns KLayout polygons per layer (concrete, like upstream gdsfactory).
+
+        Use :meth:`get_polygons_points` for differentiable (N, 2) point arrays.
 
         Args:
-            merge: if True merges the polygons (non-differentiable, uses KLayout).
+            merge: if True merges the polygons.
             by: the format of the dict key: "index", "name" or "tuple".
             layers: list of layers to get polygons from. Defaults to all layers.
-            smooth: if set, smooths merged polygons (non-differentiable).
+            smooth: if set, smooths merged polygons.
+            layer: if given, returns the list of kdb.DPolygon on that layer (um).
         """
+        from gdsfactory import klayout_bridge as kb
+
+        if layer is not None:
+            key = _layer_key(layer)
+            return [kb.array_to_kdpolygon(p) for p in self._flat_polygons(layer=layer).get(key, [])]
+        polys = self._polygons_by(by=by, layers=layers)
+        out: dict[Any, list[Any]] = {}
+        for k, ps in polys.items():
+            if merge or smooth:
+                r = kb.merge_arrays(ps, smooth=smooth)
+                out[k] = list(r.each())
+            else:
+                out[k] = [kb.array_to_kpolygon(p) for p in ps]
+        return out
+
+    def _polygons_by(
+        self, by: str = "index", layers: LayerSpecs | None = None
+    ) -> dict[Any, list[Array]]:
         from gdsfactory.pdk import get_layer_name, get_layer_tuple
 
         polys = self._flat_polygons()
         if layers is not None:
             keys = {_layer_key(lay) for lay in layers}
             polys = {k: v for k, v in polys.items() if k in keys}
-        if merge or smooth:
-            from gdsfactory import klayout_bridge as kb
-
-            polys = {
-                k: kb.region_to_arrays(kb.merge_arrays(v, smooth=smooth))
-                for k, v in polys.items()
-            }
+        polys = {k: v for k, v in polys.items() if v}
         if by == "index":
             return dict(polys)
         if by == "name":
@@ -1320,8 +1437,27 @@ class Component(_BBoxMixin):
         scale: float | None = None,
         by: str = "index",
         layers: LayerSpecs | None = None,
-    ) -> dict[Any, list[Array]]:
-        polys = self.get_polygons(merge=merge, by=by, layers=layers)
+        layer: LayerSpec | None = None,
+    ) -> Any:
+        """Returns (N, 2) point arrays per layer (differentiable unless merge=True).
+
+        Args:
+            merge: if True merges the polygons (KLayout, non-differentiable).
+            scale: optional scaling factor for the points.
+            by: the format of the dict key: "index", "name" or "tuple".
+            layers: list of layers to get polygons from. Defaults to all layers.
+            layer: if given, returns the list of arrays on that layer.
+        """
+        from gdsfactory import klayout_bridge as kb
+
+        if layer is not None:
+            ps = self._flat_polygons(layer=layer).get(_layer_key(layer), [])
+            if merge:
+                ps = kb.region_to_arrays(kb.merge_arrays(ps))
+            return [p * scale for p in ps] if scale else list(ps)
+        polys = self._polygons_by(by=by, layers=layers)
+        if merge:
+            polys = {k: kb.region_to_arrays(kb.merge_arrays(v)) for k, v in polys.items()}
         if scale:
             return {k: [p * scale for p in v] for k, v in polys.items()}
         return polys
@@ -1334,23 +1470,33 @@ class Component(_BBoxMixin):
         return [lab for lab in labels if lab.layer == key]
 
     def area(self, layer: LayerSpec | None = None) -> Any:
-        """Total (signed-abs) polygon area. Differentiable; overlaps are double counted.
+        """Area of a layer in um2 (overlaps merged, like upstream).
 
-        Use ``area(merge=True)``-style KLayout semantics via ``area_merged``.
+        The value is KLayout's merged area; the derivative is the derivative of
+        the sum of the polygon areas (exact when polygons on the layer do not
+        overlap). Use :meth:`area_unmerged` for a fully differentiable sum.
         """
-        polys = self._flat_polygons(layer=layer)
-        total = asarray(0.0)
-        for ps in polys.values():
-            for p in ps:
-                total = total + jnp.abs(polygon_area(p))
-        return total
-
-    def area_merged(self, layer: LayerSpec) -> float:
-        """Merged area (KLayout, non-differentiable)."""
         from gdsfactory import klayout_bridge as kb
 
-        r = kb.merge_arrays(self._flat_polygons(layer=layer).get(_layer_key(layer), []))
-        return float(r.area()) * 1e-6
+        if layer is None:
+            return sum(self.area(lay) for lay in self.layers)
+        polys = self._flat_polygons(layer=layer).get(_layer_key(layer), [])
+        if not polys:
+            return 0.0
+        merged = float(kb.merge_arrays(polys).area()) * 1e-6
+        if any(is_tracer(p) for p in polys):
+            total = sum(xp.abs(polygon_area(p)) for p in polys)
+            return merged + (total - stop_gradient(total))
+        return merged
+
+    def area_unmerged(self, layer: LayerSpec | None = None) -> Any:
+        """Sum of polygon areas (differentiable; overlaps are double counted)."""
+        polys = self._flat_polygons(layer=layer)
+        total: Any = 0.0
+        for ps in polys.values():
+            for p in ps:
+                total = total + xp.abs(polygon_area(p))
+        return total
 
     @property
     def layers(self) -> list[Layer]:
@@ -1388,11 +1534,13 @@ class Component(_BBoxMixin):
 
     def copy(self) -> Component:
         """Returns an unlocked shallow copy (children are shared, geometry copied)."""
-        c = self.__class__.__new__(self.__class__)
+        c = object.__new__(self.__class__)
         c.__dict__.update(self.__dict__)
+        _LIVE_COMPONENTS.add(c)
         c._name = f"{self.name}_copy" if self.locked else self.name
         c.polygons = {k: list(v) for k, v in self.polygons.items()}
         c.labels = list(self.labels)
+        c._paths = {k: list(v) for k, v in self._paths.items()}
         c.insts = Instances(c)
         for r in self.insts:
             nr = ComponentReference(
@@ -1412,7 +1560,7 @@ class Component(_BBoxMixin):
         c.info = self.info.model_copy(deep=False)
         c.settings = self.settings.model_copy(deep=False)
         c.routes = dict(self.routes)
-        c.vinsts = c.insts
+        c.vinsts = ()
         c.locked = False
         return c
 
@@ -1475,73 +1623,344 @@ class Component(_BBoxMixin):
         c.add_ports(self.ports)
         return c
 
+    def _cells_for(self, recursive: bool) -> list[Component]:
+        return [self, *self.called_cells()] if recursive else [self]
+
+    def _layer_op(self, recursive: bool, op: Callable[[Component], None]) -> Self:
+        """Applies op to self (and all descendant cells if recursive), in place.
+
+        Like upstream, recursive operations modify the referenced cells too
+        (temporarily unlocking cached cells).
+        """
+        if not recursive:
+            self._check_unlocked()
+            op(self)
+            return self
+        for c in self._cells_for(True):
+            was_locked = c.locked
+            c.locked = False
+            try:
+                op(c)
+            finally:
+                c.locked = was_locked
+        return self
+
     def remove_layers(
         self,
         layers: LayerSpecs,
         recursive: bool = True,
     ) -> Self:
-        self._check_unlocked()
+        """Removes layers (in place; recursive also removes them from child cells)."""
         keys = {_layer_key(lay) for lay in layers}
-        if recursive and self.insts:
-            self.flatten()
-        self.polygons = {k: v for k, v in self.polygons.items() if k not in keys}
-        self.labels = [lab for lab in self.labels if lab.layer not in keys]
-        return self
+
+        def op(c: Component) -> None:
+            c.polygons = {k: v for k, v in c.polygons.items() if k not in keys}
+            c.labels = [lab for lab in c.labels if lab.layer not in keys]
+            c._paths = {k: v for k, v in c._paths.items() if k not in keys}
+
+        return self._layer_op(recursive, op)
 
     def copy_layers(
         self,
         layer_map: dict[LayerSpec, LayerSpec],
         recursive: bool = False,
     ) -> Self:
-        self._check_unlocked()
-        src = self._flat_polygons() if recursive else self.polygons
-        for src_layer, dst_layer in layer_map.items():
-            s = _layer_key(src_layer)
-            d = _layer_key(dst_layer)
-            self.polygons.setdefault(d, []).extend(src.get(s, []))
-        return self
+        """Copies polygons from source to destination layers (in place)."""
+        pairs = [(_layer_key(k), _layer_key(v)) for k, v in layer_map.items()]
+
+        def op(c: Component) -> None:
+            for src, dst in pairs:
+                c.polygons.setdefault(dst, []).extend(list(c.polygons.get(src, [])))
+
+        return self._layer_op(recursive, op)
 
     def remap_layers(
         self,
         layer_map: dict[LayerSpec, LayerSpec],
         recursive: bool = False,
     ) -> Self:
-        self._check_unlocked()
-        if recursive and self.insts:
-            self.flatten()
+        """Moves polygons, labels and ports from source to destination layers."""
         remap = {_layer_key(k): _layer_key(v) for k, v in layer_map.items()}
-        new: dict[int, list[Array]] = {}
-        for k, polys in self.polygons.items():
-            new.setdefault(remap.get(k, k), []).extend(polys)
-        self.polygons = new
-        for p in self.ports:
-            if p.layer in remap:
-                p.layer = remap[p.layer]
-        return self
 
-    def offset(self, layer: LayerSpec, distance: float) -> None:
+        def op(c: Component) -> None:
+            new: dict[int, list[Array]] = {}
+            for k, polys in c.polygons.items():
+                new.setdefault(remap.get(k, k), []).extend(polys)
+            c.polygons = new
+            for lab in c.labels:
+                lab.layer = remap.get(lab.layer, lab.layer)
+            for p in c.ports:
+                if int(p.layer) in remap:
+                    from gdsfactory.pdk import get_layer
+
+                    p.layer = get_layer(remap[int(p.layer)])
+
+        return self._layer_op(recursive, op)
+
+    def offset(
+        self,
+        layer: LayerSpec,
+        distance: float,
+        flatten: bool = False,
+        corner_mode: int = 2,
+    ) -> None:
         """Grows/shrinks polygons on layer by distance (KLayout, non-differentiable)."""
         self._check_unlocked()
         from gdsfactory import klayout_bridge as kb
 
+        if flatten:
+            self.flatten()
         key = _layer_key(layer)
         polys = self._flat_polygons(layer=layer).get(key, [])
-        if self.insts:
-            self.flatten()
-        r = kb.arrays_to_region(polys).sized(round(distance * 1e3))
-        self.polygons[key] = kb.region_to_arrays(r)
+        d = round(to_float(distance) * 1e3)
+        r = kb.arrays_to_region(polys)
+        r = r.sized(d, d, corner_mode)
+        self._replace_layer(key, kb.region_to_arrays(r))
 
     def over_under(self, layer: LayerSpec, distance: float = 1.0) -> None:
+        """Grows then shrinks polygons (removes small gaps; KLayout, non-differentiable)."""
         self._check_unlocked()
         from gdsfactory import klayout_bridge as kb
 
         key = _layer_key(layer)
         polys = self._flat_polygons(layer=layer).get(key, [])
-        if self.insts:
-            self.flatten()
-        d = round(distance * 1e3)
+        d = round(to_float(distance) * 1e3)
         r = kb.arrays_to_region(polys).sized(d).sized(-d)
-        self.polygons[key] = kb.region_to_arrays(r)
+        self._replace_layer(key, kb.region_to_arrays(r))
+
+    def _replace_layer(self, key: int, polys: list[Array]) -> None:
+        """Replaces the (flattened) content of one layer, keeping the other layers."""
+        if self.insts:
+            for r in list(self.insts):
+                if not r.cell._is_empty(key):
+                    # move the other layers of the reference into this cell, drop this layer
+                    for t in r.array_transforms():
+                        for lay, ps in r.cell._flat_polygons(t).items():
+                            if lay != key:
+                                self.polygons.setdefault(lay, []).extend(ps)
+                        self.labels.extend(r.cell._flat_labels(t))
+                    self.insts.remove(r)
+        self.polygons[key] = list(polys)
+
+    def trim(
+        self,
+        left: float,
+        bottom: float,
+        right: float,
+        top: float,
+        flatten: bool = False,
+    ) -> None:
+        """Clips the component to a box (KLayout, non-differentiable; flattens)."""
+        self._check_unlocked()
+        from gdsfactory import klayout_bridge as kb
+
+        b = self.dbbox()
+        if (
+            to_float(b.left) >= left
+            and to_float(b.right) <= right
+            and to_float(b.bottom) >= bottom
+            and to_float(b.top) <= top
+        ):
+            return
+        import klayout.db as kdb
+
+        box = kdb.Region(kdb.Box(round(left * 1e3), round(bottom * 1e3), round(right * 1e3), round(top * 1e3)))
+        polys = self._flat_polygons()
+        labels = [
+            lab
+            for lab in self._flat_labels()
+            if left <= to_float(lab.x) <= right and bottom <= to_float(lab.y) <= top
+        ]
+        self.insts.clear()
+        self.polygons = {
+            k: kb.region_to_arrays(kb.arrays_to_region(v) & box) for k, v in polys.items()
+        }
+        self.labels = labels
+
+    def fix_width(
+        self,
+        layer: LayerSpec,
+        min_width: float = 0.2,
+        n_threads: int | None = None,
+        tile_size: tuple[float, float] | None = None,
+        overlap: int = 1,
+        smooth: int | None = None,
+        flatten: bool = True,
+    ) -> None:
+        """Fixes min width of a layer (KLayout minkowski, non-differentiable)."""
+        from kfactory.utils.violations import fix_width_minkowski_tiled
+
+        from gdsfactory.pdk import get_layer_info
+
+        self._check_unlocked()
+        key = _layer_key(layer)
+        kc = self._export_layer(layer)
+        fix = fix_width_minkowski_tiled(
+            kc.to_itype(),
+            min_width=round(to_float(min_width) * 1e3),
+            ref=get_layer_info(layer),
+            n_threads=n_threads,
+            tile_size=tile_size,
+            overlap=overlap,
+            smooth=smooth,
+        )
+        from gdsfactory import klayout_bridge as kb
+
+        self._replace_layer(key, kb.region_to_arrays(fix))
+
+    def fix_spacing(
+        self,
+        layer: LayerSpec,
+        min_space: float = 0.2,
+        size_bias: float = 0.0,
+        smooth_factor: float = 0.05,
+    ) -> None:
+        """Fixes min spacing of a layer (KLayout, non-differentiable).
+
+        Like upstream, the fixed geometry is added to the layer.
+        """
+        from kfactory.utils.violations import fix_spacing_tiled
+
+        from gdsfactory import klayout_bridge as kb
+        from gdsfactory.pdk import get_layer_info
+
+        self._check_unlocked()
+        key = _layer_key(layer)
+        kc = self._export_layer(layer)
+        fix = fix_spacing_tiled(
+            kc.to_itype(),
+            min_space=round(to_float(min_space) * 1e3),
+            layer=get_layer_info(layer),
+            smooth_factor=smooth_factor,
+        )
+        if size_bias:
+            d = round(to_float(size_bias) * 1e3)
+            fix = fix.sized(+d).sized(-d)
+        self.polygons.setdefault(key, []).extend(kb.region_to_arrays(fix))
+
+    def _export_layer(self, layer: LayerSpec) -> Any:
+        """Concrete kfactory cell with the flattened polygons of one layer."""
+        from gdsfactory.klayout_bridge import to_kfactory
+
+        tmp = Component(name=f"{self.name}_layer")
+        key = _layer_key(layer)
+        tmp.polygons = {key: list(self._flat_polygons(layer=layer).get(key, []))}
+        return to_kfactory(tmp, add_ports=False)
+
+    def fill(
+        self,
+        fill_cell: Any,
+        fill_layers: Iterable[tuple[LayerSpec, float]] = (),
+        fill_regions: Iterable[tuple[Any, float]] = (),
+        exclude_layers: Iterable[tuple[LayerSpec, float]] = (),
+        exclude_regions: Iterable[tuple[Any, float]] = (),
+        n_threads: int | None = None,
+        tile_size: tuple[float, float] | None = None,
+        row_step: Any = None,
+        col_step: Any = None,
+        x_space: float = 0,
+        y_space: float = 0,
+        tile_border: tuple[float, float] = (20, 20),
+        multi: bool = False,
+    ) -> None:
+        """Fills regions with fill_cell (KLayout tiled fill, non-differentiable).
+
+        The fill cells are added as references of ``fill_cell``.
+        """
+        import kfactory as kf
+        from kfactory.utils.fill import fill_tiled
+
+        from gdsfactory.klayout_bridge import to_kfactory
+        from gdsfactory.pdk import get_component, get_layer_info
+        from gdsfactory.transform import Transform
+
+        self._check_unlocked()
+        fill_comp = get_component(fill_cell)
+        kcl = kf.KCLayout(f"gdsfactoryx_fill_{next(_unnamed_counter)}")
+        kcl.layout.dbu = 1e-3
+        kc = to_kfactory(self, kcl=kcl, add_ports=False)
+        kfill = to_kfactory(fill_comp, kcl=kcl, add_ports=False, unique_prefix="fill_")
+        before = {id(i) for i in kc.kdb_cell.each_inst()}
+        n_before = kc.kdb_cell.child_instances()
+        fill_tiled(
+            kc,
+            fill_cell=kfill,
+            fill_layers=[(get_layer_info(lay), int(sp)) for lay, sp in fill_layers],
+            fill_regions=[(r, int(sp)) for r, sp in fill_regions],
+            exclude_layers=[(get_layer_info(lay), int(sp)) for lay, sp in exclude_layers],
+            exclude_regions=[(r, int(sp)) for r, sp in exclude_regions],
+            n_threads=n_threads,
+            tile_size=tile_size,
+            row_step=row_step,
+            col_step=col_step,
+            x_space=x_space,
+            y_space=y_space,
+            tile_border=tile_border,
+            multi=multi,
+        )
+        _ = before
+        for i, inst in enumerate(kc.kdb_cell.each_inst()):
+            if i < n_before or inst.cell_index != kfill.cell_index():
+                continue
+            ca = inst.dcell_inst
+            ref = self.add_ref(fill_comp)
+            ref.transform = Transform.from_klayout(inst.dcplx_trans)
+            if ca.is_regular_array():
+                ref.na, ref.nb = ca.na, ca.nb
+                ref.a = asarray([ca.a.x, ca.a.y])
+                ref.b = asarray([ca.b.x, ca.b.y])
+
+    def child_cells(self) -> int:
+        """Number of distinct cells referenced directly by this cell."""
+        return len({id(r.cell) for r in self.insts})
+
+    def delete(self) -> None:
+        """Kept for kfactory compatibility (components are garbage collected)."""
+        self.insts.clear()
+        self.polygons = {}
+        self.labels = []
+
+    def get_boxes(self, layer: LayerSpec, recursive: bool = True) -> list[Any]:
+        """Axis-aligned rectangles on a layer as kdb.DBox (concrete)."""
+        import klayout.db as kdb
+
+        key = _layer_key(layer)
+        polys = (
+            self._flat_polygons(layer=layer).get(key, [])
+            if recursive
+            else self.polygons.get(key, [])
+        )
+        boxes = []
+        for p in polys:
+            q = to_numpy(p)
+            if q.shape[0] == 4:
+                xs = set(np.round(q[:, 0], 9))
+                ys = set(np.round(q[:, 1], 9))
+                if len(xs) == 2 and len(ys) == 2:
+                    boxes.append(kdb.DBox(min(xs), min(ys), max(xs), max(ys)))
+        return boxes
+
+    def get_paths(self, layer: LayerSpec, recursive: bool = True) -> list[Any]:
+        """Paths inserted through ``shapes(layer).insert(DPath)`` as kdb.DPath."""
+        import klayout.db as kdb
+
+        key = _layer_key(layer)
+        out = []
+        items: list[tuple[Transform, Component]] = [(Transform(), self)]
+        if recursive:
+            stack: list[tuple[Transform, Component]] = [(Transform(), self)]
+            items = []
+            while stack:
+                t, c = stack.pop()
+                items.append((t, c))
+                for r in c.insts:
+                    for rt in r.array_transforms():
+                        stack.append((t * rt, r.cell))
+        for t, c in items:
+            for pts, width in c._paths.get(key, []):
+                q = to_numpy(t.apply(pts))
+                out.append(kdb.DPath([kdb.DPoint(float(x), float(y)) for x, y in q], float(width)))
+        return out
 
     # --------------------------------------------------------- transforms
     def move(self, *args: Any) -> Self:
@@ -1552,6 +1971,65 @@ class Component(_BBoxMixin):
         dx, dy = _move_args(args)
         self.transform(Transform(dx, dy))
         return self
+
+    def _set_position(self, attr: str, value: Any) -> None:
+        if isinstance(value, Port):
+            value = value.x if attr in {"x", "xmin", "xmax"} else value.y
+        delta = value - getattr(self, attr)
+        if attr in {"x", "xmin", "xmax"}:
+            self.move(delta, 0.0)
+        else:
+            self.move(0.0, delta)
+
+    @_BBoxMixin.xmin.setter  # type: ignore[attr-defined, untyped-decorator]
+    def xmin(self, value: Any) -> None:
+        self._set_position("xmin", value)
+
+    @_BBoxMixin.xmax.setter  # type: ignore[attr-defined, untyped-decorator]
+    def xmax(self, value: Any) -> None:
+        self._set_position("xmax", value)
+
+    @_BBoxMixin.ymin.setter  # type: ignore[attr-defined, untyped-decorator]
+    def ymin(self, value: Any) -> None:
+        self._set_position("ymin", value)
+
+    @_BBoxMixin.ymax.setter  # type: ignore[attr-defined, untyped-decorator]
+    def ymax(self, value: Any) -> None:
+        self._set_position("ymax", value)
+
+    @_BBoxMixin.x.setter  # type: ignore[attr-defined, untyped-decorator]
+    def x(self, value: Any) -> None:
+        self._set_position("x", value)
+
+    @_BBoxMixin.y.setter  # type: ignore[attr-defined, untyped-decorator]
+    def y(self, value: Any) -> None:
+        self._set_position("y", value)
+
+    @_BBoxMixin.center.setter  # type: ignore[attr-defined, untyped-decorator]
+    def center(self, value: Any) -> None:
+        if isinstance(value, Port):
+            value = value.center
+        value = asarray(value)
+        c = self.center
+        self.move(value[0] - c[0], value[1] - c[1])
+
+    dxmin = xmin
+    dxmax = xmax
+    dymin = ymin
+    dymax = ymax
+    dx = x
+    dy = y
+    dcenter = center
+
+    def movex(self, dx: Any) -> Self:
+        return self.move(dx, 0.0)
+
+    def movey(self, dy: Any) -> Self:
+        return self.move(0.0, dy)
+
+    dmove = move
+    dmovex = movex
+    dmovey = movey
 
     def transform(self, t: Transform) -> Self:
         self._check_unlocked()
@@ -1635,40 +2113,58 @@ class Component(_BBoxMixin):
 
     def plot(
         self,
-        show_labels: bool = False,
+        lyrdb: Any = None,
+        display_type: Any = None,
+        *,
+        show_labels: bool = True,
         show_ruler: bool = True,
+        pixel_buffer_options: Any = None,
         return_fig: bool = False,
         ax: Axes | None = None,
         show_ports: bool = True,
-        **kwargs: Any,
     ) -> Figure | None:
-        """Plots the component with matplotlib (concrete values)."""
+        """Plots the component with KLayout's renderer (concrete values)."""
         from gdsfactory.plot import plot_component
 
         return plot_component(
             self,
             ax=ax,
             show_labels=show_labels,
+            show_ruler=show_ruler,
             show_ports=show_ports,
             return_fig=return_fig,
+            pixel_buffer_options=pixel_buffer_options,
         )
 
     def plot_klayout(self, **kwargs: Any) -> Any:
         return self.to_kfactory().plot(**kwargs)
 
     def to_dict(self, with_ports: bool = False) -> dict[str, Any]:
+        """Returns a dictionary representation of the Component."""
+        from gdsfactory.port import to_dict
+
         d: dict[str, Any] = {
             "name": self.name,
-            "info": clean_value_json(dict(self.info)),
-            "settings": clean_value_json(dict(self.settings)),
+            "info": self.info.model_dump(exclude_none=True),
+            "settings": self.settings.model_dump(exclude_none=True),
         }
         if with_ports:
-            d["ports"] = {p.name: p.to_dict() for p in self.ports}
-        return d
+            d["ports"] = {
+                port.name: to_dict(port) for port in self.ports if port.name is not None
+            }
+        res = clean_value_json(d)
+        assert isinstance(res, dict)
+        return res
 
-    def get_netlist(self, **kwargs: Any) -> dict[str, Any]:
-        from gdsfactory.get_netlist import get_netlist
+    def get_netlist(self, recursive: bool = False, **kwargs: Any) -> dict[str, Any]:
+        """Returns the netlist (recursive=True: netlists of all hierarchy levels)."""
+        from gdsfactory.get_netlist import function_namer, get_netlist, get_netlist_recursive
 
+        if kwargs.get("component_namer") is None:
+            kwargs["component_namer"] = function_namer
+        if recursive:
+            return get_netlist_recursive(self, **kwargs)
+        kwargs.pop("netlist_namer", None)
         return get_netlist(self, **kwargs)
 
     def get_netlist_recursive(self, **kwargs: Any) -> dict[str, Any]:
@@ -1717,51 +2213,92 @@ AnyComponent: TypeAlias = Component
 
 
 class _ShapesProxy:
-    """Minimal kfactory ``cell.shapes(layer)`` emulation."""
+    """kfactory ``cell.shapes(layer)`` emulation (KLayout objects, concrete).
+
+    The differentiable geometry lives in ``component.polygons``; this proxy
+    converts on the fly.
+    """
 
     def __init__(self, c: Component, layer: int) -> None:
         self._c = c
         self._layer = layer
 
-    def insert(self, shape: Any) -> None:
+    def insert(self, shape: Any) -> Any:
+        import klayout.db as kdb
+
         self._c._check_unlocked()
+        if isinstance(shape, kdb.DText | kdb.Text):
+            t = shape if isinstance(shape, kdb.DText) else shape.to_dtype(1e-3)
+            self._c.labels.append(Label(t.string, (t.x, t.y), self._layer))
+            return shape
+        if isinstance(shape, kdb.Texts):
+            for t in shape.each():
+                self.insert(t)
+            return shape
+        if isinstance(shape, kdb.DPath | kdb.Path):
+            dpath = shape if isinstance(shape, kdb.DPath) else shape.to_dtype(1e-3)
+            pts = asarray([[p.x, p.y] for p in dpath.each_point()])
+            self._c._paths.setdefault(self._layer, []).append((pts, dpath.width))
         for arr in _to_point_arrays(shape):
             if arr.shape[0] >= 3:
                 self._c.polygons.setdefault(self._layer, []).append(arr)
+        return shape
 
-    def each(self, *args: Any) -> Iterator[Array]:
-        return iter(self._c.polygons.get(self._layer, []))
+    def each(self, *args: Any) -> Iterator[Any]:
+        import klayout.db as kdb
 
-    def __iter__(self) -> Iterator[Array]:
+        from gdsfactory.klayout_bridge import array_to_kdpolygon
+
+        for p in self._c.polygons.get(self._layer, []):
+            yield array_to_kdpolygon(p)
+        for lab in self._c.labels:
+            if lab.layer == self._layer:
+                yield kdb.DText(lab.text, to_float(lab.x), to_float(lab.y))
+
+    def __iter__(self) -> Iterator[Any]:
         return self.each()
 
+    def __len__(self) -> int:
+        return self.size()
+
     def size(self) -> int:
-        return len(self._c.polygons.get(self._layer, []))
+        n_labels = sum(1 for lab in self._c.labels if lab.layer == self._layer)
+        return len(self._c.polygons.get(self._layer, [])) + n_labels
 
     def is_empty(self) -> bool:
         return self.size() == 0
 
     def clear(self) -> None:
+        self._c._check_unlocked()
         self._c.polygons.pop(self._layer, None)
+        self._c.labels = [lab for lab in self._c.labels if lab.layer != self._layer]
+        self._c._paths.pop(self._layer, None)
 
+    def bbox(self) -> Any:
+        import klayout.db as kdb
+
+        b = kdb.DBox()
+        for p in self.each():
+            b += p.bbox()
+        return b
 
 def polygon_area(points: Array) -> Any:
     """Signed shoelace area (differentiable)."""
     x = points[:, 0]
     y = points[:, 1]
-    return 0.5 * jnp.sum(x * jnp.roll(y, -1) - jnp.roll(x, -1) * y)
+    return 0.5 * xp.sum(x * xp.roll(y, -1) - xp.roll(x, -1) * y)
 
 
 def _rect_points(left: Any, bottom: Any, right: Any, top: Any) -> Array:
     l, b, r, t = (asarray(v) for v in (left, bottom, right, top))
-    return jnp.stack(
-        [jnp.stack([l, b]), jnp.stack([l, t]), jnp.stack([r, t]), jnp.stack([r, b])]
+    return xp.stack(
+        [xp.stack([l, b]), xp.stack([l, t]), xp.stack([r, t]), xp.stack([r, b])]
     )
 
 
 def _vec(v: Any) -> Array:
     if hasattr(v, "x") and hasattr(v, "y"):
-        return jnp.stack([asarray(v.x), asarray(v.y)])
+        return xp.stack([asarray(v.x), asarray(v.y)])
     return asarray(v)
 
 
@@ -1774,7 +2311,7 @@ def _to_point_arrays(points: Any) -> list[Array]:
         from gdsfactory.klayout_bridge import klayout_shape_to_arrays
 
         return klayout_shape_to_arrays(points)
-    if isinstance(points, jnp.ndarray | np.ndarray) or is_tracer(points):
+    if isinstance(points, xp.ndarray | np.ndarray) or is_tracer(points):
         return [points_array(points)]
     pts = list(points)
     if not pts:
@@ -1789,7 +2326,7 @@ def _to_point_arrays(points: Any) -> list[Array]:
 # KLayout region helpers (non-differentiable boolean / sizing operations)
 # ---------------------------------------------------------------------------
 def ensure_tuple_of_tuples(points: Any) -> tuple[tuple[float, float], ...]:
-    if isinstance(points, np.ndarray) or isinstance(points, jnp.ndarray) or is_tracer(points):
+    if isinstance(points, np.ndarray) or isinstance(points, xp.ndarray) or is_tracer(points):
         return tuple(map(tuple, to_numpy(points).tolist()))
     if isinstance(points, list) and points and isinstance(points[0], np.ndarray | list):
         return tuple(tuple(point) for point in points)
@@ -1824,6 +2361,10 @@ def boolean_xor(region1: Any, region2: Any) -> Any:
 
 def boolean_and(region1: Any, region2: Any) -> Any:
     return region1 & region2
+
+
+def copy(region: Any) -> Any:
+    return region.dup()
 
 
 boolean_operations = {

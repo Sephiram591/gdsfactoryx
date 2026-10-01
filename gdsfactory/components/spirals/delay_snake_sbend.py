@@ -3,6 +3,7 @@ from __future__ import annotations
 __all__ = ["delay_snake_sbend"]
 
 import gdsfactory as gf
+from gdsfactory._jax import to_float
 from gdsfactory.component import Component
 from gdsfactory.typings import ComponentSpec, CrossSectionSpec
 
@@ -126,7 +127,7 @@ def delay_snake_sbend(
     c.add_port("o1", port=s1.ports["o1"])
     c.add_port("o2", port=s4.ports["o2"])
 
-    c.info["min_bend_radius"] = float(sbend.info["min_bend_radius"])
+    c.info["min_bend_radius"] = to_float(sbend.info["min_bend_radius"])
     c.info["bend180_radius"] = bend180_radius
 
     # delete any straights with zero length

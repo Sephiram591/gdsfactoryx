@@ -6,9 +6,9 @@ __all__ = ["awg", "free_propagation_region"]
 
 from functools import partial
 
-import numpy as np
 
 import gdsfactory as gf
+from gdsfactory._jax import xp
 from gdsfactory.component import Component
 from gdsfactory.typings import ComponentSpec, CrossSectionSpec, Step
 
@@ -63,23 +63,23 @@ def free_propagation_region(
             layer=layer,
         )
     else:
-        y = np.linspace(-width1 / 2 + wg_width / 2, width1 / 2 - wg_width / 2, inputs)
+        y = xp.linspace(-width1 / 2 + wg_width / 2, width1 / 2 - wg_width / 2, inputs)
         y = gf.snap.snap_to_grid(y)
         for i, yi in enumerate(y):
             c.add_port(
                 f"W{i}",
-                center=(0, float(yi)),
+                center=(0, yi),
                 width=wg_width,
                 orientation=180,
                 layer=layer,
             )
 
-    y = np.linspace(-width2 / 2 + wg_width / 2, width2 / 2 - wg_width / 2, outputs)
+    y = xp.linspace(-width2 / 2 + wg_width / 2, width2 / 2 - wg_width / 2, outputs)
     y = gf.snap.snap_to_grid(y)
     for i, yi in enumerate(y):
         c.add_port(
             f"E{i}",
-            center=(length, float(yi)),
+            center=(length, yi),
             width=wg_width,
             orientation=0,
             layer=layer,

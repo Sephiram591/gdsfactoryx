@@ -3,6 +3,7 @@ from __future__ import annotations
 __all__ = ["compass"]
 
 import gdsfactory as gf
+from gdsfactory._jax import to_float
 from gdsfactory.component import Component
 from gdsfactory.config import valid_port_orientations
 from gdsfactory.snap import snap_to_grid2x
@@ -29,12 +30,11 @@ def compass(
         auto_rename_ports: auto rename ports.
     """
     c = gf.Component()
-    _temp = snap_to_grid2x(size)
-    dx = float(_temp[0])
-    dy = float(_temp[1])
+    dx = snap_to_grid2x(size[0])
+    dy = snap_to_grid2x(size[1])
     port_orientations_list = port_orientations if port_orientations is not None else []
 
-    if dx <= 0 or dy <= 0:
+    if to_float(dx) <= 0 or to_float(dy) <= 0:
         raise ValueError(f"dx={dx} and dy={dy} must be > 0")
 
     points = [

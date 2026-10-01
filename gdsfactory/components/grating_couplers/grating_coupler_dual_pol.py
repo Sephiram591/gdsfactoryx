@@ -5,6 +5,7 @@ __all__ = ["grating_coupler_dual_pol"]
 import numpy as np
 
 import gdsfactory as gf
+from gdsfactory._jax import to_float
 from gdsfactory.component import Component
 from gdsfactory.typings import ComponentSpec, CrossSectionSpec, LayerSpec
 
@@ -97,8 +98,8 @@ def grating_coupler_dual_pol(
     )
 
     # Photonic crystal
-    num_x = int(np.floor(x_span / period_x))
-    num_y = int(np.floor(y_span / period_y))
+    num_x = int(np.floor(to_float(x_span) / to_float(period_x)))
+    num_y = int(np.floor(to_float(y_span) / to_float(period_y)))
     x_start = -(num_x * period_x) / 2
     y_start = -(num_y * period_y) / 2
 

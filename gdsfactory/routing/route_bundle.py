@@ -19,12 +19,15 @@ from typing import Any, Literal, cast
 from warnings import warn
 
 import kfactory as kf
-from kfactory.routing.generic import ManhattanRoute
 from kfactory.routing.optical import PathLengthConfig
 from kfactory.schematic import Constraint
 
 import gdsfactory as gf
+from gdsfactory._jax import to_float
+from gdsfactory._ports import Pin as _Pin
+from gdsfactory._ports import Port as _Port
 from gdsfactory.config import CONF
+from gdsfactory.routing._kf_router import ManhattanRoute, route_bundle_kf
 from gdsfactory.routing.auto_taper import add_auto_tapers
 from gdsfactory.routing.resolve_pins import resolve_pins
 from gdsfactory.routing.sort_ports import get_port_x, get_port_y
@@ -100,9 +103,9 @@ def get_min_spacing(
 
 
 def _ensure_manhattan_waypoints(
-    waypoints: list[kf.kdb.DPoint],
+    waypoints: list[tuple[Any, Any]],
     start_port: gf.Port | None = None,
-) -> list[kf.kdb.DPoint]:
+) -> list[tuple[Any, Any]]:
     """Insert corner points between non-Manhattan waypoints to make the path Manhattan.
 
     For each pair of consecutive waypoints that are not axis-aligned,
@@ -110,7 +113,7 @@ def _ensure_manhattan_waypoints(
     either purely horizontal or purely vertical.
 
     Args:
-        waypoints: list of waypoints that may contain non-Manhattan segments.
+        waypoints: list of (x, y) waypoints that may contain non-Manhattan segments.
         start_port: optional start port to determine initial routing direction.
 
     Returns:
@@ -121,7 +124,7 @@ def _ensure_manhattan_waypoints(
 
     tol = 1.5 * gf.kcl.dbu
     go_horizontal_first = (
-        int(start_port.orientation) % 360 in {0, 180}
+        round(to_float(start_port.orientation)) % 360 in {0, 180}
         if start_port is not None and start_port.orientation is not None
         else True
     )
@@ -130,8 +133,8 @@ def _ensure_manhattan_waypoints(
         prev = result[-1]
         curr = waypoints[i]
 
-        dx = abs(curr.x - prev.x)
-        dy = abs(curr.y - prev.y)
+        dx = abs(to_float(curr[0]) - to_float(prev[0]))
+        dy = abs(to_float(curr[1]) - to_float(prev[1]))
 
         if dx < tol or dy < tol:
             # Manhattan segment — update direction from actual geometry
@@ -140,11 +143,7 @@ def _ensure_manhattan_waypoints(
             continue
 
         # Non-Manhattan segment: insert corner, then alternate for next
-        corner = (
-            kf.kdb.DPoint(curr.x, prev.y)
-            if go_horizontal_first
-            else kf.kdb.DPoint(prev.x, curr.y)
-        )
+        corner = (curr[0], prev[1]) if go_horizontal_first else (prev[0], curr[1])
         go_horizontal_first = not go_horizontal_first
         result.append(corner)
         result.append(curr)
@@ -155,8 +154,14 @@ def _ensure_manhattan_waypoints(
         collapsed = [result[0]]
         for i in range(1, len(result) - 1):
             prev, curr, nxt = result[i - 1], result[i], result[i + 1]
-            same_x = abs(prev.x - curr.x) < tol and abs(curr.x - nxt.x) < tol
-            same_y = abs(prev.y - curr.y) < tol and abs(curr.y - nxt.y) < tol
+            same_x = (
+                abs(to_float(prev[0]) - to_float(curr[0])) < tol
+                and abs(to_float(curr[0]) - to_float(nxt[0])) < tol
+            )
+            same_y = (
+                abs(to_float(prev[1]) - to_float(curr[1])) < tol
+                and abs(to_float(curr[1]) - to_float(nxt[1])) < tol
+            )
             if not same_x and not same_y:
                 collapsed.append(curr)
         collapsed.append(result[-1])
@@ -181,7 +186,7 @@ def route_bundle(
     collision_check_layers: LayerSpecs | None = None,
     on_collision: Literal["error", "show_error", "warning", "ignore"] | None = None,
     on_placer_error: Literal["error", "show_error", "warning", "ignore"] | None = None,
-    bboxes: Sequence[kf.kdb.DBox] | None = None,
+    bboxes: Sequence[Any] | None = None,
     allow_width_mismatch: bool | None = None,
     allow_layer_mismatch: bool | None = None,
     allow_type_mismatch: bool | None = None,
@@ -191,7 +196,7 @@ def route_bundle(
     sbend: ComponentSpec | None = None,
     auto_taper: bool = True,
     auto_taper_taper: ComponentSpec | None = None,
-    waypoints: Coordinates | Sequence[gf.kdb.DPoint] | None = None,
+    waypoints: Coordinates | Sequence[Any] | None = None,
     steps: Sequence[Step] | None = None,
     start_angles: float | list[float] | None = None,
     end_angles: float | list[float] | None = None,
@@ -322,9 +327,9 @@ def route_bundle(
         raise ValueError("ports1 and ports2 are required")
 
     # Wrap single ports in lists
-    if isinstance(ports1, kf.DPort):
+    if isinstance(ports1, _Port):
         ports1 = [ports1]
-    if isinstance(ports2, kf.DPort):
+    if isinstance(ports2, _Port):
         ports2 = [ports2]
 
     # Ensure ports are lists (they may be reversed, generators, etc.)
@@ -332,8 +337,8 @@ def route_bundle(
     port_list2 = list(ports2)
 
     # Resolve Pin inputs to Ports
-    if port_list1 and isinstance(port_list1[0], kf.DPin):
-        if not (port_list2 and isinstance(port_list2[0], kf.DPin)):
+    if port_list1 and isinstance(port_list1[0], _Pin):
+        if not (port_list2 and isinstance(port_list2[0], _Pin)):
             raise TypeError(
                 "Cannot mix Pins and Ports. "
                 "If ports1 contains Pins, ports2 must also contain Pins."
@@ -341,7 +346,7 @@ def route_bundle(
         port_list1, port_list2 = resolve_pins(  # type: ignore[assignment]
             cast(list[Pin], port_list1), cast(list[Pin], port_list2)
         )
-    elif port_list2 and isinstance(port_list2[0], kf.DPin):
+    elif port_list2 and isinstance(port_list2[0], _Pin):
         raise TypeError(
             "Cannot mix Pins and Ports. "
             "If ports2 contains Pins, ports1 must also contain Pins."
@@ -350,9 +355,8 @@ def route_bundle(
     if show_waypoints and layer_marker is None:
         layer_marker = gf.CONF.layer_marker
 
-    component = gf.Component(base=component.base)  # type: ignore[call-overload]
-    ports1_resolved = [gf.Port(base=p1.base) for p1 in cast(list[kf.DPort], port_list1)]
-    ports2_resolved = [gf.Port(base=p2.base) for p2 in cast(list[kf.DPort], port_list2)]
+    ports1_resolved = list(cast(list[_Port], port_list1))
+    ports2_resolved = list(cast(list[_Port], port_list2))
 
     if router:
         warnings.warn(
@@ -434,10 +438,10 @@ def route_bundle(
         bbox2 = gf.kdb.DBox()
 
         for port in ports1_:
-            bbox1 += port.dcplx_trans.disp.to_p()
+            bbox1 += _dpoint(port)
 
         for port in ports2_:
-            bbox2 += port.dcplx_trans.disp.to_p()
+            bbox2 += _dpoint(port)
 
         bboxes.append(bbox1)
         bboxes.append(bbox2)
@@ -446,10 +450,10 @@ def route_bundle(
         bbox1 = gf.kdb.DBox()
         bbox2 = gf.kdb.DBox()
         for port in ports1_:
-            bbox1 += port.dcplx_trans.disp.to_p()
+            bbox1 += _dpoint(port)
 
         for port in ports2_:
-            bbox2 += port.dcplx_trans.disp.to_p()
+            bbox2 += _dpoint(port)
 
         ports1_ = add_auto_tapers(
             component, ports1_, cross_section=xs, layer_transitions=layer_transitions
@@ -459,14 +463,13 @@ def route_bundle(
         )
 
         for port in ports1_:
-            bbox1 += port.dcplx_trans.disp.to_p()
+            bbox1 += _dpoint(port)
 
         for port in ports2_:
-            bbox2 += port.dcplx_trans.disp.to_p()
+            bbox2 += _dpoint(port)
 
         bboxes.append(bbox1)
         bboxes.append(bbox2)
-        # component.shapes(component.kcl.layer(1,0)).insert(bbox)
 
     if steps and waypoints:
         raise ValueError("Provide only one of steps or waypoints")
@@ -500,6 +503,7 @@ def route_bundle(
         port2 = ports2_[0]
         x2, y2 = port2.center
         orientation = port2.orientation
+        orientation = None if orientation is None else round(to_float(orientation))
         if orientation is not None and int(orientation) in {0, 180}:
             yt = y1 + (y2 - y1) / 3
             ytt = y1 + 2 * (y2 - y1) / 3
@@ -509,25 +513,21 @@ def route_bundle(
             xtt = x1 + 2 * (x2 - x1) / 3
             waypoints = [(xt, y), (xtt, y)]
 
-    waypoints_: list[kf.kdb.DPoint] | None
+    waypoints_: list[tuple[Any, Any]] | None
     if waypoints is None:
         waypoints_ = None
-    elif len(waypoints) == 0:
-        waypoints_ = []
-    elif not isinstance(waypoints[0], kf.kdb.DPoint):
+    else:
         waypoints_ = [
-            kf.kdb.DPoint(p[0], p[1])  # type: ignore[index]
+            (p.x, p.y) if hasattr(p, "x") and hasattr(p, "y") else (p[0], p[1])  # type: ignore[index]
             for p in waypoints
         ]
-    else:
-        waypoints_ = [cast("kf.kdb.DPoint", p) for p in waypoints]
 
     if layer_marker and waypoints_ is not None:
         for p in waypoints_:
             marker = component << gf.components.rectangle(
                 size=(10, 10), layer=layer_marker, centered=True
             )
-            marker.center = (p.x, p.y)
+            marker.center = (p[0], p[1])
 
     if waypoints_ is not None and len(waypoints_) >= 2:
         waypoints_ = _ensure_manhattan_waypoints(waypoints_, start_port=ports1_[0])
@@ -545,19 +545,13 @@ def route_bundle(
             straight, length=length, cross_section=cross_section, width=width
         )
 
-    if sbend:
-
-        def _sbend(
-            c: gf.kf.ProtoTKCell[Any], offset: float, length: float, width: float
-        ) -> gf.kf.DInstanceGroup:
-            sb = gf.get_component(
-                sbend,
-                cross_section=cross_section,
-                width=width,
-                size=(length, offset),
-            )
-            sb_ref = component << sb
-            return gf.kf.DInstanceGroup(insts=[sb_ref], ports=list(sb_ref.ports))
+    def _sbend(offset: float, length: float, width: float) -> gf.Component:
+        return gf.get_component(
+            sbend,  # type: ignore[arg-type]
+            cross_section=cross_section,
+            width=width,
+            size=(length, offset),
+        )
 
     if path_length_matching_config is not None and constraints is not None:
         raise ValueError(
@@ -595,36 +589,36 @@ def route_bundle(
         elif kf_on_placer_error == "ignore":
             kf_on_placer_error = None
 
-        route = kf.routing.optical.route_bundle(
+        route = route_bundle_kf(
             component,
             ports1_,
             ports2_,
+            router="optical",
             separation=separation,
             straight_factory=straight_um,
-            bend90_cell=bend90,
-            taper_cell=taper_cell,
+            bend90=bend90,
+            taper=taper_cell,
             starts=start_straight_length,
             ends=end_straight_length,
             min_straight_taper=min_straight_taper,
             place_port_type=port_type,
-            collision_check_layers=[
-                c.kcl.layout.get_info(layer) for layer in collision_check_layer_enums
-            ]
-            if collision_check_layer_enums
-            else None,
+            collision_check_layers=collision_check_layer_enums,
             on_collision=kf_on_collision,
             on_placer_error=kf_on_placer_error,
+            obstacles=component,
             allow_width_mismatch=allow_width_mismatch,
             allow_layer_mismatch=allow_layer_mismatch,
             allow_type_mismatch=allow_type_mismatch,
             bboxes=list(bboxes or []),
             route_width=width,
+            radius=radius,
             sort_ports=sort_ports,
             waypoints=waypoints_,
             end_angles=end_angles,
             start_angles=start_angles,
             constraints=route_constraints,
             sbend_factory=_sbend if sbend else None,
+            route_name=name,
         )
     except Exception as e:
         if raise_on_error:
@@ -642,11 +636,11 @@ def route_bundle(
             e = ValueError("Waypoints need to be Manhattan (axis-aligned) coordinates.")
         gf.logger.error(f"Error in route_bundle: {e}")
         warn(f"Routing failed: {e}", stacklevel=2)
-        layer_error_path = gf.get_layer_info(gf.CONF.layer_error_path)
-        route = kf.routing.electrical.route_bundle(
+        route = route_bundle_kf(
             component,
             ports1_,
             ports2_,
+            router="electrical",
             separation=separation,
             starts=start_straight_length,
             ends=end_straight_length,
@@ -658,7 +652,7 @@ def route_bundle(
             waypoints=waypoints_,
             end_angles=end_angles,
             start_angles=start_angles,
-            place_layer=layer_error_path,
+            place_layer=gf.CONF.layer_error_path,
         )
 
         if waypoints and waypoints_ is not None:
@@ -667,17 +661,21 @@ def route_bundle(
                 marker = component << gf.components.rectangle(
                     size=(10, 10), layer=layer_marker, centered=True
                 )
-                marker.center = (p.x, p.y)
+                marker.center = (p[0], p[1])
 
     if layer_label:
         for route_i in route:
             c.add_label(
-                text=f"{c.kcl.to_um(route_i.length):.3f}",
+                text=f"{to_float(route_i.length) * c.kcl.dbu:.3f}",
                 layer=layer_label,
                 position=route_i.instances[0].dcenter,
             )
 
     return route
+
+
+def _dpoint(port: _Port) -> Any:
+    return gf.kdb.DPoint(to_float(port.x), to_float(port.y))
 
 
 route_bundle_electrical = partial(

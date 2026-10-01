@@ -2,9 +2,8 @@ from __future__ import annotations
 
 __all__ = ["gear"]
 
-import numpy as np
-
 import gdsfactory as gf
+from gdsfactory._jax import xp
 from gdsfactory.component import Component
 from gdsfactory.typings import LayerSpec
 
@@ -37,10 +36,10 @@ def gear(
     if hub_radius is None:
         hub_radius = root_radius * 0.6
 
-    pa_rad = np.radians(pressure_angle)
+    pa_rad = xp.radians(pressure_angle)
 
     # Angular pitch (full tooth + gap)
-    angular_pitch = 2 * np.pi / n_teeth
+    angular_pitch = 2 * xp.pi / n_teeth
     # Half-tooth angular width at pitch circle
     half_tooth_angle = angular_pitch / 4
 
@@ -51,41 +50,41 @@ def gear(
         theta = i * angular_pitch
 
         # Tooth tip is narrower, root is wider based on pressure angle
-        tip_half_angle = half_tooth_angle - np.tan(pa_rad) * module_size / pitch_radius
+        tip_half_angle = half_tooth_angle - xp.tan(pa_rad) * module_size / pitch_radius
         root_half_angle = (
-            half_tooth_angle + np.tan(pa_rad) * 1.25 * module_size / pitch_radius
+            half_tooth_angle + xp.tan(pa_rad) * 1.25 * module_size / pitch_radius
         )
 
         # Root start (leading edge)
         a = theta - root_half_angle
-        points.append((root_radius * np.cos(a), root_radius * np.sin(a)))
+        points.append((root_radius * xp.cos(a), root_radius * xp.sin(a)))
 
         # Tooth tip leading edge
         a = theta - tip_half_angle
-        points.append((outer_radius * np.cos(a), outer_radius * np.sin(a)))
+        points.append((outer_radius * xp.cos(a), outer_radius * xp.sin(a)))
 
         # Tooth tip trailing edge
         a = theta + tip_half_angle
-        points.append((outer_radius * np.cos(a), outer_radius * np.sin(a)))
+        points.append((outer_radius * xp.cos(a), outer_radius * xp.sin(a)))
 
         # Root end (trailing edge)
         a = theta + root_half_angle
-        points.append((root_radius * np.cos(a), root_radius * np.sin(a)))
+        points.append((root_radius * xp.cos(a), root_radius * xp.sin(a)))
 
     c.add_polygon(points, layer=layer)
 
     # Hub disc
     n_hub_pts = 64
-    hub_angles = np.linspace(0, 2 * np.pi, n_hub_pts, endpoint=False)
-    hub_points = [(hub_radius * np.cos(a), hub_radius * np.sin(a)) for a in hub_angles]
+    hub_angles = xp.linspace(0, 2 * xp.pi, n_hub_pts, endpoint=False)
+    hub_points = [(hub_radius * xp.cos(a), hub_radius * xp.sin(a)) for a in hub_angles]
     c.add_polygon(hub_points, layer=layer)
 
     # Center hole cutout
     if hub_hole_radius > 0:
         n_hole_pts = 64
-        hole_angles = np.linspace(0, 2 * np.pi, n_hole_pts, endpoint=False)
+        hole_angles = xp.linspace(0, 2 * xp.pi, n_hole_pts, endpoint=False)
         hole_points = [
-            (hub_hole_radius * np.cos(a), hub_hole_radius * np.sin(a))
+            (hub_hole_radius * xp.cos(a), hub_hole_radius * xp.sin(a))
             for a in hole_angles
         ]
         c.add_polygon(hole_points, layer=layer)

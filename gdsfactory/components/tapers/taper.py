@@ -13,6 +13,7 @@ __all__ = [
 from functools import partial
 
 import gdsfactory as gf
+from gdsfactory._jax import maybe_float
 from gdsfactory.component import Component
 from gdsfactory.port import Port
 from gdsfactory.typings import CrossSectionSpec, LayerSpec
@@ -77,14 +78,12 @@ def taper(
     y2 = width2 / 2
 
     if length:
-        p1 = gf.kdb.DPolygon(
-            [
-                gf.kdb.DPoint(0, y1),
-                gf.kdb.DPoint(length, y2),
-                gf.kdb.DPoint(length, -y2),
-                gf.kdb.DPoint(0, -y1),
-            ]
-        )
+        p1 = [
+            (0, y1),
+            (length, y2),
+            (length, -y2),
+            (0, -y1),
+        ]
         c.add_polygon(p1, layer=layer)
 
         for s1, s2 in zip(x1.sections[1:], x2.sections[1:], strict=False):
@@ -92,14 +91,12 @@ def taper(
             y2 = s2.width / 2
             offset1 = s1.offset
             offset2 = s2.offset
-            p1 = gf.kdb.DPolygon(
-                [
-                    gf.kdb.DPoint(0, offset1 + y1),
-                    gf.kdb.DPoint(length, offset2 + y2),
-                    gf.kdb.DPoint(length, offset2 - y2),
-                    gf.kdb.DPoint(0, offset1 - y1),
-                ]
-            )
+            p1 = [
+                (0, offset1 + y1),
+                (length, offset2 + y2),
+                (length, offset2 - y2),
+                (0, offset1 - y1),
+            ]
             c.add_polygon(p1, layer=s1.layer)
 
     if with_bbox:
@@ -125,8 +122,8 @@ def taper(
         )
 
     c.info["length"] = length
-    c.info["width1"] = float(width1)
-    c.info["width2"] = float(width2)
+    c.info["width1"] = maybe_float(width1)
+    c.info["width2"] = maybe_float(width2)
     for port in c.ports:
         if port.port_type == "electrical":
             c.create_pin(ports=[port], name=port.name)

@@ -10,6 +10,7 @@ import numpy as np
 import numpy.typing as npt
 
 import gdsfactory as gf
+from gdsfactory._jax import has_tracers, maybe_float, stop_gradient, to_float, xp
 from gdsfactory.component import Component
 from gdsfactory.config import ErrorType
 from gdsfactory.functions import angles_deg, curvature, snap_angle
@@ -34,10 +35,10 @@ def bezier_curve(
     n = len(control_points) - 1
     for k in range(n + 1):
         ank = binom(n, k) * (1 - t) ** (n - k) * t**k
-        xs += ank * control_points[k][0]
-        ys += ank * control_points[k][1]
+        xs = xs + ank * control_points[k][0]
+        ys = ys + ank * control_points[k][1]
 
-    return np.column_stack([xs, ys])
+    return xp.column_stack([xs, ys])  # type: ignore[no-any-return]
 
 
 @gf.cell_with_module_name(schematic_function=sbend_schematic, tags=["bends"])
@@ -81,15 +82,17 @@ def bezier(
     c = path.extrude(xs)
     curv = curvature(path_points, t)
     length = path.length()
-    if max(np.abs(curv)) == 0:
+    if to_float(xp.max(xp.abs(curv))) == 0:
         min_bend_radius = np.inf
     else:
-        min_bend_radius = float(gf.snap.snap_to_grid(float(1 / np.max(np.abs(curv)))))
+        min_bend_radius = maybe_float(
+            gf.snap.snap_to_grid(1 / xp.max(xp.abs(curv)))
+        )
 
-    c.info["length"] = length
+    c.info["length"] = maybe_float(length)
     c.info["min_bend_radius"] = min_bend_radius
-    c.info["start_angle"] = float(path.start_angle)
-    c.info["end_angle"] = float(path.end_angle)
+    c.info["start_angle"] = maybe_float(path.start_angle)
+    c.info["end_angle"] = maybe_float(path.end_angle)
     c.add_route_info(
         cross_section=xs,
         length=c.info["length"],
@@ -126,6 +129,12 @@ def find_min_curv_bezier_control_points(
     """
     from scipy.optimize import minimize
 
+    # the optimizer runs on concrete values (the optimum is not differentiated)
+    start_point_f = (to_float(start_point[0]), to_float(start_point[1]))
+    end_point_f = (to_float(end_point[0]), to_float(end_point[1]))
+    start_angle = to_float(start_angle)
+    end_angle = to_float(end_angle)
+    alpha = to_float(alpha)
     t = np.linspace(0, 1, npoints)
 
     def array_1d_to_cpts(a: npt.NDArray[np.float64]) -> list[tuple[float, float]]:
@@ -136,19 +145,19 @@ def find_min_curv_bezier_control_points(
     def objective_func(p: npt.NDArray[np.float64]) -> float:
         """Minimize  max curvaturea and negligible start angle and end angle mismatch."""
         ps = array_1d_to_cpts(p)
-        control_points = [start_point] + ps + [end_point]
+        control_points = [start_point_f, *ps, end_point_f]
         path_points = bezier_curve(t, control_points)
 
-        max_curv = max(np.abs(curvature(path_points, t)))
+        max_curv = np.max(np.abs(np.asarray(curvature(path_points, t))))
 
-        angles = angles_deg(path_points)
+        angles = np.asarray(angles_deg(path_points))
         dstart_angle = abs(angles[0] - start_angle)
         dend_angle = abs(angles[-2] - end_angle)
         angle_mismatch = dstart_angle + dend_angle
         return float(angle_mismatch * alpha + max_curv)
 
-    x0, y0 = start_point[0], start_point[1]
-    xn, yn = end_point[0], end_point[1]
+    x0, y0 = start_point_f
+    xn, yn = end_point_f
 
     initial_guess: list[float] = []
     for i in range(nb_pts):
@@ -239,9 +248,22 @@ def _get_euler_sbend_angle_middle_length_from_jog(
         def objective(theta: float) -> float:
             return (euler_displacement(theta) - jog) ** 2
 
-        result = optimize.minimize_scalar(objective, bounds=(1, 90), method="bounded")
+        result = optimize.minimize_scalar(
+            lambda theta: to_float(objective(theta)), bounds=(1, 90), method="bounded"
+        )
         angle_deg = result.x
         middle_length = 0.0
+        if has_tracers((jog, radius, p)):
+            # implicit differentiation of euler_displacement(angle) = jog:
+            # the value stays the optimizer's result, the gradient is
+            # d(angle) = -(d displacement) / (d displacement / d angle).
+            h = 1e-4
+            slope = (
+                to_float(euler_displacement(angle_deg + h))
+                - to_float(euler_displacement(angle_deg - h))
+            ) / (2 * h)
+            residual = (euler_displacement(angle_deg) - jog) / slope
+            angle_deg = angle_deg - (residual - stop_gradient(residual))
     else:
         angle_deg = 90.0
         middle_length = 2 * jog - 2 * dy_full
@@ -295,7 +317,7 @@ def bend_s_offset(
     angle, middle_length = _get_euler_sbend_angle_middle_length_from_jog(
         jog=abs(offset) / 2, radius=radius, p=p, use_eff=with_arc_floorplan
     )
-    angle = math.copysign(angle, offset)
+    angle = angle if math.copysign(1, to_float(offset)) > 0 else -angle
     path = gf.path.euler(
         radius=radius,
         angle=+angle,

@@ -26,6 +26,7 @@ from functools import partial
 import numpy as np
 
 import gdsfactory as gf
+from gdsfactory._jax import to_float
 from gdsfactory.component import Component, ComponentReference
 from gdsfactory.typings import ComponentSpec, Floats, Ints, LayerSpec, LayerSpecs, Size
 
@@ -232,8 +233,8 @@ def via_stack(
                 nb_vias_x = max(0, (width - w - 2 * enclosure) / pitch_x + 1)
                 nb_vias_y = max(0, (height - h - 2 * enclosure) / pitch_y + 1)
 
-            nb_vias_x = int(np.floor(nb_vias_x)) or 1
-            nb_vias_y = int(np.floor(nb_vias_y)) or 1
+            nb_vias_x = int(np.floor(to_float(nb_vias_x))) or 1
+            nb_vias_y = int(np.floor(to_float(nb_vias_y))) or 1
             ref = c.add_ref(
                 via,
                 columns=nb_vias_x,

@@ -17,7 +17,6 @@ from collections.abc import Sequence
 from functools import partial
 from typing import Any, Protocol, cast
 
-import kfactory as kf
 import numpy as np
 import numpy.typing as npt
 import yaml
@@ -25,11 +24,24 @@ import yaml
 import gdsfactory as gf
 from gdsfactory import typings
 from gdsfactory.component import Component, ComponentReference, container
+from gdsfactory._jax import cos_deg, sin_deg, to_float, xp
 from gdsfactory.config import CONF
 from gdsfactory.port import select_ports
 from gdsfactory.typings import InstanceOrVInstance
 
 nm = 1e-3
+
+
+def _box_points(left: Any, bottom: Any, right: Any, top: Any) -> Any:
+    """Returns the 4 corners of a box as a (4, 2) array."""
+    return xp.stack(
+        [
+            xp.stack([left, bottom]),
+            xp.stack([left, top]),
+            xp.stack([right, top]),
+            xp.stack([right, bottom]),
+        ]
+    ).astype(xp.float64)
 
 
 def _rotate(
@@ -105,12 +117,11 @@ def get_pin_triangle_polygon_tip(
     p = port
     port_face = p.info.get("face", None)
 
-    orientation_rad = p.orientation * (np.pi / 180)
-    ca = np.cos(orientation_rad)
-    sa = np.sin(orientation_rad)
+    ca = cos_deg(p.orientation)
+    sa = sin_deg(p.orientation)
     rot00, rot01, rot10, rot11 = ca, -sa, sa, ca  # Precompute for single-use
 
-    d = float(p.width) * 0.5  # Always use float for NumPy math
+    d = p.width * 0.5
     cx, cy = p.center[0], p.center[1]  # p.center is typically sequence
 
     if port_face:
@@ -133,9 +144,9 @@ def get_pin_triangle_polygon_tip(
     ptipy = cy + rot10 * d
 
     # Stack all points into a single array, no object dtype, no extra function calls
-    polygon_stacked = np.array(
-        [[p0x, p0y], [p1x, p1y], [ptipx, ptipy]], dtype=np.float64
-    )
+    polygon_stacked = xp.stack(
+        [xp.stack([p0x, p0y]), xp.stack([p1x, p1y]), xp.stack([ptipx, ptipy])]
+    ).astype(xp.float64)
 
     ptip: tuple[float, float] = (ptipx, ptipy)
     return polygon_stacked, ptip
@@ -194,10 +205,10 @@ def add_pin_rectangle_inside(
     """
     if layer:
         p = port
-        poly = gf.kdb.DPolygon(
-            gf.kdb.DBox(-pin_length, -p.width / 2, 0, p.width / 2)
-        ).transform(p.dcplx_trans)
-        component.shapes(gf.get_layer(layer)).insert(poly)
+        poly = p.transform.apply(
+            _box_points(-pin_length, -p.width / 2, 0.0, p.width / 2)
+        )
+        component.add_polygon(poly, layer=gf.get_layer(layer))
 
     if layer_label:
         assert port.name is not None
@@ -239,10 +250,10 @@ def add_pin_rectangle(
     """
     if layer:
         width = port.width + port_margin
-        poly = gf.kdb.DPolygon(
-            gf.kdb.DBox(-pin_length / 2, -width / 2, +pin_length / 2, width / 2)
-        ).transform(port.dcplx_trans)
-        component.shapes(gf.get_layer(layer)).insert(poly)
+        poly = port.transform.apply(
+            _box_points(-pin_length / 2, -width / 2, +pin_length / 2, width / 2)
+        )
+        component.add_polygon(poly, layer=gf.get_layer(layer))
 
     if layer_label:
         component.add_label(
@@ -296,27 +307,15 @@ def add_pin_path(
 
     layer_label = layer_label or layer
     p = port
-    a = p.orientation
-    ca = np.cos(a * np.pi / 180)
-    sa = np.sin(a * np.pi / 180)
-    rot_mat = np.array([[ca, -sa], [sa, ca]])
-
-    d0 = np.array([-pin_length / 2, 0])
-    d1 = np.array([+pin_length / 2, 0])
-
-    p0 = p.center + _rotate(d0, rot_mat)
-    p1 = p.center + _rotate(d1, rot_mat)
-
-    points = [p0, p1]
-    dpoints = [kf.kdb.DPoint(p[0], p[1]) for p in points]
     layer = get_layer(layer)
 
-    dpath = kf.kdb.DPath(
-        dpoints,
-        p.width,
+    # a path of width p.width between center -/+ pin_length/2 along the port
+    # direction, without end extensions, is the rectangle below.
+    dpath = p.transform.apply(
+        _box_points(-pin_length / 2, -p.width / 2, +pin_length / 2, p.width / 2)
     )
     component.add_label(text=str(p.name), position=p.center, layer=layer_label)
-    component.shapes(layer).insert(dpath)
+    component.add_polygon(dpath, layer=layer)
 
 
 def add_outline(
@@ -572,7 +571,8 @@ def add_instance_label(
         )
         layer = (1, 0)
     instance_name = (
-        instance_name or f"{reference.cell.name},{int(reference.x)},{int(reference.y)}"
+        instance_name
+        or f"{reference.cell.name},{int(to_float(reference.x))},{int(to_float(reference.y))}"
     )
 
     layer = layer or CONF.layer_label

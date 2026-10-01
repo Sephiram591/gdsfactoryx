@@ -3,9 +3,10 @@ from __future__ import annotations
 from typing import Any
 
 import kfactory as kf
-from kfactory.routing.generic import ManhattanRoute
+from gdsfactory.routing._kf_router import ManhattanRoute
 
 import gdsfactory as gf
+from gdsfactory._jax import to_float
 from gdsfactory.component import Component
 from gdsfactory.routing.auto_taper import add_auto_tapers
 from gdsfactory.routing.route_single_sbend import add_straight
@@ -61,9 +62,9 @@ def route_bundle_sbend(
 
     """
     # Wrap single ports in lists
-    if isinstance(ports1, kf.DPort):
+    if isinstance(ports1, gf.Port):
         ports1 = [ports1]
-    if isinstance(ports2, kf.DPort):
+    if isinstance(ports2, gf.Port):
         ports2 = [ports2]
 
     if sort_ports:
@@ -89,7 +90,7 @@ def route_bundle_sbend(
     routes = []
 
     for p1, p2 in zip(list(ports1), list(ports2), strict=False):
-        orthogonality_error = abs(abs(p1.orientation - p2.orientation) - 180)
+        orthogonality_error = abs(abs(to_float(p1.orientation) - to_float(p2.orientation)) - 180)
         if orthogonality_error > 0.1:
             raise ValueError(
                 f"Ports need to have orthogonal orientation {orthogonality_error}\n"
@@ -159,7 +160,7 @@ def route_bundle_sbend(
             start_port=p1.to_itype(),
             end_port=p2.to_itype(),
             instances=[],
-            bend90_radius=round(bend.info.get("min_bend_radius", 0)),
+            bend90_radius=round(to_float(bend.info.get("min_bend_radius", 0))),
         )
         routes.append(route)
     return routes

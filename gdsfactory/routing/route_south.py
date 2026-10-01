@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from functools import partial
 
 import numpy as np
-from kfactory.routing.generic import ManhattanRoute
+from gdsfactory.routing._kf_router import ManhattanRoute
 
 import gdsfactory as gf
 from gdsfactory import typings
@@ -272,7 +272,7 @@ def route_south(
 
     flipped_ports = [p.copy() for p in ports_to_route]
     for p in flipped_ports:
-        p.trans *= gf.kdb.Trans.R180
+        p.flip()
     component.add_ports(flipped_ports)
     component.add_ports(south_ports)
     component.auto_rename_ports()

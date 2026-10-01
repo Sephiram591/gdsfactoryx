@@ -2,9 +2,8 @@ from __future__ import annotations
 
 __all__ = ["bent_beam"]
 
-import numpy as np
-
 import gdsfactory as gf
+from gdsfactory._jax import xp
 from gdsfactory.component import Component
 from gdsfactory.typings import LayerSpec
 
@@ -38,11 +37,11 @@ def bent_beam(
     # The bend_angle is the angle between the two segments.
     # The half-angle from horizontal for each arm:
     half_angle = (180.0 - bend_angle) / 2.0
-    half_angle_rad = np.radians(half_angle)
+    half_angle_rad = xp.radians(half_angle)
 
     # Segment projected lengths
-    dx = beam_length * np.cos(half_angle_rad)
-    dy = beam_length * np.sin(half_angle_rad)
+    dx = beam_length * xp.cos(half_angle_rad)
+    dy = beam_length * xp.sin(half_angle_rad)
 
     # Apex at (0, dy), left anchor at (-dx, 0), right anchor at (dx, 0)
     # Build the V-shape as a polygon with width
@@ -50,24 +49,24 @@ def bent_beam(
     # Build as two arms merged into one polygon
 
     # Left arm direction: from (-dx, 0) to (0, dy)
-    left_dir = np.array([dx, dy])
-    left_dir = left_dir / np.linalg.norm(left_dir)
-    left_norm = np.array([-left_dir[1], left_dir[0]])  # points "up-left"
+    left_dir = xp.array([dx, dy])
+    left_dir = left_dir / xp.linalg.norm(left_dir)
+    left_norm = xp.array([-left_dir[1], left_dir[0]])  # points "up-left"
 
     # Right arm direction: from (0, dy) to (dx, 0)
-    right_dir = np.array([dx, -dy])
-    right_dir = right_dir / np.linalg.norm(right_dir)
-    right_norm = np.array([-right_dir[1], right_dir[0]])  # points "up-right"
+    right_dir = xp.array([dx, -dy])
+    right_dir = right_dir / xp.linalg.norm(right_dir)
+    right_norm = xp.array([-right_dir[1], right_dir[0]])  # points "up-right"
 
     hw = beam_width / 2
 
     # Left arm polygon corners
-    la_start = np.array([-dx, 0.0])
-    la_end = np.array([0.0, dy])
+    la_start = xp.array([-dx, 0.0])
+    la_end = xp.array([0.0, dy])
 
     # Right arm polygon corners
-    ra_start = np.array([0.0, dy])
-    ra_end = np.array([dx, 0.0])
+    ra_start = xp.array([0.0, dy])
+    ra_end = xp.array([dx, 0.0])
 
     # Build the full V as a single polygon (outer contour going clockwise)
     poly_points = [

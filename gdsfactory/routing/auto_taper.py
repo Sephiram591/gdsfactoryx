@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import warnings
-from typing import cast
+from typing import Any, cast
 
 import gdsfactory as gf
 from gdsfactory import LayerEnum
+from gdsfactory._jax import to_float
 from gdsfactory.component import Component
 from gdsfactory.port import Port
 from gdsfactory.typings import CrossSectionSpec, LayerSpec, LayerTransitions, Ports
@@ -27,6 +28,11 @@ def _normalize_layer_transitions(
             normalized_key = gf.get_layer(cast("LayerSpec", key))
         normalized[normalized_key] = value
     return normalized
+
+
+def _same(w1: Any, w2: Any) -> bool:
+    """Width equality on the 1 nm grid (concrete values)."""
+    return round(to_float(w1) * 1000) == round(to_float(w2) * 1000)
 
 
 def add_auto_tapers(
@@ -73,7 +79,7 @@ def add_auto_tapers(
                 raise KeyError(
                     f"No registered tapers between routing layers {gf.get_layer_name(port_layer)!r} and {gf.get_layer_name(cs_layer)!r}!"
                 ) from e
-        elif port_width_dbu != component.kcl.to_dbu(cs_width):
+        elif port_width_dbu != round(to_float(cs_width) * 1000):
             try:
                 taper = layer_transitions[port_layer]
             except KeyError:
@@ -105,9 +111,9 @@ def add_auto_tapers(
             raise ValueError(
                 f"Taper component should have two ports of port_type={p.port_type!r}! Got {taper_component.ports}."
             )
-        if taper_ports[0].layer == p.layer and taper_ports[0].width == p.width:
+        if taper_ports[0].layer == p.layer and _same(taper_ports[0].width, p.width):
             p0, p1 = taper_ports
-        elif taper_ports[1].layer == p.layer and taper_ports[1].width == p.width:
+        elif taper_ports[1].layer == p.layer and _same(taper_ports[1].width, p.width):
             p1, p0 = taper_ports
         else:
             width = p.width
@@ -166,7 +172,7 @@ def auto_taper_to_cross_section(
             raise KeyError(
                 f"No registered tapers between routing layers {gf.get_layer_name(port_layer)!r} and {gf.get_layer_name(cs_layer)!r}!"
             ) from e
-    elif port_width != cs_width:
+    elif not _same(port_width, cs_width):
         try:
             taper = layer_transitions[port_layer]
         except KeyError:
@@ -189,9 +195,9 @@ def auto_taper_to_cross_section(
         raise ValueError(
             f"Taper component should have two ports of port_type={port.port_type!r}! Got {taper_component.ports}."
         )
-    if taper_ports[0].layer == port.layer and taper_ports[0].width == port.width:
+    if taper_ports[0].layer == port.layer and _same(taper_ports[0].width, port.width):
         p0, p1 = taper_ports
-    elif taper_ports[1].layer == port.layer and taper_ports[1].width == port.width:
+    elif taper_ports[1].layer == port.layer and _same(taper_ports[1].width, port.width):
         p1, p0 = taper_ports
     else:
         width = port.width

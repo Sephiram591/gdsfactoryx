@@ -5,6 +5,7 @@ __all__ = ["disk", "disk_heater"]
 import math
 
 import gdsfactory as gf
+from gdsfactory._jax import to_float, xp
 from gdsfactory import Component
 from gdsfactory.component import ComponentReference
 from gdsfactory.cross_section import CrossSection
@@ -28,12 +29,12 @@ def _compute_parameters(
     theta_rad = theta * (math.pi / 180.0)  # Convert once to radians
 
     # Use math.sin and math.cos which are much faster for scalars
-    sin_theta = math.sin(theta_rad)
-    cos_theta = math.cos(theta_rad)
+    sin_theta = xp.sin(theta_rad)
+    cos_theta = xp.cos(theta_rad)
     size_x = r_bend * sin_theta
     dy = r_bend - r_bend * cos_theta
 
-    bus_length = max(4.0 * size_x, 2.0 * radius)
+    bus_length = xp.maximum(4.0 * size_x, 2.0 * radius)
     return (r_bend, size_x, dy, bus_length)
 
 
@@ -48,7 +49,7 @@ def _generate_bends(
     ComponentReference | None,
     ComponentReference | None,
 ]:
-    if wrap_angle_deg != 0:
+    if to_float(wrap_angle_deg) != 0:
         input_arc = gf.path.arc(radius=r_bend, angle=-wrap_angle_deg / 2.0)
         bend_middle_arc = gf.path.arc(radius=r_bend, angle=-wrap_angle_deg)
 

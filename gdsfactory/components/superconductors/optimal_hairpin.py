@@ -2,9 +2,9 @@ from __future__ import annotations
 
 __all__ = ["optimal_hairpin"]
 
-import numpy as np
 
 import gdsfactory as gf
+from gdsfactory._jax import asarray, xp
 from gdsfactory.component import Component
 from gdsfactory.snap import snap_to_grid
 from gdsfactory.typings import LayerSpec
@@ -55,11 +55,11 @@ def optimal_hairpin(
     ypts = [y]
     while (y < 0) & (n < 1e6):
         s = x + 1j * y
-        w = np.sqrt(1 - np.exp(np.pi * s / a))
-        wx = np.real(w)
-        wy = np.imag(w)
-        wx = wx / np.sqrt(wx**2 + wy**2)
-        wy = wy / np.sqrt(wx**2 + wy**2)
+        w = xp.sqrt(1 - xp.exp(xp.pi * s / a))
+        wx = xp.real(w)
+        wy = xp.imag(w)
+        wx = wx / xp.sqrt(wx**2 + wy**2)
+        wy = wy / xp.sqrt(wx**2 + wy**2)
         x = x + wx * dl
         y = y + wy * dl
         xpts.append(x)
@@ -86,8 +86,8 @@ def optimal_hairpin(
     xpts.append(xpts[0])
     ypts.append(ypts[0])
 
-    xpts_np = snap_to_grid(xpts)
-    ypts_np = snap_to_grid(ypts)
+    xpts_np = snap_to_grid(asarray(xpts))
+    ypts_np = snap_to_grid(asarray(ypts))
 
     # ==========================================================================
     #  Create a blank device, add the geometry, and define the ports
@@ -97,7 +97,7 @@ def optimal_hairpin(
     c.add_polygon(list(zip(xpts_np, -ypts_np, strict=False)), layer=layer)
     port_type = "electrical"
 
-    xports = float(np.min(xpts_np))
+    xports = xp.min(xpts_np)
     yports = -a + width / 2
     c.add_port(
         name="e1",

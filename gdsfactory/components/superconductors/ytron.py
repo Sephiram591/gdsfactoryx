@@ -7,10 +7,10 @@ from __future__ import annotations
 
 __all__ = ["ytron_round"]
 
-import numpy as np
-from numpy import cos, pi, sin
+from numpy import pi
 
 import gdsfactory as gf
+from gdsfactory._jax import xp
 from gdsfactory.component import Component
 from gdsfactory.typings import LayerSpec
 
@@ -48,22 +48,22 @@ def ytron_round(
     # ==========================================================================
     theta = theta * pi / 180
     theta_resolution = theta_resolution * pi / 180
-    thetalist = np.linspace(
+    thetalist = xp.linspace(
         -(pi - theta), -theta, int((pi - 2 * theta) / theta_resolution) + 2
     )
-    semicircle_x = rho * cos(thetalist)
-    semicircle_y = rho * sin(thetalist) + rho
+    semicircle_x = rho * xp.cos(thetalist)
+    semicircle_y = rho * xp.sin(thetalist) + rho
 
     # Rest of yTron
-    xc = rho * cos(theta)
-    yc = rho * sin(theta)
-    arm_x_left = arm_lengths[0] * sin(theta)
-    arm_y_left = arm_lengths[0] * cos(theta)
-    arm_x_right = arm_lengths[1] * sin(theta)
-    arm_y_right = arm_lengths[1] * cos(theta)
+    xc = rho * xp.cos(theta)
+    yc = rho * xp.sin(theta)
+    arm_x_left = arm_lengths[0] * xp.sin(theta)
+    arm_y_left = arm_lengths[0] * xp.cos(theta)
+    arm_x_right = arm_lengths[1] * xp.sin(theta)
+    arm_y_right = arm_lengths[1] * xp.cos(theta)
 
     # Write out x and y coords for yTron polygon
-    xpts = semicircle_x.tolist() + [
+    xpts = list(semicircle_x) + [
         xc + arm_x_right,
         xc + arm_x_right + arm_widths[1],
         xc + arm_widths[1],
@@ -74,7 +74,7 @@ def ytron_round(
         -(xc + arm_x_left + arm_widths[0]),
         -(xc + arm_x_left),
     ]
-    ypts = semicircle_y.tolist() + [
+    ypts = list(semicircle_y) + [
         yc + arm_y_right,
         yc + arm_y_right,
         yc,

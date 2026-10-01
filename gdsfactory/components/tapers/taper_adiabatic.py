@@ -3,12 +3,11 @@ from __future__ import annotations
 __all__ = ["taper_adiabatic"]
 
 from collections.abc import Callable
-from typing import Any
 
 import numpy as np
-import numpy.typing as npt
 
 import gdsfactory as gf
+from gdsfactory._jax import xp
 from gdsfactory.path import transition_adiabatic
 from gdsfactory.typings import CrossSectionSpec
 
@@ -44,7 +43,7 @@ def neff_TE1550SOI_220nm(w: float) -> float:
             -1.12666286e00,
         ]
     )
-    return float(np.poly1d(adiabatic_polyfit_TE1550SOI_220nm)(w).item())
+    return xp.polyval(adiabatic_polyfit_TE1550SOI_220nm, w)  # type: ignore[return-value]
 
 
 @gf.cell_with_module_name(schematic_function=taper_schematic, tags=["tapers"])
@@ -95,29 +94,24 @@ def taper_adiabatic(
         max_length=max_length,
     )
 
-    # Resample the points
-    from scipy import interpolate
-
-    w_opt_interp = interpolate.interp1d(x_opt, w_opt)
-
+    # Resample the points (linear interpolation, like scipy's interp1d)
     if not length:
         length = x_opt[-1]
-    x = np.linspace(0, length, npoints)
-    w: npt.NDArray[np.floating[Any]] = w_opt_interp(x)
-
-    assert isinstance(w, np.ndarray)
+    x = xp.linspace(0, length, npoints)
+    w = xp.interp(x, x_opt, w_opt)
 
     # Stretch/compress x
-    x_array: npt.NDArray[np.float64] = np.linspace(0, length, npoints) * (
-        1 + length - x_opt[-1]
-    )
-    assert isinstance(x_array, np.ndarray)
+    x_array = xp.linspace(0, length, npoints) * (1 + length - x_opt[-1])
     y_array = w / 2
 
     c = gf.Component()
     c.add_polygon(
-        [(float(x), float(y)) for x, y in zip(x_array, y_array, strict=False)]
-        + [(float(x), float(y)) for x, y in zip(x_array, -y_array, strict=False)][::-1],
+        xp.concatenate(
+            [
+                xp.stack([x_array, y_array], axis=-1),
+                xp.stack([x_array, -y_array], axis=-1)[::-1],
+            ]
+        ),
         layer=layer,
     )
 

@@ -6,9 +6,8 @@ import warnings
 from functools import partial
 from typing import Literal, overload
 
-import numpy as np
-
 import gdsfactory as gf
+from gdsfactory._jax import maybe_float, round_st, to_float
 from gdsfactory.component import Component, ComponentAllAngle
 from gdsfactory.path import topic
 from gdsfactory.typings import AnyComponent, CrossSectionSpec, LayerSpec
@@ -104,21 +103,21 @@ def _bend_topic(
 
     c = path.extrude(x, all_angle=all_angle)
 
-    min_bend_radius = float(np.round(path.info["Rmin"], 3))
-    c.info["min_bend_radius"] = float(min_bend_radius)
+    min_bend_radius = maybe_float(round_st(path.info["Rmin"], 3))
+    c.info["min_bend_radius"] = min_bend_radius
 
     c.info["radius"] = radius
-    c.info["length"] = float(np.round(path.length(), 3))
-    c.info["dy"] = float(
-        np.round(abs(float(path.points[0][1] - path.points[-1][1])), 3)
+    c.info["length"] = maybe_float(round_st(path.length(), 3))
+    c.info["dy"] = maybe_float(
+        round_st(abs(path.points[0][1] - path.points[-1][1]), 3)
     )
-    c.info["width"] = float(width or x.width)
+    c.info["width"] = maybe_float(width or x.width)
 
     if not allow_min_radius_violation:
         x.validate_radius(min_bend_radius)
 
-    top = None if int(angle) in {180, -180, -90} else 0
-    bottom = 0 if int(angle) in {-90} else None
+    top = None if int(to_float(angle)) in {180, -180, -90} else 0
+    bottom = 0 if int(to_float(angle)) in {-90} else None
     x.add_bbox(c, top=top, bottom=bottom)
     c.add_route_info(
         cross_section=x,
@@ -160,7 +159,7 @@ def bend_topic(
         layer: layer to use. Defaults to cross_section.layer.
         width: width to use. Defaults to cross_section.width.
     """
-    if abs(angle) not in {90, 180}:
+    if abs(to_float(angle)) not in {90, 180}:
         warnings.warn(
             f"bend_topic angle should be 90 or 180. Got {angle}. Use bend_topic_all_angle instead.",
             UserWarning,

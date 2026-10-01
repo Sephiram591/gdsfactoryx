@@ -18,6 +18,7 @@ from gdsfactory._jax import (
     asarray,
     cos_deg,
     jnp,
+    xp,
     maybe_float,
     sin_deg,
     to_float,
@@ -44,7 +45,7 @@ class Transform:
 
     @property
     def disp(self) -> Array:
-        return jnp.stack([asarray(self.x), asarray(self.y)])
+        return xp.stack([asarray(self.x), asarray(self.y)])
 
     def copy(self) -> Transform:
         return Transform(self.x, self.y, self.rotation, self.mirror, self.magnification)
@@ -54,9 +55,9 @@ class Transform:
         s = sin_deg(self.rotation)
         m = asarray(self.magnification)
         if self.mirror:
-            mat = jnp.stack([jnp.stack([c, s]), jnp.stack([s, -c])])
+            mat = xp.stack([xp.stack([c, s]), xp.stack([s, -c])])
         else:
-            mat = jnp.stack([jnp.stack([c, -s]), jnp.stack([s, c])])
+            mat = xp.stack([xp.stack([c, -s]), xp.stack([s, c])])
         return m * mat
 
     def is_identity(self) -> bool:
@@ -139,7 +140,7 @@ def _mod360(a: Any) -> Any:
     if isinstance(a, int | float):
         return float(a) % 360
     a = asarray(a)
-    return jnp.mod(a, 360.0)
+    return xp.mod(a, 360.0)
 
 
 def _any_tracer(t: Transform) -> bool:
@@ -151,7 +152,7 @@ def _any_tracer(t: Transform) -> bool:
 def rotation_matrix(angle: Any) -> Array:
     c = cos_deg(angle)
     s = sin_deg(angle)
-    return jnp.stack([jnp.stack([c, -s]), jnp.stack([s, c])])
+    return xp.stack([xp.stack([c, -s]), xp.stack([s, c])])
 
 
 def rotate_points(points: Any, angle: Any, center: Any = (0.0, 0.0)) -> Array:

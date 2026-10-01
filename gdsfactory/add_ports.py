@@ -6,13 +6,40 @@ import warnings
 from collections.abc import Sequence
 from functools import partial
 
+from typing import Any
+
 import numpy as np
 
 import gdsfactory as gf
+from gdsfactory._jax import round_st, to_float, to_numpy, xp
 from gdsfactory.component import Component
 from gdsfactory.port import Port, read_port_markers, sort_ports_clockwise
 from gdsfactory.snap import snap_to_grid
 from gdsfactory.typings import AngleInDegrees, LayerSpec
+
+
+def _polygon_bbox(points: Any) -> tuple[Any, Any, Any, Any]:
+    """Returns (xmin, ymin, xmax, ymax) of a (N, 2) polygon array (differentiable)."""
+    pts = xp.asarray(points)
+    return (
+        xp.min(pts[:, 0]),
+        xp.min(pts[:, 1]),
+        xp.max(pts[:, 0]),
+        xp.max(pts[:, 1]),
+    )
+
+
+def _is_box(points: Any) -> bool:
+    """True if the polygon is an axis-aligned rectangle (what KLayout stores as a Box)."""
+    pts = to_numpy(points)
+    if pts.shape[0] != 4:
+        return False
+    xs = np.unique(np.round(pts[:, 0], 6))
+    ys = np.unique(np.round(pts[:, 1], 6))
+    if len(xs) != 2 or len(ys) != 2:
+        return False
+    d = np.round(np.diff(np.vstack([pts, pts[:1]]), axis=0), 9)
+    return bool(np.all((d[:, 0] == 0) | (d[:, 1] == 0)))
 
 
 def _should_skip_marker(
@@ -143,7 +170,7 @@ def _snap_port_width(width: float, pin_extra_width: float) -> float:
         width: raw port width.
         pin_extra_width: extra width offset to subtract.
     """
-    return float(np.round((width - pin_extra_width) / 0.002) * 0.002)
+    return round_st(width - pin_extra_width, step=0.002)
 
 
 def _auto_detect_port_layer(
@@ -172,15 +199,19 @@ def _auto_detect_port_layer(
     Returns:
         The detected layer index, or default_layer_idx if no match found.
     """
+    from gdsfactory.klayout_bridge import arrays_to_region
+
     _tol = 0.001
+    x, y, width = to_float(x), to_float(y), to_float(width)
     _marker_box = gf.kdb.DBox(x - _tol, y - _tol, x + _tol, y + _tol)
     _marker_region = gf.kdb.Region(gf.kdb.DPolygon(_marker_box).to_itype(dbu))
 
-    _layer_indexes = list(component.kcl.layer_indexes())
+    _polygons = component.get_polygons_points(by="index")
+    _layer_indexes = list(_polygons)
 
     # Check if default layer already has geometry at this position
     if default_layer_idx in _layer_indexes:
-        _region = gf.kdb.Region(component.begin_shapes_rec(default_layer_idx))
+        _region = arrays_to_region(_polygons[default_layer_idx])
         if not _region.edges().interacting(_marker_region).is_empty():
             return default_layer_idx
 
@@ -190,7 +221,7 @@ def _auto_detect_port_layer(
     for _li in _layer_indexes:
         if _li in (default_layer_idx, pin_layer):
             continue
-        _region = gf.kdb.Region(component.begin_shapes_rec(_li))
+        _region = arrays_to_region(_polygons[_li])
         _edges = _region.edges().interacting(_marker_region)
         if _edges.is_empty():
             continue
@@ -275,24 +306,29 @@ def add_ports_from_markers_square(
     port_name_prefix_default = "o" if port_type == "optical" else "e"
     port_name_prefix = port_name_prefix or port_name_prefix_default
     port_markers = read_port_markers(component, (pin_layer,))
+    marker_polygons = [
+        poly for polys in port_markers.get_polygons_points().values() for poly in polys
+    ]
     port_names = list(
         port_names
-        or [f"{port_name_prefix}{i + 1}" for i in range(len(port_markers.polygons))]
+        or [f"{port_name_prefix}{i + 1}" for i in range(len(marker_polygons))]
     )
     layer = port_layer or pin_layer
 
-    for port_name, p in zip(port_names, port_markers.polygons, strict=False):
-        (xmin, ymin), (xmax, ymax) = p.bounding_box()
-        x, y = np.sum(p.bounding_box(), 0) / 2
+    for port_name, p in zip(port_names, marker_polygons, strict=False):
+        xmin, ymin, xmax, ymax = _polygon_bbox(p)
+        x, y = (xmin + xmax) / 2, (ymin + ymax) / 2
 
         dy = snap_to_grid(ymax - ymin)
         dx = snap_to_grid(xmax - xmin)
         width = dx - pin_extra_width
 
         # Snap to the nearest 2 nm (0.002 µm)
-        width = np.round((width - pin_extra_width) / 0.002) * 0.002
+        width = round_st(width - pin_extra_width, step=0.002)
 
-        if dx == dy and max_pin_area_um2 > dx * dy > min_pin_area_um2:
+        if to_float(dx) == to_float(dy) and (
+            max_pin_area_um2 > to_float(dx * dy) > min_pin_area_um2
+        ):
             component.add_port(
                 port_name,
                 center=(x, y),
@@ -391,7 +427,7 @@ def add_ports_from_markers_center(
     dxmin = component.xmin
     dymax = component.ymax
     dymin = component.ymin
-    dbu = float(component.kcl.dbu)
+    dbu = float(gf.kcl.dbu)
 
     layer = port_layer or pin_layer
     port_locations: list[tuple[float, float]] = []
@@ -401,7 +437,7 @@ def add_ports_from_markers_center(
 
     pin_layer = gf.get_layer(pin_layer)
 
-    polygons = component.get_polygons(by="index")
+    polygons = component.get_polygons_points(by="index")
     if pin_layer not in polygons:
         warnings.warn(
             f"no pin layer {pin_layer} found in {component.layers}", stacklevel=3
@@ -413,23 +449,12 @@ def add_ports_from_markers_center(
 
     for i, p in enumerate(port_markers):
         port_name = f"{port_name_prefix}{i + 1}" if port_name_prefix else str(i)
-        bbox = p.bbox()
-        pxmin, pymin, pxmax, pymax = map(
-            float, (bbox.left, bbox.bottom, bbox.right, bbox.top)
-        )
+        pxmin, pymin, pxmax, pymax = _polygon_bbox(p)
 
         x = (pxmax + pxmin) / 2
         y = (pymin + pymax) / 2
         dy = abs(pymax - pymin)
         dx = abs(pxmax - pxmin)
-        dx *= dbu
-        dy *= dbu
-        x *= dbu
-        y *= dbu
-        pxmax *= dbu
-        pymax *= dbu
-        pxmin *= dbu
-        pymin *= dbu
 
         if _should_skip_marker(
             dx, dy, min_pin_area_um2, max_pin_area_um2, skip_square_ports, debug
@@ -479,8 +504,8 @@ def add_ports_from_markers_center(
                 pin_layer,
             )
 
-        if (x, y) not in port_locations:
-            port_locations.append((x, y))
+        if (to_float(x), to_float(y)) not in port_locations:
+            port_locations.append((to_float(x), to_float(y)))
             ports.append(
                 Port(
                     name=port_name,
@@ -591,11 +616,14 @@ def add_ports_from_boxes(
     pin_layer = gf.get_layer(pin_layer)
     layer = gf.get_layer(layer)
 
-    port_markers = component.get_boxes(layer=pin_layer)
+    port_markers = [
+        p
+        for p in component.get_polygons_points(by="index").get(pin_layer, [])
+        if _is_box(p)
+    ]
     for i, p in enumerate(port_markers):
         port_name = f"{port_name_prefix}{i + 1}" if port_name_prefix else str(i)
-        bbox = p.bbox()
-        pxmin, pymin, pxmax, pymax = bbox.left, bbox.bottom, bbox.right, bbox.top
+        pxmin, pymin, pxmax, pymax = _polygon_bbox(p)
 
         x = (pxmax + pxmin) / 2
         y = (pymin + pymax) / 2
@@ -638,8 +666,8 @@ def add_ports_from_boxes(
         )
         width = _snap_port_width(width, pin_extra_width)
 
-        if (x, y) not in port_locations:
-            port_locations.append((x, y))
+        if (to_float(x), to_float(y)) not in port_locations:
+            port_locations.append((to_float(x), to_float(y)))
             ports.append(
                 Port(
                     name=port_name,
@@ -780,27 +808,35 @@ def add_ports_from_siepic_pins(
     port_layer = gf.get_layer(port_layer)
 
     c = component
-    paths = c.get_paths(pin_layer)
+    # Paths are stored as their (rectangular) outline polygons in this backend:
+    # the pin path runs along the short side of the rectangle (pin_length) and
+    # its width is the long side. The path direction (inside -> outside) is
+    # recovered by pointing away from the component center.
+    paths = [
+        p for p in c.get_polygons_points(by="index").get(pin_layer, []) if _is_box(p)
+    ]
     port_prefix = "o" if port_type == "optical" else "e"
+    xc, yc = to_float(c.x), to_float(c.y)
+    dbu = float(gf.kcl.dbu)
 
     for i, path in enumerate(paths):
-        p1, p2 = list(path.each_point())
-        v = p2 - p1
-        if v.x < 0:
-            orientation = 2
-        elif v.x > 0:
-            orientation = 0
-        elif v.y > 0:
-            orientation = 1
-        else:
-            orientation = 3
+        pxmin, pymin, pxmax, pymax = _polygon_bbox(path)
+        dx = pxmax - pxmin
+        dy = pymax - pymin
+        x = (pxmin + pxmax) / 2
+        y = (pymin + pymax) / 2
+        if to_float(dx) <= to_float(dy):  # path along x
+            orientation = 180 if to_float(x) < xc else 0
+            path_width = dy
+        else:  # path along y
+            orientation = 90 if to_float(y) > yc else 270
+            path_width = dx
 
-        c.create_port(
+        c.add_port(
             name=f"{port_prefix}{i + 1}",
-            width=round(path.width / c.kcl.dbu) * c.kcl.dbu,
-            dcplx_trans=gf.kdb.DCplxTrans(
-                1, orientation, False, path.bbox().center().to_v()
-            ),
+            center=(x, y),
+            width=round_st(path_width, step=dbu),
+            orientation=orientation,
             layer=port_layer,
             port_type=port_type,
         )

@@ -2,9 +2,8 @@ from __future__ import annotations
 
 __all__ = ["torus_wave"]
 
-import numpy as np
-
 import gdsfactory as gf
+from gdsfactory._jax import xp
 from gdsfactory.component import Component
 from gdsfactory.typings import LayerSpec
 
@@ -35,22 +34,22 @@ def torus_wave(
         layer: layer spec.
     """
     c = Component()
-    n_points = int(np.round(360.0 / angle_resolution)) + 1
-    theta = np.linspace(0, 2 * np.pi, n_points, endpoint=True)
+    n_points = int(xp.round(360.0 / angle_resolution)) + 1
+    theta = xp.linspace(0, 2 * xp.pi, n_points, endpoint=True)
 
-    r_outer = outer_radius + amplitude * np.sin(n_oscillations * theta)
-    phase_shift = 0 if in_phase else np.pi / 2
-    r_inner = inner_radius + amplitude * np.sin(n_oscillations * theta + phase_shift)
+    r_outer = outer_radius + amplitude * xp.sin(n_oscillations * theta)
+    phase_shift = 0 if in_phase else xp.pi / 2
+    r_inner = inner_radius + amplitude * xp.sin(n_oscillations * theta + phase_shift)
 
-    outer_x = r_outer * np.cos(theta)
-    outer_y = r_outer * np.sin(theta)
-    inner_x = r_inner[::-1] * np.cos(theta[::-1])
-    inner_y = r_inner[::-1] * np.sin(theta[::-1])
+    outer_x = r_outer * xp.cos(theta)
+    outer_y = r_outer * xp.sin(theta)
+    inner_x = r_inner[::-1] * xp.cos(theta[::-1])
+    inner_y = r_inner[::-1] * xp.sin(theta[::-1])
 
     points = list(
         zip(
-            np.concatenate([outer_x, inner_x]),
-            np.concatenate([outer_y, inner_y]),
+            xp.concatenate([outer_x, inner_x]),
+            xp.concatenate([outer_y, inner_y]),
             strict=False,
         )
     )

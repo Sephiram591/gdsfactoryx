@@ -11,6 +11,7 @@ import numpy as np
 from numpy import log
 
 import gdsfactory as gf
+from gdsfactory._jax import maybe_float, to_float, xp
 from gdsfactory.component import Component
 from gdsfactory.typings import LayerSpec
 
@@ -55,6 +56,14 @@ def taper_hecken(
     Returns:
         Component containing a Hecken-tapered microstrip.
     """
+    # the impedance-matching design (numerical root finding) runs on concrete
+    # values: only ``length`` (a pure scaling of x) is differentiable.
+    B, dielectric_thickness, eps_r, Lk_per_sq = (
+        to_float(v) for v in (B, dielectric_thickness, eps_r, Lk_per_sq)
+    )
+    Z1, Z2, width1, width2 = (
+        None if v is None else to_float(v) for v in (Z1, Z2, width1, width2)
+    )
     if width1 is not None:
         Z1 = _microstrip_Z_with_Lk(
             width1 * 1e-6, dielectric_thickness * 1e-6, eps_r, Lk_per_sq
@@ -79,7 +88,7 @@ def taper_hecken(
             for z in Z
         ]
     )
-    x = (xi_list / 2) * length
+    x = (xi_list / 2) * to_float(length)
 
     # Compensate for varying speed of light in the microstrip by shortening
     # and lengthening sections according to the speed of light in that section
@@ -94,13 +103,13 @@ def taper_hecken(
     dx = np.diff(x)
     dx_compensated = dx * v[:-1]
     x_compensated = np.cumsum(dx_compensated)
-    x = np.hstack([0, x_compensated]) / max(x_compensated) * length
+    x = xp.asarray(np.hstack([0, x_compensated]) / max(x_compensated)) * length
 
     # Create blank device and add taper polygon
     c = gf.Component()
-    xpts = np.concatenate([x, x[::-1]])
-    ypts = np.concatenate([widths / 2, -widths[::-1] / 2])
-    points = np.column_stack((xpts, ypts))
+    xpts = xp.concatenate([x, x[::-1]])
+    ypts = xp.asarray(np.concatenate([widths / 2, -widths[::-1] / 2]))
+    points = xp.column_stack((xpts, ypts))
     c.add_polygon(points, layer=layer)
     # Snap port widths to even multiples of 0.002 um (2 dbu)
     width1_snapped = round(widths[0] / 0.002) * 0.002
@@ -113,7 +122,7 @@ def taper_hecken(
     )
 
     # Add meta information about the taper
-    c.info["num_squares"] = float(np.sum(np.diff(x) / widths[:-1]))
+    c.info["num_squares"] = maybe_float(xp.sum(xp.diff(x) / widths[:-1]))
     c.info["width1"] = float(widths[0])
     c.info["width2"] = float(widths[-1])
     c.info["Z1"] = float(Z[0])
@@ -126,10 +135,10 @@ def taper_hecken(
     # c.info["Z"] = Z if isinstance(Z, list) else list(Z)
     # c.info["v/c"] = (v / 3e8).tolist()
 
-    time_length = float(np.sum(np.diff(x * 1e-6) / (v[:-1])))
+    time_length = maybe_float(xp.sum(xp.diff(x * 1e-6) / (v[:-1])))
     c.info["time_length"] = time_length
     c.info["f_cutoff"] = 1 / (2 * time_length)
-    c.info["length"] = float(length)
+    c.info["length"] = maybe_float(length)
     return c
 
 

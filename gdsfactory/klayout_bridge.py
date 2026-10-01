@@ -8,6 +8,7 @@ Everything that crosses this bridge is converted to concrete numpy values
 
 from __future__ import annotations
 
+import contextlib
 import pathlib
 from typing import TYPE_CHECKING, Any
 
@@ -121,21 +122,37 @@ def _unique_names(component: Component) -> dict[int, str]:
     return names
 
 
+_EXPORT_COUNTER = __import__("itertools").count()
+
+
 def to_kfactory(
     component: Component,
     kcl: Any = None,
     add_ports: bool = True,
     exclude_layers: Any = None,
+    unique_prefix: str = "",
+    cache: dict[int, tuple[Any, Any]] | None = None,
 ) -> Any:
-    """Converts a (differentiable) Component tree to a kfactory DKCell (concrete)."""
+    """Converts a (differentiable) Component tree to a kfactory DKCell (concrete).
+
+    Args:
+        component: to convert.
+        kcl: target KCLayout. Defaults to a new private layout.
+        add_ports: export ports.
+        exclude_layers: layers not to export.
+        unique_prefix: prefix for all cell names (to avoid name clashes in kcl).
+        cache: optional ``{id(component): (component, kcell)}`` reused across calls
+            for locked components (exports into the same kcl).
+    """
     import kfactory as kf
 
     kdb = _kdb()
     from gdsfactory.pdk import get_layer_info
 
     if kcl is None:
-        kcl = kf.KCLayout(f"gdsfactoryx_export_{id(component)}")
-    names = _unique_names(component)
+        kcl = kf.KCLayout(f"gdsfactoryx_export_{next(_EXPORT_COUNTER)}")
+        kcl.layout.dbu = DBU
+    names = {k: unique_prefix + v for k, v in _unique_names(component).items()}
     excluded: set[int] = set()
     if exclude_layers:
         from gdsfactory.component import _layer_key
@@ -151,6 +168,11 @@ def to_kfactory(
     def build(c: Component) -> Any:
         if id(c) in built:
             return built[id(c)]
+        if cache is not None and c.locked and not excluded:
+            hit = cache.get(id(c))
+            if hit is not None and hit[0] is c:
+                built[id(c)] = hit[1]
+                return hit[1]
         kc = kf.DKCell(name=names[id(c)], kcl=kcl)
         for lay, polys in c.polygons.items():
             if lay in excluded:
@@ -184,26 +206,33 @@ def to_kfactory(
                 inst = kdb.DCellInstArray(child.cell_index(), t)
             kinst = kc.kdb_cell.insert(inst)
             if r.is_named:
-                kinst.set_property("name", r.name)
+                from kfactory.conf import PROPID
+
+                kinst.set_property(PROPID.NAME, r.name)
         if add_ports:
             for p in c.ports:
                 orientation = to_float(p.orientation) if p.orientation is not None else 0.0
                 trans = kdb.DCplxTrans(1, orientation, False, to_float(p.x), to_float(p.y))
-                try:
-                    kc.create_port(
-                        name=p.name,
-                        dwidth=round(to_float(p.width) / DBU) * DBU,
-                        layer=layer_index(p.layer),
-                        port_type=p.port_type,
-                        dcplx_trans=trans,
-                    )
-                except Exception:
-                    pass
-        try:
+                kp = kc.create_port(
+                    name=p.name,
+                    width=round(to_float(p.width) / DBU) * DBU,
+                    layer=layer_index(p.layer),
+                    port_type=p.port_type,
+                    dcplx_trans=trans,
+                )
+                with contextlib.suppress(Exception):
+                    kp.info.update(_clean(dict(p.info)))
+        with contextlib.suppress(Exception):
             kc.info.update(_clean(dict(c.info)))
-        except Exception:
-            pass
+        with contextlib.suppress(Exception):
+            kc.settings = kf.KCellSettings(**_clean(dict(c.settings)))
+        if c.function_name:
+            kc.function_name = c.function_name
+        if c.basename:
+            kc.basename = c.basename
         built[id(c)] = kc
+        if cache is not None and c.locked and not excluded:
+            cache[id(c)] = (c, kc)
         return kc
 
     return build(component)
@@ -232,21 +261,28 @@ def write(
     with_metadata: bool = True,
     exclude_layers: Any = None,
 ) -> pathlib.Path:
-    kdb = _kdb()
     kc = to_kfactory(component, exclude_layers=exclude_layers)
     gdspath = pathlib.Path(gdspath)
-    opts = save_options or kdb.SaveLayoutOptions()
+    opts = save_options
+    if opts is None:
+        from kfactory.utilities import save_layout_options
+
+        opts = save_layout_options()
     if not with_metadata:
         opts.write_context_info = False
-    kc.kcl.layout.write(str(gdspath), opts)
+    kc.write(str(gdspath), save_options=opts, set_meta_data=with_metadata)
     return gdspath
 
 
-def show(component: Component, **kwargs: Any) -> None:
+def show(component: Any, **kwargs: Any) -> None:
+    """Shows a Component (or a GDS path / kfactory cell) in KLayout via klive."""
     import kfactory as kf
 
-    kc = to_kfactory(component)
-    kf.show(kc, **kwargs)
+    from gdsfactory.component import Component as _Component
+
+    if isinstance(component, _Component):
+        component = to_kfactory(component)
+    kf.show(component, **kwargs)
 
 
 def _kport_to_kwargs(p: Any, dbu: float) -> dict[str, Any]:
@@ -255,7 +291,19 @@ def _kport_to_kwargs(p: Any, dbu: float) -> dict[str, Any]:
     if width is None:
         width = p.width * dbu if isinstance(p.width, int) else p.width
     li = p.layer_info
+    info: dict[str, Any] = {}
+    with contextlib.suppress(Exception):
+        info = dict(p.info)
+    with contextlib.suppress(Exception):
+        xs = p.cross_section
+        if xs is not None and getattr(xs, "name", None):
+            import kfactory as kf
+
+            # canonical name if import_gds remapped a conflicting cross-section
+            canonical = kf.kcl.cross_sections.cross_sections.get(xs.name, xs)
+            info["cross_section"] = canonical.name
     return dict(
+        info=info,
         name=p.name,
         center=(t.disp.x, t.disp.y),
         orientation=t.angle,
@@ -307,12 +355,14 @@ def from_kfactory(kcell: Any, cache: dict[int, Component] | None = None) -> Comp
             child = convert(layout.cell(inst.cell_index))
             ca = inst.dcell_inst
             ref = c.add_ref(child)
-            ref.transform = Transform.from_klayout(ca.complex_trans())
+            ref.transform = Transform.from_klayout(inst.dcplx_trans)
             if ca.is_regular_array():
                 ref.na, ref.nb = ca.na, ca.nb
                 ref.a = asarray([ca.a.x, ca.a.y])
                 ref.b = asarray([ca.b.x, ca.b.y])
-            name = inst.property("name")
+            from kfactory.conf import PROPID
+
+            name = inst.property(PROPID.NAME)
             if name:
                 ref.name = str(name)
         if kcl is not None:
@@ -320,7 +370,10 @@ def from_kfactory(kcell: Any, cache: dict[int, Component] | None = None) -> Comp
                 kc = kcl[cell.cell_index()]
                 for p in kc.ports:
                     try:
-                        c.add_port(**_kport_to_kwargs(p, dbu))
+                        kw = _kport_to_kwargs(p, dbu)
+                        pinfo = kw.pop("info")
+                        newp = c.add_port(**kw)
+                        newp.info.update(pinfo)
                     except Exception:
                         pass
                 c.info = Info(dict(kc.info))

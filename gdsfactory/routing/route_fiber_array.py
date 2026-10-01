@@ -7,8 +7,11 @@ import kfactory as kf
 import klayout.db as kdb
 
 import gdsfactory as gf
+from gdsfactory._jax import to_float
+from gdsfactory._ports import Ports
 from gdsfactory.component import Component, ComponentReference
 from gdsfactory.port import select_ports_optical
+from gdsfactory.routing._kf_router import to_kf_port
 from gdsfactory.routing.route_bundle import get_min_spacing, route_bundle
 from gdsfactory.routing.utils import direction_ports_from_list_ports
 from gdsfactory.typings import (
@@ -323,7 +326,14 @@ def route_fiber_array(
 
     if avoid_component_bbox:
         bbox = component_to_route.bbox()
-        _bboxes.append(kdb.DBox(bbox.left, bbox.bottom, bbox.right, bbox.top))
+        _bboxes.append(
+            kdb.DBox(
+                to_float(bbox.left),
+                to_float(bbox.bottom),
+                to_float(bbox.right),
+                to_float(bbox.top),
+            )
+        )
 
     route_bundle(
         component,
@@ -357,7 +367,7 @@ def route_fiber_array(
 
     fiber_ports = [gc.ports[gc_port_name_fiber] for gc in io_gratings]
 
-    component.ports = kf.DPorts(kcl=component.kcl)
+    component.ports = Ports()
 
     for component_port, port in zip(port_names, fiber_ports, strict=False):
         component.add_port(name=component_port, port=port)
@@ -381,13 +391,13 @@ def route_fiber_array(
         port1 = gca2[gc_port_name]
         radius = radius_loopback or radius or x.radius
         assert radius is not None
-        radius_dbu = component.kcl.to_dbu(radius)
+        radius_dbu = round(to_float(radius) * 1000)
         d_loop = straight_to_grating_spacing + radius + gca1.ysize
-        d_loop_dbu = component.kcl.to_dbu(d_loop)
+        d_loop_dbu = round(to_float(d_loop) * 1000)
 
         waypoints_loopback = kf.routing.optical.route_loopback(
-            port0.to_itype(),
-            port1.to_itype(),
+            to_kf_port(port0),
+            to_kf_port(port1),
             bend90_radius=radius_dbu,
             inside=with_loopback_inside,
             d_loop=d_loop_dbu,
@@ -403,10 +413,10 @@ def route_fiber_array(
         wp_start = waypoints_loopback_[0]
         wp_end = waypoints_loopback_[-1]
         waypoints_loopback_[:3] = [
-            gf.kdb.DPoint(wp_start.x + sign * radius * 2, wp_start.y)
+            gf.kdb.DPoint(wp_start.x + sign * to_float(radius) * 2, wp_start.y)
         ]
         waypoints_loopback_[-3:] = [
-            gf.kdb.DPoint(wp_end.x - sign * radius * 2, wp_end.y)
+            gf.kdb.DPoint(wp_end.x - sign * to_float(radius) * 2, wp_end.y)
         ]
 
         route_bundle(

@@ -85,7 +85,7 @@ def pad_gsg(length: float = 100, cross_section: str = "gsg") -> gf.Component:
         length: length of the GSG transmission line, in um.
         cross_section: GSG cross_section spec.
     """
-    c = gf.c.straight(cross_section=cross_section, length=length)
+    c = gf.c.straight(cross_section=cross_section, length=length).copy()
     for port in c.ports:
         if port.port_type == "electrical":
             c.create_pin(ports=[port], name=port.name)

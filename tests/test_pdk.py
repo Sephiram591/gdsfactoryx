@@ -161,7 +161,7 @@ def test_pdk_dbu_change_on_reactivation_after_cells_raises(
     )
     pdk.activate(force=True)
     gf.components.straight()
-    assert len(gf.kcl.kcells) > 0
+    assert len(gf._cell.cached_cells()) > 0
 
     pdk.dbu = 0.0005
     with pytest.raises(ValueError, match=r"cell\(s\) already exist"):
@@ -170,7 +170,7 @@ def test_pdk_dbu_change_on_reactivation_after_cells_raises(
 
 def test_pdk_switch_clears_cells(restore_kcl_state: None) -> None:
     gf.components.straight()
-    assert len(gf.kcl.kcells) > 0
+    assert len(gf._cell.cached_cells()) > 0
 
     pdk = gf.Pdk(
         name="dbu_switch",
@@ -182,7 +182,7 @@ def test_pdk_switch_clears_cells(restore_kcl_state: None) -> None:
         pdk.activate(force=True)
 
     assert gf.kcl.dbu == 0.0005
-    assert len(gf.kcl.kcells) == 0
+    assert len(gf._cell.cached_cells()) == 0
 
 
 def test_pdk_switch_does_not_reserve_cells_by_name(restore_kcl_state: None) -> None:
@@ -262,11 +262,11 @@ def test_pdk_same_dbu_with_existing_cells_allowed(restore_kcl_state: None) -> No
     )
     pdk.activate(force=True)
     gf.components.straight()
-    assert len(gf.kcl.kcells) > 0
+    assert len(gf._cell.cached_cells()) > 0
 
     pdk.activate(force=True)  # same PDK and DBU, so the cells are kept
 
-    assert len(gf.kcl.kcells) > 0
+    assert len(gf._cell.cached_cells()) > 0
 
 
 def _registered_layers() -> set[tuple[int, int]]:

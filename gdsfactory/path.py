@@ -30,7 +30,10 @@ from gdsfactory._jax import (
     asarray,
     is_tracer,
     jnp,
+    xp,
+    xset,
     round_st,
+    stop_gradient,
     to_float,
     to_numpy,
 )
@@ -89,24 +92,24 @@ def reflect_points(
     """
     pts = asarray(points)
     return_single_point = pts.ndim == 1
-    pts = jnp.atleast_2d(pts)
+    pts = xp.atleast_2d(pts)
     p1_array = asarray(p1)
     p2_array = asarray(p2)
 
     line_vec = p2_array - p1_array
-    line_vec_norm = jnp.sum(line_vec**2)
-    proj = jnp.sum(line_vec * (pts - p1_array), axis=-1, keepdims=True)
+    line_vec_norm = xp.sum(line_vec**2)
+    proj = xp.sum(line_vec * (pts - p1_array), axis=-1, keepdims=True)
     reflected = 2 * (p1_array + (p2_array - p1_array) * proj / line_vec_norm) - pts
     return reflected[0] if return_single_point else reflected
 
 
 def _angle_deg(dy: Any, dx: Any) -> Any:
-    return jnp.arctan2(dy, dx) / jnp.pi * 180
+    return xp.arctan2(dy, dx) / xp.pi * 180
 
 
 def _mod360(a: Any) -> Any:
     if is_tracer(a) or isinstance(a, jax.Array):
-        return jnp.mod(a, 360)
+        return xp.mod(a, 360)
     return float(np.mod(a, 360))
 
 
@@ -114,11 +117,10 @@ def _is_points_like(path: Any) -> bool:
     if isinstance(path, jax.Array | np.ndarray) or is_tracer(path):
         return path.ndim == 2 and path.shape[1] == 2
     if isinstance(path, list | tuple) and path and not isinstance(path[0], Path):
-        try:
-            first = path[0]
-            return len(first) == 2 and not isinstance(first, Path)
-        except TypeError:
-            return False
+        first = path[0]
+        if isinstance(first, list | tuple | np.ndarray | jax.Array):
+            return len(first) > 0 and not isinstance(first[0], Path | list | tuple)
+        return False
     return False
 
 
@@ -199,11 +201,18 @@ class Path:
         return self
 
     def dbbox(self, layer: int | None = None) -> Box:
-        mn = jnp.min(self.points, axis=0)
-        mx = jnp.max(self.points, axis=0)
+        mn = xp.min(self.points, axis=0)
+        mx = xp.max(self.points, axis=0)
         return Box(mn[0], mn[1], mx[0], mx[1])
 
     ibbox = dbbox
+    bbox = dbbox
+
+    @property
+    def kcl(self) -> Any:
+        import gdsfactory as gf
+
+        return gf.kcl
 
     def bbox_np(self) -> npt.NDArray[np.float64]:
         pts = to_numpy(self.points)
@@ -211,19 +220,19 @@ class Path:
 
     @property
     def xmin(self) -> Any:
-        return jnp.min(self.points[:, 0])
+        return xp.min(self.points[:, 0])
 
     @property
     def xmax(self) -> Any:
-        return jnp.max(self.points[:, 0])
+        return xp.max(self.points[:, 0])
 
     @property
     def ymin(self) -> Any:
-        return jnp.min(self.points[:, 1])
+        return xp.min(self.points[:, 1])
 
     @property
     def ymax(self) -> Any:
-        return jnp.max(self.points[:, 1])
+        return xp.max(self.points[:, 1])
 
     @property
     def x(self) -> Any:
@@ -235,7 +244,7 @@ class Path:
 
     @property
     def center(self) -> Array:
-        return jnp.stack([self.x, self.y])
+        return xp.stack([self.x, self.y])
 
     @property
     def xsize(self) -> Any:
@@ -250,7 +259,7 @@ class Path:
         from gdsfactory._ports import _move_args
 
         dx, dy = _move_args(args)
-        self.points = self.points + jnp.stack([asarray(dx), asarray(dy)])
+        self.points = self.points + xp.stack([asarray(dx), asarray(dy)])
         return self
 
     dmove = move
@@ -308,7 +317,7 @@ class Path:
             points = rotate_points(points, angle=rot)
         points = points + (self.points[-1, :] - points[0, :])
         self.end_angle = _mod360(end_angle + self.end_angle - start_angle)
-        self.points = jnp.concatenate([self.points, points[1:]])
+        self.points = xp.concatenate([self.points, points[1:]])
         return self
 
     def offset(self, offset: Any = 0) -> Path:
@@ -382,26 +391,26 @@ class Path:
         points = asarray(points)
         x = points[:, 0]
         y = points[:, 1]
-        dxdt = jnp.gradient(x)
-        dydt = jnp.gradient(y)
+        dxdt = xp.gradient(x)
+        dydt = xp.gradient(y)
         if start_angle is not None:
-            dxdt = dxdt.at[0].set(jnp.cos(start_angle * jnp.pi / 180))
-            dydt = dydt.at[0].set(jnp.sin(start_angle * jnp.pi / 180))
+            dxdt = xset(dxdt, (0), xp.cos(start_angle * xp.pi / 180))
+            dydt = xset(dydt, (0), xp.sin(start_angle * xp.pi / 180))
         if end_angle is not None:
-            dxdt = dxdt.at[-1].set(jnp.cos(end_angle * jnp.pi / 180))
-            dydt = dydt.at[-1].set(jnp.sin(end_angle * jnp.pi / 180))
-        norm = jnp.sqrt(dxdt**2 + dydt**2)
+            dxdt = xset(dxdt, (-1), xp.cos(end_angle * xp.pi / 180))
+            dydt = xset(dydt, (-1), xp.sin(end_angle * xp.pi / 180))
+        norm = xp.sqrt(dxdt**2 + dydt**2)
         x_offset = x + offset_distance * dydt / norm
         y_offset = y - offset_distance * dxdt / norm
-        return jnp.stack([x_offset, y_offset]).T
+        return xp.stack([x_offset, y_offset]).T
 
     def length(self) -> Any:
         """Return cumulative length (rounded to 1e-3 um, straight-through gradient)."""
         return round_st(self.length_exact(), 3)
 
     def length_exact(self) -> Any:
-        d = jnp.diff(self.points, axis=0)
-        return jnp.sum(jnp.sqrt(jnp.sum(d**2, axis=1)))
+        d = xp.diff(self.points, axis=0)
+        return xp.sum(xp.sqrt(xp.sum(d**2, axis=1)))
 
     def curvature(self) -> tuple[Array, Array]:
         """Calculates Path curvature (numerically).
@@ -412,17 +421,17 @@ class Path:
         """
         x = self.points[:, 0]
         y = self.points[:, 1]
-        dx = jnp.diff(x)
-        dy = jnp.diff(y)
-        ds = jnp.sqrt(dx**2 + dy**2)
-        s = jnp.cumsum(ds)
-        theta = jnp.unwrap(jnp.arctan2(dy, dx))
+        dx = xp.diff(x)
+        dy = xp.diff(y)
+        ds = xp.sqrt(dx**2 + dy**2)
+        s = xp.cumsum(ds)
+        theta = xp.unwrap(xp.arctan2(dy, dx))
 
         match len(ds):
             case 0 | 1:
                 k = asarray([np.inf])
             case 2:
-                k = jnp.nan_to_num(_gradient(theta, s, edge_order=1), nan=np.inf)
+                k = xp.nan_to_num(_gradient(theta, s, edge_order=1), nan=np.inf)
             case _:
                 k = _gradient(theta, s, edge_order=2)
         return s, k
@@ -545,43 +554,45 @@ def _as_points(path: Any) -> Array:
         return asarray(path)
     from gdsfactory._jax import points_array
 
+    if any(len(p) != 2 for p in path):
+        raise ValueError("Path points must be (x, y) pairs")
     return points_array(path)
 
 
 def _cumulative_lengths(points: Array) -> Array:
-    d = jnp.diff(points, axis=0)
-    lengths = jnp.cumsum(jnp.sqrt(jnp.sum(d**2, axis=1)))
-    return jnp.concatenate([jnp.zeros(1), lengths])
+    d = xp.diff(points, axis=0)
+    lengths = xp.cumsum(xp.sqrt(xp.sum(d**2, axis=1)))
+    return xp.concatenate([xp.zeros(1), lengths])
 
 
 def _gradient(f: Array, x: Array, edge_order: int = 1) -> Array:
     """jnp version of np.gradient(f, x) for non-uniform 1D spacing."""
     n = f.shape[0]
     if n < 2:
-        return jnp.full_like(f, jnp.inf)
-    out = jnp.zeros_like(f)
+        return xp.full_like(f, xp.inf)
+    out = xp.zeros_like(f)
     dx1 = x[1:-1] - x[:-2]
     dx2 = x[2:] - x[1:-1]
     a = -(dx2) / (dx1 * (dx1 + dx2))
     b = (dx2 - dx1) / (dx1 * dx2)
     c = dx1 / (dx2 * (dx1 + dx2))
-    out = out.at[1:-1].set(a * f[:-2] + b * f[1:-1] + c * f[2:])
+    out = xset(out, slice(1, -1), a * f[:-2] + b * f[1:-1] + c * f[2:])
     if edge_order == 1 or n < 3:
-        out = out.at[0].set((f[1] - f[0]) / (x[1] - x[0]))
-        out = out.at[-1].set((f[-1] - f[-2]) / (x[-1] - x[-2]))
+        out = xset(out, (0), (f[1] - f[0]) / (x[1] - x[0]))
+        out = xset(out, (-1), (f[-1] - f[-2]) / (x[-1] - x[-2]))
     else:
         dx1 = x[1] - x[0]
         dx2 = x[2] - x[1]
         a = -(2.0 * dx1 + dx2) / (dx1 * (dx1 + dx2))
         b = (dx1 + dx2) / (dx1 * dx2)
         c = -dx1 / (dx2 * (dx1 + dx2))
-        out = out.at[0].set(a * f[0] + b * f[1] + c * f[2])
+        out = xset(out, (0), a * f[0] + b * f[1] + c * f[2])
         dx1 = x[-2] - x[-3]
         dx2 = x[-1] - x[-2]
         a = dx2 / (dx1 * (dx1 + dx2))
         b = -(dx2 + dx1) / (dx1 * dx2)
         c = (2.0 * dx2 + dx1) / (dx2 * (dx1 + dx2))
-        out = out.at[-1].set(a * f[-3] + b * f[-2] + c * f[-1])
+        out = xset(out, (-1), a * f[-3] + b * f[-2] + c * f[-1])
     return out
 
 
@@ -593,7 +604,7 @@ def _sinusoidal_transition(y1: Any, y2: Any) -> Callable[[Any], Any]:
     dy = y2 - y1
 
     def sine(t: Any) -> Any:
-        return y1 + (1 - jnp.cos(jnp.pi * t)) * dy / 2
+        return y1 + (1 - xp.cos(xp.pi * t)) * dy / 2
 
     return sine
 
@@ -602,7 +613,7 @@ def _parabolic_transition(y1: Any, y2: Any) -> Callable[[Any], Any]:
     dy = y2 - y1
 
     def parabolic(t: Any) -> Any:
-        return y1 + jnp.sqrt(t) * dy
+        return y1 + xp.sqrt(t) * dy
 
     return parabolic
 
@@ -689,7 +700,7 @@ def transition_adiabatic(
     else:
         wmin, wmax, order = w1, w2, 1
 
-    x = jnp.linspace(0, max_length, num_points_ODE)
+    x = xp.linspace(0, max_length, num_points_ODE)
     sol = odeint(dWdx, asarray(wmin), x, asarray(wavelength), asarray(alpha))
     mask = to_numpy(sol) < to_float(wmax)
     xs = x[mask]
@@ -809,9 +820,9 @@ def along_path(
     for i in range(len(pts) - 1):
         start_pt = pts[i]
         segment_vector = pts[i + 1] - start_pt
-        segment_length = jnp.sqrt(jnp.sum(segment_vector**2))
+        segment_length = xp.sqrt(xp.sum(segment_vector**2))
         unit_vector = segment_vector / segment_length
-        angle = jnp.rad2deg(jnp.arctan2(segment_vector[1], segment_vector[0]))
+        angle = xp.rad2deg(xp.arctan2(segment_vector[1], segment_vector[0]))
 
         while to_float(next_component) <= to_float(cum_dist + segment_length) and to_float(
             next_component
@@ -977,13 +988,13 @@ def extrude(
             points1 = _simplify(points1, tolerance=with_simplify)
             points2 = _simplify(points2, tolerance=with_simplify)
 
-        points_poly = jnp.concatenate([points1, points2[::-1, :]])
+        points_poly = xp.concatenate([points1, points2[::-1, :]])
         section_length = p_sec.length() if path_changed else path_length
 
         if not hidden and to_float(section_length) > 1e-3:
             c.add_polygon(points_poly, layer=layer)
 
-        scalar_width = jnp.ndim(width_value) == 0
+        scalar_width = xp.ndim(width_value) == 0
         if port_names[0]:
             port_width = width_value if scalar_width else width_value[0]
             port_orientation = _mod360(p_sec.start_angle + 180)
@@ -1035,10 +1046,10 @@ def extrude(
 def _inset_path(p_sec: Path, insets: tuple[Any, Any]) -> Path | None:
     """Trims the start/end of a path by insets (um). Differentiable in insets and points."""
     p_pts = p_sec.points
-    seg = jnp.diff(p_pts, axis=0)
-    seg_len = jnp.sqrt(jnp.sum(seg**2, axis=1))
-    fwd = jnp.cumsum(seg_len)
-    rev = jnp.cumsum(seg_len[::-1])
+    seg = xp.diff(p_pts, axis=0)
+    seg_len = xp.sqrt(xp.sum(seg**2, axis=1))
+    fwd = xp.cumsum(seg_len)
+    rev = xp.cumsum(seg_len[::-1])
     fwd_np = to_numpy(fwd)
     rev_np = to_numpy(rev)
     i0 = to_float(insets[0])
@@ -1052,8 +1063,8 @@ def _inset_path(p_sec: Path, insets: tuple[Any, Any]) -> Path | None:
 
     v_start = -seg[start_diff_idx]
     v_stop = seg[stop_diff_idx]
-    v_start_direction = v_start / jnp.linalg.norm(v_start)
-    v_stop_direction = v_stop / jnp.linalg.norm(v_stop)
+    v_start_direction = v_start / xp.linalg.norm(v_start)
+    v_stop_direction = v_stop / xp.linalg.norm(v_stop)
 
     start_inset_remainder = fwd[start_diff_idx] - insets[0]
     stop_inset_remainder = rev[reversed_stop_diff_idx] - insets[1]
@@ -1061,7 +1072,7 @@ def _inset_path(p_sec: Path, insets: tuple[Any, Any]) -> Path | None:
     new_start_point = v_start_direction * start_inset_remainder + p_pts[start_diff_idx + 1]
     new_stop_point = v_stop_direction * stop_inset_remainder + p_pts[stop_diff_idx]
 
-    trimmed = jnp.concatenate(
+    trimmed = xp.concatenate(
         [
             new_start_point[None, :],
             p_pts[start_diff_idx + 1 : stop_diff_idx + 1],
@@ -1203,12 +1214,12 @@ def extrude_transition(
             points1 = _simplify(points1, tolerance=tolerance)
             points2 = _simplify(points2, tolerance=tolerance)
 
-        points_poly = jnp.concatenate([points1, points2[::-1, :]])
+        points_poly = xp.concatenate([points1, points2[::-1, :]])
 
         if not hidden and to_float(path_length) > 1e-3:
             c.add_polygon(points_poly, layer=layer)
 
-        offset_arr = jnp.broadcast_to(asarray(offset_value1), lengths.shape)
+        offset_arr = xp.broadcast_to(asarray(offset_value1), lengths.shape)
         if port_names[0] is not None:
             center = p.centerpoint_offset_curve(
                 points[:2],
@@ -1252,14 +1263,14 @@ def _compute_offset_directions(points: Array) -> tuple[Array, Array, Array]:
     Returns (cos_theta_mid, sin_theta_mid, sin_half_dtheta_int).
     """
     points = asarray(points)
-    dx = jnp.diff(points[:, 0])
-    dy = jnp.diff(points[:, 1])
-    theta = jnp.unwrap(jnp.arctan2(dy, dx))
-    theta = jnp.concatenate([theta[:1], theta, theta[-1:]])
-    theta_mid = (jnp.pi + theta[1:] + theta[:-1]) / 2
-    dtheta_int = jnp.pi + theta[:-1] - theta[1:]
-    sin_half = jnp.sin(dtheta_int / 2)
-    return jnp.cos(theta_mid), jnp.sin(theta_mid), sin_half
+    dx = xp.diff(points[:, 0])
+    dy = xp.diff(points[:, 1])
+    theta = xp.unwrap(xp.arctan2(dy, dx))
+    theta = xp.concatenate([theta[:1], theta, theta[-1:]])
+    theta_mid = (xp.pi + theta[1:] + theta[:-1]) / 2
+    dtheta_int = xp.pi + theta[:-1] - theta[1:]
+    sin_half = xp.sin(dtheta_int / 2)
+    return xp.cos(theta_mid), xp.sin(theta_mid), sin_half
 
 
 def _offset_curve_from_directions(
@@ -1272,26 +1283,26 @@ def _offset_curve_from_directions(
     end_angle: Any = None,
 ) -> Array:
     """Single offset curve from pre-computed direction vectors."""
-    offset_array = jnp.broadcast_to(
+    offset_array = xp.broadcast_to(
         asarray(offset_distance) / sin_half_dtheta_int, sin_half_dtheta_int.shape
     )
     new_x = points[:, 0] - offset_array * cos_theta_mid
     new_y = points[:, 1] - offset_array * sin_theta_mid
-    new_points = jnp.stack([new_x, new_y], axis=1)
+    new_points = xp.stack([new_x, new_y], axis=1)
 
     if start_angle is not None:
-        sa = start_angle * jnp.pi / 180
-        first = points[0, :] + jnp.stack(
-            [jnp.sin(sa) * offset_array[0], -jnp.cos(sa) * offset_array[0]]
+        sa = start_angle * xp.pi / 180
+        first = points[0, :] + xp.stack(
+            [xp.sin(sa) * offset_array[0], -xp.cos(sa) * offset_array[0]]
         )
-        new_points = new_points.at[0, :].set(first)
+        new_points = xset(new_points, (0, slice(None)), first)
 
     if end_angle is not None:
-        ea = end_angle * jnp.pi / 180
-        last = points[-1, :] + jnp.stack(
-            [jnp.sin(ea) * offset_array[-1], -jnp.cos(ea) * offset_array[-1]]
+        ea = end_angle * xp.pi / 180
+        last = points[-1, :] + xp.stack(
+            [xp.sin(ea) * offset_array[-1], -xp.cos(ea) * offset_array[-1]]
         )
-        new_points = new_points.at[-1, :].set(last)
+        new_points = xset(new_points, (-1, slice(None)), last)
 
     return new_points
 
@@ -1330,9 +1341,9 @@ def _apply_offsets(
 
 def _rotated_delta(point: Any, center: Any, orientation: AngleInDegrees) -> Array:
     """Gets the rotated distance of a point from a center."""
-    ca = jnp.cos(orientation * jnp.pi / 180)
-    sa = jnp.sin(orientation * jnp.pi / 180)
-    rot_mat = jnp.stack([jnp.stack([ca, -sa]), jnp.stack([sa, ca])])
+    ca = xp.cos(orientation * xp.pi / 180)
+    sa = xp.sin(orientation * xp.pi / 180)
+    rot_mat = xp.stack([xp.stack([ca, -sa]), xp.stack([sa, ca])])
     delta = asarray(point) - asarray(center)
     return delta @ rot_mat
 
@@ -1436,12 +1447,12 @@ def arc(
     else:
         npoints = max(int(npoints), 2)
 
-    t = jnp.linspace(
-        start_angle * jnp.pi / 180, (angle + start_angle) * jnp.pi / 180, npoints
+    t = xp.linspace(
+        start_angle * xp.pi / 180, (angle + start_angle) * xp.pi / 180, npoints
     )
-    x = radius * jnp.cos(t)
-    y = radius * (jnp.sin(t) + 1)
-    points = jnp.stack([x, y]).T * np.sign(angle_f)
+    x = radius * xp.cos(t)
+    y = radius * (xp.sin(t) + 1)
+    points = xp.stack([x, y]).T * np.sign(angle_f)
 
     path = Path()
     path.points = points
@@ -1473,19 +1484,23 @@ def _fresnel_jvp(primals: tuple[Array], tangents: tuple[Array]) -> tuple[Any, An
     (z,) = primals
     (dz,) = tangents
     s, c = fresnel(z)
-    arg = jnp.pi * z**2 / 2
-    return (s, c), (jnp.sin(arg) * dz, jnp.cos(arg) * dz)
+    arg = xp.pi * z**2 / 2
+    return (s, c), (xp.sin(arg) * dz, xp.cos(arg) * dz)
 
 
 def _fresnel_xy(t: Array) -> Array:
     """[x, y] of the normalised clothoid for parameter values t."""
-    sin_fresnel, cos_fresnel = fresnel(t * _SQRT_2_OVER_PI)
-    return jnp.stack([cos_fresnel * _SQRT_HALF_PI, sin_fresnel * _SQRT_HALF_PI])
+    z = t * _SQRT_2_OVER_PI
+    if isinstance(z, jax.Array) or is_tracer(z):
+        sin_fresnel, cos_fresnel = fresnel(z)
+    else:
+        sin_fresnel, cos_fresnel = _scipy_fresnel(z)
+    return xp.stack([cos_fresnel * _SQRT_HALF_PI, sin_fresnel * _SQRT_HALF_PI])
 
 
 def _fresnel(R0: float, s: Any, num_pts: int, n_iter: int = 8) -> Array:
     """Clothoid points with uniform arc-length sampling."""
-    t = jnp.linspace(0, s / (np.sqrt(2) * R0), num_pts)
+    t = xp.linspace(0, s / (np.sqrt(2) * R0), num_pts)
     return np.sqrt(2) * R0 * _fresnel_xy(t)
 
 
@@ -1493,8 +1508,8 @@ def _fresnel_angular(R0: float, s: Any, num_pts: int, n_iter: int = 8) -> Array:
     """Clothoid points with uniform angular sampling."""
     t_max = s / (np.sqrt(2) * R0)
     theta_max = t_max**2 / 2
-    thetas = jnp.linspace(0, theta_max, num_pts)
-    t = jnp.sqrt(2 * thetas)
+    thetas = xp.linspace(0, theta_max, num_pts)
+    t = xp.sqrt(2 * thetas)
     return np.sqrt(2) * R0 * _fresnel_xy(t)
 
 
@@ -1554,10 +1569,10 @@ def euler(
         mirror = False
 
     R0 = 1
-    alpha = jnp.radians(asarray(angle))
-    sp = R0 * jnp.sqrt(p * alpha)
+    alpha = xp.radians(asarray(angle))
+    sp = R0 * xp.sqrt(p * alpha)
     is_small_angle = abs(angle_f) <= 1e-6
-    Rp = R0 / jnp.sqrt(p * alpha) if not is_small_angle else asarray(np.inf)
+    Rp = R0 / xp.sqrt(p * alpha) if not is_small_angle else asarray(np.inf)
 
     pdk = get_active_pdk()
     if angular_step is not None:
@@ -1585,37 +1600,37 @@ def euler(
             xbend1, ybend1 = _fresnel_angular(R0, sp, num_pts_euler)
         else:
             xbend1, ybend1 = _fresnel(R0, sp, num_pts_euler)
-        xp, yp = xbend1[-1], ybend1[-1]
-        sinc_quarter = jnp.sinc(p * alpha / (4 * jnp.pi))
-        dx = xp - sp / 2 * sinc_quarter * jnp.cos(p * alpha / 4)
-        dy = yp - (sp**3 / 8) * sinc_quarter**2
+        x_p, y_p = xbend1[-1], ybend1[-1]
+        sinc_quarter = xp.sinc(p * alpha / (4 * xp.pi))
+        dx = x_p - sp / 2 * sinc_quarter * xp.cos(p * alpha / 4)
+        dy = y_p - (sp**3 / 8) * sinc_quarter**2
     else:
-        xbend1 = ybend1 = jnp.zeros((0,))
+        xbend1 = ybend1 = xp.zeros((0,))
         dx = 0.0
         dy = 0.0
 
     if not is_small_angle:
         if angular_step is not None:
             arc_angle_section = alpha * (1 - p) / 2
-            theta = jnp.linspace(0, arc_angle_section, num_pts_arc)
+            theta = xp.linspace(0, arc_angle_section, num_pts_arc)
             arc_angles = theta + p * alpha / 2
         else:
-            arc_angles = jnp.linspace(p * alpha / 2, alpha / 2, num_pts_arc)
-        xbend2 = Rp * jnp.sin(arc_angles) + dx
-        ybend2 = Rp * (1 - jnp.cos(arc_angles)) + dy
+            arc_angles = xp.linspace(p * alpha / 2, alpha / 2, num_pts_arc)
+        xbend2 = Rp * xp.sin(arc_angles) + dx
+        ybend2 = Rp * (1 - xp.cos(arc_angles)) + dy
     else:
-        xbend2 = jnp.zeros(num_pts_arc) + dx
-        ybend2 = jnp.zeros(num_pts_arc) + dy
+        xbend2 = xp.zeros(num_pts_arc) + dx
+        ybend2 = xp.zeros(num_pts_arc) + dy
 
-    x = jnp.concatenate([xbend1, xbend2[1:]])
-    y = jnp.concatenate([ybend1, ybend2[1:]])
-    points1 = jnp.stack([x, y]).T
-    points2 = jnp.flipud(jnp.stack([x, -y]).T)
+    x = xp.concatenate([xbend1, xbend2[1:]])
+    y = xp.concatenate([ybend1, ybend2[1:]])
+    points1 = xp.stack([x, y]).T
+    points2 = xp.flipud(xp.stack([x, -y]).T)
 
     points2 = rotate_points(points2, angle - 180)
     points2 = points2 - points2[0, :] + points1[-1, :]
 
-    points = jnp.concatenate([points1[: -1 if len(points1) > 1 else None], points2])
+    points = xp.concatenate([points1[: -1 if len(points1) > 1 else None], points2])
 
     start_angle = 0.0
     end_angle = start_angle + angle
@@ -1625,7 +1640,7 @@ def euler(
         Rmin: Any = np.inf
         scale: Any = 0.0
     else:
-        dyy = jnp.tan(jnp.radians(end_angle - 90)) * points[-1][0]
+        dyy = xp.tan(xp.radians(end_angle - 90)) * points[-1][0]
         Reff = points[-1][1] - dyy
         Rmin = Rp
         if abs(180 - angle_f) < 1e-3:
@@ -1787,9 +1802,9 @@ def straight(length: float = 10.0, npoints: int = 2) -> Path:
     """
     if to_float(length) < 0:
         raise ValueError(f"length = {length} needs to be > 0")
-    x = jnp.linspace(0, length, npoints)
+    x = xp.linspace(0, length, npoints)
     y = x * 0
-    points = jnp.stack([x, y]).T
+    points = xp.stack([x, y]).T
 
     p = Path()
     p.append(points)
@@ -1807,17 +1822,17 @@ def spiral_archimedean(
         number_of_loops: number of loops.
         npoints: number of Points.
     """
-    theta = jnp.linspace(0, number_of_loops * 2 * jnp.pi, int(npoints))
-    points = (separation / jnp.pi * theta + min_bend_radius)[:, None] * jnp.stack(
-        (jnp.sin(theta), jnp.cos(theta)), axis=1
+    theta = xp.linspace(0, number_of_loops * 2 * xp.pi, int(npoints))
+    points = (separation / xp.pi * theta + min_bend_radius)[:, None] * xp.stack(
+        (xp.sin(theta), xp.cos(theta)), axis=1
     )
     return Path(points)
 
 
 def _compute_segments(points: Any) -> tuple[Array, Array, Array, Array, Array]:
     points = asarray(points)
-    normals = jnp.diff(points, axis=0)
-    norms = jnp.linalg.norm(normals, axis=1)
+    normals = xp.diff(points, axis=0)
+    norms = xp.linalg.norm(normals, axis=1)
 
     tol = 1e-6
     if np.any(to_numpy(norms) < tol):
@@ -1828,12 +1843,12 @@ def _compute_segments(points: Any) -> tuple[Array, Array, Array, Array, Array]:
         )
 
     normals = (normals.T / norms).T
-    dx = jnp.diff(points[:, 0])
-    dy = jnp.diff(points[:, 1])
-    ds = jnp.sqrt(dx**2 + dy**2)
-    theta = jnp.degrees(jnp.arctan2(dy, dx))
-    dtheta = jnp.diff(theta)
-    dtheta = dtheta - 360 * jnp.floor(jax.lax.stop_gradient((dtheta + 180) / 360))
+    dx = xp.diff(points[:, 0])
+    dy = xp.diff(points[:, 1])
+    ds = xp.sqrt(dx**2 + dy**2)
+    theta = xp.degrees(xp.arctan2(dy, dx))
+    dtheta = xp.diff(theta)
+    dtheta = dtheta - 360 * xp.floor(stop_gradient((dtheta + 180) / 360))
     return points, normals, ds, theta, dtheta
 
 
@@ -1874,16 +1889,16 @@ def smooth(
     for i in range(len(dtheta_np)):
         dt = dtheta[i]
         P = bend(radius=radius, angle=dt, **kwargs)
-        chord = jnp.linalg.norm(P.points[-1, :] - P.points[0, :])
-        r = jnp.abs((chord / 2) / jnp.sin(jnp.radians(dt / 2)))
+        chord = xp.linalg.norm(P.points[-1, :] - P.points[0, :])
+        r = xp.abs((chord / 2) / xp.sin(xp.radians(dt / 2)))
         radii.append(r)
         paths.append(P)
 
     if radii:
-        d = jnp.abs(jnp.stack(radii) / jnp.tan(jnp.radians(180 - dtheta) / 2))
+        d = xp.abs(xp.stack(radii) / xp.tan(xp.radians(180 - dtheta) / 2))
     else:
-        d = jnp.zeros((0,))
-    encroachment = jnp.concatenate([jnp.zeros(1), d]) + jnp.concatenate([d, jnp.zeros(1)])
+        d = xp.zeros((0,))
+    encroachment = xp.concatenate([xp.zeros(1), d]) + xp.concatenate([d, xp.zeros(1)])
     if np.any(to_numpy(encroachment) > to_numpy(ds) + 1e-12):
         raise ValueError(
             "smooth(): Not enough distance between points to to fit curves."
@@ -1898,7 +1913,7 @@ def smooth(
         p.move(p1[n])
         new_points.append(p.points)
     new_points.append(points[-1:, :])
-    new_points_np = jnp.concatenate(new_points)
+    new_points_np = xp.concatenate(new_points)
 
     path = Path()
     path.append(new_points_np)

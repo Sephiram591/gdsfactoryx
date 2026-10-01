@@ -129,9 +129,9 @@ def splitter_tree(
                 assert isinstance(bend_s, Component)
                 btop = c << bend_s
                 bbot = c << bend_s
-                bbot.dmirror()
                 btop.connect("o1", coupler_ref[e1_port_name])
-                bbot.connect("o1", coupler_ref[e0_port_name])
+                # upstream: bbot.dmirror() then connect (kfactory keeps the mirror)
+                bbot.connect("o1", coupler_ref[e0_port_name], mirror=True)
                 port = btop.ports["o2"]
                 c.add_port(name=f"{port.name}_{col}_{i}", port=port)
                 i += 1

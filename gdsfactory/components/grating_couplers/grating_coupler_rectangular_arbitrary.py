@@ -2,9 +2,9 @@ from __future__ import annotations
 
 __all__ = ["grating_coupler_rectangular_arbitrary"]
 
-import numpy as np
 
 import gdsfactory as gf
+from gdsfactory._jax import xp
 from gdsfactory.component import Component
 from gdsfactory.typings import CrossSectionSpec, Floats, LayerSpec
 
@@ -104,7 +104,7 @@ def grating_coupler_rectangular_arbitrary(
 
     for width, gap in zip(widths, gaps, strict=False):
         xi += gap
-        points = np.array(
+        points = xp.array(
             [
                 [xi, -y0],
                 [xi, +y0],
@@ -120,7 +120,7 @@ def grating_coupler_rectangular_arbitrary(
 
     if layer_slab:
         slab_xmin = length_taper - slab_offset
-        slab_xmax = length_taper + np.sum(widths) + np.sum(gaps) + slab_offset
+        slab_xmax = length_taper + xp.sum(xp.asarray(widths)) + xp.sum(xp.asarray(gaps)) + slab_offset
         slab_ysize = width_grating + 2 * slab_offset
         yslab = slab_ysize / 2
         c.add_polygon(
@@ -132,7 +132,7 @@ def grating_coupler_rectangular_arbitrary(
             ],
             layer_slab,
         )
-    xport = np.round((xi + length_taper) / 2, 3)
+    xport = gf.snap.snap_to_grid((xi + length_taper) / 2, nm=1)
     c.add_port(
         name="o2",
         port_type=f"vertical_{polarization}",

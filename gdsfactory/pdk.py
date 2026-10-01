@@ -838,21 +838,23 @@ def get_constant(constant_name: Any) -> Any:
 def _set_active_pdk(pdk: Pdk) -> None:
     global _ACTIVE_PDK
 
+    from gdsfactory._cell import cached_cells
+
     if _ACTIVE_PDK is not None and _ACTIVE_PDK is not pdk:
-        if kf.kcl.kcells:
+        if cached_cells():
             warnings.warn(
                 f"Activating PDK {pdk.name!r} discards the "
-                f"{len(kf.kcl.kcells)} cell(s) built under "
+                f"{len(cached_cells())} cell(s) built under "
                 f"{_ACTIVE_PDK.name!r}: cell names and cache keys are not "
                 "PDK-scoped. Existing Component objects become unusable.",
                 stacklevel=3,
             )
         clear_cache()
 
-    if pdk.dbu != kf.kcl.dbu and len(kf.kcl.kcells) > 0:
+    if pdk.dbu != kf.kcl.dbu and len(cached_cells()) > 0:
         raise ValueError(
             f"Cannot change DBU from {kf.kcl.dbu} to {pdk.dbu}: "
-            f"{len(kf.kcl.kcells)} cell(s) already exist on the KCLayout. "
+            f"{len(cached_cells())} cell(s) already exist. "
             "Call gf.clear_cache() first, or activate the PDK before building any cells."
         )
 
@@ -905,6 +907,9 @@ def _ensure_pdk_layers_registered(pdk: Pdk) -> None:
             try:
                 layout.move_layer(existing_index, target_index)
                 layout.delete_layer(existing_index)
+                from gdsfactory.component import remap_layer_index
+
+                remap_layer_index(existing_index, target_index)
             except RuntimeError:
                 logger.opt(exception=True).warning(
                     "Could not move layer {} from index {} to {}",
@@ -946,13 +951,23 @@ def _prune_foreign_layers(pdk: Pdk) -> None:
     """
     if pdk.layers is None:
         return
+    from gdsfactory._cell import cached_cells
+
     layout = kf.kcl.layout
     keep = {(layer.layer, layer.datatype) for layer in pdk.layers}  # type: ignore[attr-defined]
     keep.add(CONF.layer_error_path)
+    # gdsfactoryx geometry lives in Components, not in kf.kcl: keep used layers
+    from gdsfactory.component import live_components
+
+    in_use: set[int] = set()
+    for c in [*cached_cells(), *live_components()]:
+        for cc in [c, *c.called_cells()]:
+            in_use.update(k for k, v in cc.polygons.items() if v)
+            in_use.update(int(p.layer) for p in cc.ports)
     delete_indexes: list[int] = []
     for index in list(layout.layer_indexes()):
         info = layout.get_info(index)
-        if (info.layer, info.datatype) in keep:
+        if (info.layer, info.datatype) in keep or index in in_use:
             continue
         if any(not cell.shapes(index).is_empty() for cell in layout.each_cell()):
             continue

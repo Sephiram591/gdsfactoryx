@@ -90,7 +90,9 @@ def snap_to_grid[T: npt.NDArray[np.floating[Any]]](
 
     if not SNAP_ENABLED:
         if isinstance(x, list | tuple):
-            return cast("_T | float", np.asarray(x, dtype=np.float64))
+            from gdsfactory._jax import asarray
+
+            return cast("_T | float", asarray(x))
         return cast("_T | float", x)
 
     grid_um = (nm / 1000 if nm is not None else gf.kcl.dbu) * grid_factor

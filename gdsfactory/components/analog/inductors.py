@@ -4,6 +4,7 @@ import math
 
 import gdsfactory as gf
 from gdsfactory import Component
+from gdsfactory._jax import round_st, to_float
 from gdsfactory.typings import ComponentSpec, LayerSpec, LayerSpecs
 
 from .._schematic import inductor_schematic
@@ -72,9 +73,9 @@ def inductor(
 
     # Grid fixing for manufacturing constraints
     grid = 0.01
-    w = round(width / (2 * grid)) * 2 * grid
-    s = round(space / grid) * grid
-    d = round(diameter / (2 * grid)) * 2 * grid
+    w = round_st(width, step=2 * grid)
+    s = round_st(space, step=grid)
+    d = round_st(diameter, step=2 * grid)
 
     # Calculate geometry parameters
     r = d / 2 + s
@@ -492,7 +493,7 @@ def symmetric_inductor(
                 (-sep_total / 2 - width / 2, h - 3 * width / 2 - spacing),
                 (sep_total / 2 + width / 2, h - width / 2),
             ]:
-                dx = math.copysign(1, cx) * (extend - width) / 2
+                dx = math.copysign(1, to_float(cx)) * (extend - width) / 2
                 _add_via_array(
                     c,
                     via_component,

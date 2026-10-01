@@ -5,6 +5,7 @@ __all__ = ["optimal_step"]
 import numpy as np
 
 import gdsfactory as gf
+from gdsfactory._jax import has_tracers, stop_gradient, to_float, xp
 from gdsfactory.component import Component
 from gdsfactory.typings import LayerSpec
 
@@ -47,17 +48,17 @@ def optimal_step(
         eta takes value 0 to pi
         """
         gamma = (a**2 + W**2) / (a**2 - W**2)
-        w = np.exp(1j * eta)
+        w = xp.exp(1j * eta)
         zeta = (
             4
             * 1j
             / np.pi
             * (
-                W * np.arctan(np.sqrt((w - gamma) / (gamma + 1)))
-                + a * np.arctan(np.sqrt((gamma - 1) / (w - gamma)))
+                W * xp.arctan(xp.sqrt((w - gamma) / (gamma + 1)))
+                + a * xp.arctan(xp.sqrt((gamma - 1) / (w - gamma)))
             )
         )
-        return np.real(zeta), np.imag(zeta)
+        return xp.real(zeta), xp.imag(zeta)
 
     def invert_step_point(
         x_desired: float = -10,
@@ -67,17 +68,37 @@ def optimal_step(
     ) -> tuple[float, float]:
         """Finds the eta associated with x_desired or y_desired along the optimal curve."""
 
+        W0, a0 = to_float(W), to_float(a)
+        x0 = None if x_desired is None else to_float(x_desired)
+        y0 = None if y_desired is None else to_float(y_desired)
+
         def fh(eta: float) -> float:
-            guessed_x, guessed_y = step_points(eta, W=W + 0j, a=a + 0j)
-            if y_desired is None:
-                return (guessed_x - x_desired) ** 2  # Error relative to x_desired
-            return (guessed_y - y_desired) ** 2  # Error relative to y_desired
+            guessed_x, guessed_y = step_points(eta, W=W0 + 0j, a=a0 + 0j)
+            if y0 is None:
+                return (guessed_x - x0) ** 2  # Error relative to x_desired
+            return (guessed_y - y0) ** 2  # Error relative to y_desired
 
         from scipy.optimize import fminbound
 
         # Minimize error to find optimal eta
         found_eta = fminbound(fh, 0, np.pi)
-        return step_points(found_eta, W=W + 0j, a=a + 0j)
+        if not has_tracers([x_desired, y_desired, W, a]):
+            return step_points(found_eta, W=W + 0j, a=a + 0j)
+
+        # differentiable eta via the implicit function theorem
+        # (value is the minimizer found above, gradient is d eta / d params)
+        import jax
+
+        idx = 0 if y_desired is None else 1
+        target = y_desired if y_desired is not None else x_desired
+        g_eta = float(
+            jax.grad(lambda e: step_points(e, W=W0 + 0j, a=a0 + 0j)[idx])(
+                float(found_eta)
+            )
+        )
+        residual = target - step_points(found_eta, W=W + 0j, a=a + 0j)[idx]
+        eta = found_eta + (residual - stop_gradient(residual)) / g_eta
+        return step_points(eta, W=W + 0j, a=a + 0j)
 
     if start_width > end_width:
         reverse = True
@@ -109,15 +130,15 @@ def optimal_step(
             y_desired=end_width * (1 - width_tol), W=start_width, a=end_width
         )
 
-        xpts = list(np.linspace(xmin, xmax, num_pts))
+        xpts = list(xp.linspace(xmin, xmax, num_pts))
         for x in xpts:
             x, y = invert_step_point(x_desired=x, W=start_width, a=end_width)
             ypts.append(y)
 
         ypts[-1] = end_width
         ypts[0] = start_width
-        y_num_sq = np.array(ypts)
-        x_num_sq = np.array(xpts)
+        y_num_sq = np.array([to_float(y) for y in ypts])
+        x_num_sq = np.array([to_float(x) for x in xpts])
 
         if not symmetric:
             xpts.append(xpts[-1])

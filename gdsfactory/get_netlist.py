@@ -15,6 +15,8 @@ from natsort import natsorted
 
 import gdsfactory as gf
 import gdsfactory.schematic as scm
+from gdsfactory._jax import to_float, to_numpy
+from gdsfactory._ports import Port
 from gdsfactory.component import Component
 from gdsfactory.name import get_instance_name_from_alias as legacy_namer  # noqa: F401
 from gdsfactory.serialization import DEFAULT_SERIALIZATION_MAX_DIGITS, clean_value_json
@@ -202,8 +204,8 @@ class PortCenterMatcher:
         """Return True if two ports are at the same location (within tolerance)."""
         if port1.port_type != port2.port_type:
             return False
-        x1, y1 = port1.to_itype().center
-        x2, y2 = port2.to_itype().center
+        x1, y1 = port1.icenter
+        x2, y2 = port2.icenter
         return abs(x2 - x1) < self.tolerance_dbu and abs(y2 - y1) < self.tolerance_dbu
 
 
@@ -229,8 +231,8 @@ class SmartPortMatcher:
         # Check position
         if port1.port_type != port2.port_type:
             return False
-        x1, y1 = port1.to_itype().center
-        x2, y2 = port2.to_itype().center
+        x1, y1 = port1.icenter
+        x2, y2 = port2.icenter
         if (
             abs(x2 - x1) >= self.position_tolerance_dbu
             or abs(y2 - y1) >= self.position_tolerance_dbu
@@ -238,7 +240,7 @@ class SmartPortMatcher:
             return False
 
         # Check width
-        if abs(port1.width - port2.width) > self.width_tolerance:
+        if abs(to_float(port1.width) - to_float(port2.width)) > self.width_tolerance:
             return False
 
         # Skip orientation check for electrical ports
@@ -278,8 +280,8 @@ class FlexiblePortMatcher:
             return False
 
         # Check position
-        x1, y1 = port1.to_itype().center
-        x2, y2 = port2.to_itype().center
+        x1, y1 = port1.icenter
+        x2, y2 = port2.icenter
         if (
             abs(x2 - x1) >= self.position_tolerance_dbu
             or abs(y2 - y1) >= self.position_tolerance_dbu
@@ -294,11 +296,11 @@ class FlexiblePortMatcher:
                 return False
 
         # Check for width mismatch - record but don't reject
-        width_diff = abs(port1.width - port2.width)
+        width_diff = abs(to_float(port1.width) - to_float(port2.width))
         if width_diff > 0.001:  # small tolerance for floating point
             return {
-                "width1": port1.width,
-                "width2": port2.width,
+                "width1": to_float(port1.width),
+                "width2": to_float(port2.width),
             }
 
         return True
@@ -306,7 +308,7 @@ class FlexiblePortMatcher:
 
 def _angle_difference(angle1: float, angle2: float) -> float:
     """Return the difference between two angles, normalized to [-180, 180]."""
-    diff = angle2 - angle1
+    diff = to_float(angle2) - to_float(angle1)
     while diff < -180:
         diff += 360
     while diff > 180:
@@ -314,16 +316,9 @@ def _angle_difference(angle1: float, angle2: float) -> float:
     return diff
 
 
-def _flip_port(port: kf.DPort | kf.Port) -> kf.DPort:
+def _flip_port(port: Port) -> Port:
     """Return a copy of the port with orientation flipped by 180°."""
-    return kf.DPort(
-        name=port.name,
-        center=(port.x, port.y),
-        orientation=port.orientation + 180,
-        width=port.width,
-        layer=port.layer,
-        port_type=port.port_type,
-    )
+    return port.flipped()
 
 
 _default_port_matcher = SmartPortMatcher()
@@ -593,18 +588,19 @@ def _has_non_default_settings(cell: kf.ProtoTKCell[Any]) -> bool:
 
 
 def _get_array_config(inst: Instance) -> scm.Array:
-    kcl = inst.cell.kcl
     # inst.a and inst.b have the instance rotation baked in (but not mirror).
     # The netlist stores the array pitches in the local (pre-rotation) frame,
     # so we need to undo the rotation to get the original pitch vectors.
     trans = inst.dcplx_trans
     inv_rot = kf.kdb.DCplxTrans(1, trans.angle, False, 0, 0).inverted()
-    a = inv_rot * kf.kdb.DVector(inst.a.x, inst.a.y)
-    b = inv_rot * kf.kdb.DVector(inst.b.x, inst.b.y)
-    ax = round(kcl.dbu * a.x, 6)
-    ay = round(kcl.dbu * a.y, 6)
-    bx = round(kcl.dbu * b.x, 6)
-    by = round(kcl.dbu * b.y, 6)
+    a_um = to_numpy(inst.a)
+    b_um = to_numpy(inst.b)
+    a = inv_rot * kf.kdb.DVector(float(a_um[0]), float(a_um[1]))
+    b = inv_rot * kf.kdb.DVector(float(b_um[0]), float(b_um[1]))
+    ax = round(a.x, 6)
+    ay = round(a.y, 6)
+    bx = round(b.x, 6)
+    by = round(b.y, 6)
     match (
         ax == 0,
         ay == 0,
@@ -759,7 +755,7 @@ def _get_nets(
         list
     )
     for pname, p in all_ports.items():
-        cx, cy = p.to_itype().center
+        cx, cy = p.icenter
         buckets[cx // _BUCKET, cy // _BUCKET].append((pname, p))
 
     # Compare ports within same and neighboring buckets only
@@ -905,8 +901,8 @@ def _instname(inst: Instance) -> str:
                     inst.trans.angle,
                     inst.trans.mirror,
                 ),
-                inst.a,
-                inst.b,
+                tuple(to_numpy(inst.a).tolist()),
+                tuple(to_numpy(inst.b).tolist()),
                 inst.na,
                 inst.nb,
             )

@@ -11,6 +11,7 @@ from functools import partial
 import numpy as np
 
 import gdsfactory as gf
+from gdsfactory._jax import to_float, xp
 from gdsfactory.component import Component
 from gdsfactory.functions import DEG2RAD
 from gdsfactory.typings import ComponentSpec, CrossSectionSpec, LayerSpec
@@ -76,17 +77,17 @@ def grating_coupler_elliptical_trenches(
     layer = xs.layer
 
     # Compute some ellipse parameters
-    sthc = np.sin(fiber_angle * DEG2RAD)
+    sthc = xp.sin(fiber_angle * DEG2RAD)
     d = neff**2 - ncladding**2 * sthc**2
     a1 = wavelength * neff / d
-    b1 = wavelength / np.sqrt(d)
+    b1 = wavelength / xp.sqrt(d)
     x1 = wavelength * ncladding * sthc / d
 
-    a1 = round(a1, 3)
-    b1 = round(b1, 3)
-    x1 = round(x1, 3)
+    a1 = gf.snap.snap_to_grid(a1, nm=1)
+    b1 = gf.snap.snap_to_grid(b1, nm=1)
+    x1 = gf.snap.snap_to_grid(x1, nm=1)
 
-    period = float(a1 + x1)
+    period = a1 + x1
     trench_line_width = period - grating_line_width
 
     c = gf.Component()
@@ -111,7 +112,7 @@ def grating_coupler_elliptical_trenches(
     x_output = a_taper + x_taper - taper_length + grating_line_width / 2
 
     xmax = x_output + taper_length + n_periods * period + 3
-    y = wg_width / 2 + np.tan(taper_angle / 2 * np.pi / 180) * xmax
+    y = wg_width / 2 + xp.tan(taper_angle / 2 * np.pi / 180) * xmax
 
     taper_length2 = (xmax + end_straight_length) - x_output
     taper_component = c << gf.get_component(
@@ -127,11 +128,11 @@ def grating_coupler_elliptical_trenches(
         name="o1",
         port=taper_component.ports["o1"],
     )
-    c.info["period"] = float(np.round(period, 3))
+    c.info["period"] = float(np.round(to_float(period), 3))
     c.info["polarization"] = polarization
     c.info["wavelength"] = wavelength
 
-    x = np.round(taper_length + period * n_periods / 2, 3)
+    x = gf.snap.snap_to_grid(taper_length + period * n_periods / 2, nm=1)
     c.flatten()
     c.add_port(
         name="o2",

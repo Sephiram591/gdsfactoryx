@@ -14,6 +14,7 @@ import numpy as np
 import numpy.typing as npt
 
 import gdsfactory as gf
+from gdsfactory._jax import to_float, xp
 from gdsfactory.component import Component
 from gdsfactory.snap import snap_to_grid
 from gdsfactory.typings import Anchor, ComponentSpec, Float2, Size
@@ -189,12 +190,16 @@ def pack(
 
     components = [gf.get_component(component) for component in component_list]
 
-    # Convert Components to rectangles
+    # Convert Components to rectangles.
+    # The packing itself is discrete: it runs on concrete sizes. References are
+    # then placed with array offsets so that the geometry stays differentiable
+    # w.r.t. the children.
+    spacing_ = to_float(spacing)
     rect_dict: dict[int, tuple[float, float]] = {}
     for n, _component in enumerate(components):
-        size = np.array([_component.xsize, _component.ysize])
-        w: float = int((size[0] + spacing) / precision)
-        h: float = int((size[1] + spacing) / precision)
+        size = np.array([to_float(_component.xsize), to_float(_component.ysize)])
+        w: float = int((size[0] + spacing_) / precision)
+        h: float = int((size[1] + spacing_) / precision)
         if w > max_size_tuple[0]:
             raise ValueError(
                 f"pack() failed because Component {_component.name!r} has x dimension "
@@ -249,9 +254,13 @@ def pack(
                 d.mirror_x()
             if v_mirror:
                 d.mirror_y()
-            d.center = cast(
-                "tuple[float, float]",
-                tuple(snap_to_grid((xcenter * precision, ycenter * precision))),
+            d.center = snap_to_grid(
+                xp.stack(
+                    [
+                        xp.asarray(xcenter * precision, dtype=xp.float64),
+                        xp.asarray(ycenter * precision, dtype=xp.float64),
+                    ]
+                )
             )
             if add_ports_prefix:
                 packed.add_ports(d.ports, prefix=f"{index}_")
@@ -274,9 +283,10 @@ def pack(
                         label.dmirror()
                     if text_rotation:
                         label.rotate(text_rotation)
-                    label.move(
-                        np.array(text_offset) + getattr(d.dsize_info, text_anchor)
+                    offset = xp.asarray(text_offset, dtype=xp.float64) + xp.asarray(
+                        getattr(d.dsize_info, text_anchor)
                     )
+                    label.move((offset[0], offset[1]))
                     component.info["text_label"] = f"{text_prefix}{index}"
 
         components_packed_list.append(packed)

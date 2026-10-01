@@ -94,10 +94,10 @@ def crossing(
     """
     c = gf.Component()
     arm = gf.get_component(arm)
-    for rotation in [0, 90, 180, 270]:
+    for i, rotation in enumerate([0, 90, 180, 270]):
         ref = c << arm
         ref.rotate(rotation)
-        c.add_port(port=ref["o2"])
+        c.add_port(name=f"o{i + 1}", port=ref["o2"])
     c.auto_rename_ports()
     c.flatten()
     return c

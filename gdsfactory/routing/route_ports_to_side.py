@@ -4,7 +4,7 @@ from typing import Any, Literal, cast
 
 import kfactory as kf
 import numpy as np
-from kfactory.routing.generic import ManhattanRoute
+from gdsfactory.routing._kf_router import ManhattanRoute
 
 import gdsfactory as gf
 from gdsfactory import typings
@@ -254,7 +254,7 @@ def route_ports_to_x(
         new_port.y = y
 
         new_port2 = new_port.copy()
-        new_port2.trans *= gf.kdb.Trans.R180
+        new_port2.flip()
 
         l_elements += route_bundle(
             component,

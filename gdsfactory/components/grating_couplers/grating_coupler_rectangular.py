@@ -2,7 +2,6 @@ from __future__ import annotations
 
 __all__ = ["grating_coupler_rectangular"]
 
-import numpy as np
 
 import gdsfactory as gf
 from gdsfactory.component import Component
@@ -123,7 +122,7 @@ def grating_coupler_rectangular(
             layer_slab,
         )
     xs.add_bbox(c)
-    xport = np.round((x0 + cgrating.x) / 2, 3)
+    xport = gf.snap.snap_to_grid((x0 + cgrating.x) / 2, nm=1)
     c.add_port(
         name="o2",
         port_type=f"vertical_{polarization}",

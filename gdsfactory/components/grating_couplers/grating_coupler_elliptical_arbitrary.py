@@ -7,9 +7,9 @@ __all__ = [
 
 from typing import Any
 
-import numpy as np
 
 import gdsfactory as gf
+from gdsfactory._jax import xp
 from gdsfactory.component import Component
 from gdsfactory.functions import DEG2RAD
 from gdsfactory.typings import CrossSectionSpec, Floats, LayerSpec
@@ -91,7 +91,7 @@ def grating_coupler_elliptical_arbitrary(
 
     layer_grating = layer_grating or layer_wg
     layer_grating = gf.get_layer(layer_grating)
-    sthc = np.sin(fiber_angle * DEG2RAD)
+    sthc = xp.sin(fiber_angle * DEG2RAD)
 
     # generate component
     c = gf.Component()
@@ -99,23 +99,26 @@ def grating_coupler_elliptical_arbitrary(
     c.info["wavelength"] = wavelength
 
     # get the physical parameters needed to compute ellipses
-    gaps_array = gf.snap.snap_to_grid(np.array(gaps) + bias_gap)
-    widths_array = gf.snap.snap_to_grid(np.array(widths) - bias_gap)
+    gaps_array = gf.snap.snap_to_grid(xp.add(xp.asarray(gaps), bias_gap))
+    widths_array = gf.snap.snap_to_grid(xp.subtract(xp.asarray(widths), bias_gap))
     periods = [g + w for g, w in zip(gaps_array, widths_array, strict=False)]
     neffs = [wavelength / p + nclad * sthc for p in periods]
     ds = [neff**2 - nclad**2 * sthc**2 for neff in neffs]
-    a1s = [round(wavelength * neff / d, 3) for neff, d in zip(neffs, ds, strict=False)]
-    b1s = [round(wavelength / np.sqrt(d), 3) for d in ds]
-    x1s = [round(wavelength * nclad * sthc / d, 3) for d in ds]
-    xis = np.add(
-        taper_length + np.cumsum(periods), -widths_array / 2
+    a1s = [
+        gf.snap.snap_to_grid(wavelength * neff / d, nm=1)
+        for neff, d in zip(neffs, ds, strict=False)
+    ]
+    b1s = [gf.snap.snap_to_grid(wavelength / xp.sqrt(d), nm=1) for d in ds]
+    x1s = [gf.snap.snap_to_grid(wavelength * nclad * sthc / d, nm=1) for d in ds]
+    xis = xp.add(
+        taper_length + xp.cumsum(xp.stack(periods)), -widths_array / 2
     )  # position of middle of each tooth
-    ps = np.divide(xis, periods)
+    ps = xp.divide(xis, xp.stack(periods))
 
     # grating teeth
     for a1, b1, x1, p, width in zip(a1s, b1s, x1s, ps, widths_array, strict=False):
         pts = grating_tooth_points(
-            p * a1, p * b1, p * x1, float(width), taper_angle, spiked=spiked
+            p * a1, p * b1, p * x1, width, taper_angle, spiked=spiked
         )
         c.add_polygon(pts, layer_grating)
 
@@ -137,7 +140,7 @@ def grating_coupler_elliptical_arbitrary(
             a_taper,
             b_taper,
             x_output,
-            x_taper + np.sum(widths_array) + np.sum(gaps_array) + 1,
+            x_taper + xp.sum(widths_array) + xp.sum(gaps_array) + 1,
             taper_angle,
             wg_width=wg_width,
         )

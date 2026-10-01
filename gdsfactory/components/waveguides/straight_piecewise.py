@@ -7,6 +7,7 @@ import numpy as np
 import numpy.typing as npt
 
 import gdsfactory as gf
+from gdsfactory._jax import xp
 from gdsfactory.component import Component
 from gdsfactory.cross_section import Section
 from gdsfactory.path import Path
@@ -38,13 +39,13 @@ def straight_piecewise(
         raise ValueError("x and widths must have the same length.")
 
     def width_function(_: float) -> npt.NDArray[np.float64]:
-        return np.array(widths)
+        return xp.asarray(widths)  # type: ignore[no-any-return]
 
     if isinstance(x, gf.Path):
         p = x
     else:
         p = gf.Path()
-        p.points = np.array([(xi, 0.0) for xi in x])
+        p.points = xp.array([(xi, 0.0) for xi in x])
 
     section_list = list(sections or [])
     section_list.append(

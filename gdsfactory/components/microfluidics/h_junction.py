@@ -2,9 +2,8 @@ from __future__ import annotations
 
 __all__ = ["h_junction"]
 
-import numpy as np
-
 import gdsfactory as gf
+from gdsfactory._jax import xp
 from gdsfactory.component import Component
 from gdsfactory.typings import LayerSpec
 
@@ -76,7 +75,7 @@ def h_junction(
 
     # Reservoir circles at endpoints
     if reservoir_radius > 0:
-        angles = np.linspace(0, 2 * np.pi, n_reservoir_points, endpoint=False)
+        angles = xp.linspace(0, 2 * xp.pi, n_reservoir_points, endpoint=False)
         for cx, cy in [
             (-half_main, 0),
             (half_main, 0),
@@ -84,7 +83,7 @@ def h_junction(
             (0, -mhw - branch_length),
         ]:
             pts = [
-                (cx + reservoir_radius * np.cos(a), cy + reservoir_radius * np.sin(a))
+                (cx + reservoir_radius * xp.cos(a), cy + reservoir_radius * xp.sin(a))
                 for a in angles
             ]
             c.add_polygon(pts, layer=layer)

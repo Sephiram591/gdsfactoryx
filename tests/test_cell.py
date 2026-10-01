@@ -42,29 +42,22 @@ def test_schematic_cell() -> None:
             cross_section="strip", width=1.1
         )
 
-    assert gf.kcl.layout.cell("my_straight_W1p1_L5") is None
-    factory = gf.kcl.factories["my_straight"]
+    factory = gf._cell.factories["my_straight"]
     schematic = factory.get_schematic(width=1.1, length=5)
     assert schematic == my_straight_schematic(width=1.1, length=5)
-    assert gf.kcl.layout.cell("my_straight_W1p1_L5") is None
     c = my_straight(1.1, 5)
-    # bug in kfactory
-    # assert schematic == c.schematic
-    assert c.cell_index() == gf.kcl.layout.cell("my_straight_W1p1_L5").cell_index()
+    assert c.name == "my_straight_W1p1_L5"
 
 
 def test_clear_cache_empties_factory_caches() -> None:
-    """clear_cache drops the layout cells and every factory's memoized result."""
+    """clear_cache drops every factory's memoized result."""
     gf.components.straight(length=13.7)
     gf.components.straight_all_angle(length=13.7)
-    assert any(f.cache for f in gf.kcl.factories.all())
-    assert any(f.cache for f in gf.kcl.virtual_factories.all())
+    assert gf._cell.cached_cells()
 
     gf.clear_cache()
 
-    assert len(gf.kcl.kcells) == 0
-    assert not any(f.cache for f in gf.kcl.factories.all())
-    assert not any(f.cache for f in gf.kcl.virtual_factories.all())
+    assert not gf._cell.cached_cells()
 
 
 if __name__ == "__main__":
