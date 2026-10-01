@@ -5,6 +5,7 @@ __all__ = ["spiral_archimedes"]
 import numpy as np
 
 import gdsfactory as gf
+from gdsfactory._jax import to_float, to_numpy, xp
 from gdsfactory.component import Component
 from gdsfactory.typings import LayerSpec
 
@@ -30,8 +31,8 @@ def spiral_archimedes(
     growth_rate = (separation + width) / (2 * np.pi)
 
     theta_max = n_turns * 2 * np.pi
-    n_points = int(np.ceil(theta_max / np.radians(angle_resolution))) + 1
-    theta = np.linspace(0, theta_max, n_points)
+    n_points = int(np.ceil(theta_max / np.radians(to_float(angle_resolution)))) + 1
+    theta = xp.linspace(0, theta_max, n_points)
 
     r_center = growth_rate * theta
     hw = width / 2.0
@@ -40,17 +41,17 @@ def spiral_archimedes(
     # dr/dtheta = growth_rate, so tangent in Cartesian:
     #   tx = dr/dtheta * cos(theta) - r * sin(theta)
     #   ty = dr/dtheta * sin(theta) + r * cos(theta)
-    dr = np.full_like(theta, growth_rate)
-    tx = dr * np.cos(theta) - r_center * np.sin(theta)
-    ty = dr * np.sin(theta) + r_center * np.cos(theta)
-    t_len = np.sqrt(tx**2 + ty**2)
-    t_len = np.where(t_len == 0, 1.0, t_len)
+    dr = xp.full_like(theta, growth_rate)
+    tx = dr * xp.cos(theta) - r_center * xp.sin(theta)
+    ty = dr * xp.sin(theta) + r_center * xp.cos(theta)
+    t_len = xp.sqrt(tx**2 + ty**2)
+    t_len = xp.where(t_len == 0, 1.0, t_len)
     # Unit normal (perpendicular to tangent, pointing inward).
     nx = -ty / t_len
     ny = tx / t_len
 
-    x_center = r_center * np.cos(theta)
-    y_center = r_center * np.sin(theta)
+    x_center = r_center * xp.cos(theta)
+    y_center = r_center * xp.sin(theta)
 
     outer_x = x_center - nx * hw
     outer_y = y_center - ny * hw
@@ -58,10 +59,10 @@ def spiral_archimedes(
     inner_y = y_center + ny * hw
 
     # Find the point of the inner edge which has the minimum distance from the start of the outer edge.
-    distances_from_edge_point = np.sqrt(
+    distances_from_edge_point = xp.sqrt(
         (inner_x - outer_x[0]) ** 2 + (inner_y - outer_y[0]) ** 2
     )
-    min_to_edge_id = np.argmin(distances_from_edge_point)
+    min_to_edge_id = int(np.argmin(to_numpy(distances_from_edge_point)))
     # For a smooth spiral, the point of interest is the start of the inner edge, with distance = width.
     # If that is not the case, then end the spiral at the point which violates its smoothness.
     if min_to_edge_id != 0:
@@ -71,9 +72,9 @@ def spiral_archimedes(
         inner_y = inner_y[min_to_edge_id:]
 
     # Close the polygon: outer path forward, inner path reversed.
-    points_x = np.concatenate([outer_x, inner_x[::-1]])
-    points_y = np.concatenate([outer_y, inner_y[::-1]])
-    points = np.stack((points_x, points_y), axis=-1)
+    points_x = xp.concatenate([outer_x, inner_x[::-1]])
+    points_y = xp.concatenate([outer_y, inner_y[::-1]])
+    points = xp.stack((points_x, points_y), axis=-1)
 
     c.add_polygon(points, layer=layer)
     return c

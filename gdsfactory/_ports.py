@@ -23,6 +23,7 @@ from gdsfactory._jax import (
     xp,
     maybe_float,
     sin_deg,
+    snap_dbu,
     to_float,
 )
 from gdsfactory.transform import Transform, manhattan_angle
@@ -82,9 +83,9 @@ class Port:
         cross_section: Any = None,
     ) -> None:
         self.name = name
-        self._center = _point(center)
-        self._width = maybe_float(width)
         self._orientation = _angle(orientation)
+        self._center = self._snap_center(_point(center))
+        self._width = snap_dbu(maybe_float(width)) if width is not None else None
         self.layer = _layer_enum(layer)
         self.port_type = port_type
         self.info = PortInfo(info or {})
@@ -94,6 +95,12 @@ class Port:
             self.info["cross_section"] = xs_name
 
     # ------------------------------------------------------------------ props
+    def _snap_center(self, c: Any) -> Any:
+        """Manhattan ports live on the dbu grid (kfactory integer ports)."""
+        if self._orientation is None or manhattan_angle(self._orientation) is not None:
+            return snap_dbu(c)
+        return c
+
     @property
     def center(self) -> tuple[Any, Any]:
         """(x, y) tuple (entries are floats/numpy scalars, or tracers when traced)."""
@@ -108,7 +115,7 @@ class Port:
 
     @center.setter
     def center(self, value: Any) -> None:
-        self._center = _point(value)
+        self._center = self._snap_center(_point(value))
 
     @property
     def x(self) -> Any:
@@ -116,7 +123,7 @@ class Port:
 
     @x.setter
     def x(self, value: Any) -> None:
-        self._center = xp.stack([asarray(value), self._center[1]])
+        self._center = self._snap_center(xp.stack([asarray(value), self._center[1]]))
 
     @property
     def y(self) -> Any:
@@ -124,7 +131,7 @@ class Port:
 
     @y.setter
     def y(self, value: Any) -> None:
-        self._center = xp.stack([self._center[0], asarray(value)])
+        self._center = self._snap_center(xp.stack([self._center[0], asarray(value)]))
 
     @property
     def orientation(self) -> Any:
@@ -140,7 +147,7 @@ class Port:
 
     @width.setter
     def width(self, value: Any) -> None:
-        self._width = maybe_float(value)
+        self._width = snap_dbu(maybe_float(value))
 
     @property
     def iwidth(self) -> int:
@@ -285,8 +292,8 @@ class Port:
         return p
 
     def apply_transform(self, t: Transform) -> Port:
-        self._center = t.apply(self._center)
         self._orientation = t.apply_angle(self._orientation)
+        self._center = self._snap_center(t.apply(self._center))
         if not isinstance(t.magnification, int | float) or t.magnification != 1:
             self._width = self._width * t.magnification
         self.mirror = self.mirror != t.mirror
@@ -298,7 +305,7 @@ class Port:
     def move(self, *args: Any) -> Port:
         """Moves in place: move((dx, dy)) or move(dx, dy) or move(origin, dest)."""
         dx, dy = _move_args(args)
-        self._center = self._center + xp.stack([asarray(dx), asarray(dy)])
+        self._center = self._snap_center(self._center + xp.stack([asarray(dx), asarray(dy)]))
         return self
 
     def moved(self, *args: Any) -> Port:
@@ -309,8 +316,8 @@ class Port:
     def rotate(self, angle: Any, center: Any = None) -> Port:
         c = self._center if center is None else asarray(center)
         t = Transform(0.0, 0.0, angle)
-        self._center = t.apply(self._center - c) + c
         self._orientation = t.apply_angle(self._orientation)
+        self._center = self._snap_center(t.apply(self._center - c) + c)
         return self
 
     def flip(self) -> Port:

@@ -495,7 +495,7 @@ def route_bundle_kf(
             ends=kwargs["ends"],
             waypoints=wps,
             route_width=kwargs["route_width"],
-            bboxes=[kdb.DBox(*map(to_float, b)) if not isinstance(b, kdb.DBox) else b for b in (bboxes or [])],
+            bboxes=[_dbox(b) for b in (bboxes or [])],
             on_collision=None if probe else on_collision,
             on_placer_error=None if probe else on_placer_error,
             collision_check_layers=None
@@ -678,6 +678,23 @@ def to_kf_port(p: Port) -> Any:
     cell = m.new_cell("port")
     dp = m.port(cell, p)
     return m.kcl[cell.cell_index()].ports[dp.name]
+
+
+def _dbox(b: Any) -> Any:
+    """kdb.DBox from a DBox, Box, (l, b, r, t) tuple or ((l, b), (r, t))."""
+    import klayout.db as kdb
+
+    if isinstance(b, kdb.DBox):
+        return b
+    if isinstance(b, kdb.Box):
+        return b.to_dtype(DBU)
+    if all(hasattr(b, a) for a in ("left", "bottom", "right", "top")):
+        return kdb.DBox(to_float(b.left), to_float(b.bottom), to_float(b.right), to_float(b.top))
+    vals = list(b)
+    if len(vals) == 2:
+        (x0, y0), (x1, y1) = vals
+        return kdb.DBox(to_float(x0), to_float(y0), to_float(x1), to_float(y1))
+    return kdb.DBox(*map(to_float, vals))
 
 
 def _is_number(v: Any) -> bool:

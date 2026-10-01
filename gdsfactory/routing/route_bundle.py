@@ -119,6 +119,11 @@ def _ensure_manhattan_waypoints(
     Returns:
         list of waypoints with corner points inserted where needed.
     """
+    as_dpoints = bool(waypoints) and isinstance(waypoints[0], gf.kdb.DPoint)
+    if as_dpoints:
+        waypoints = [(p.x, p.y) for p in waypoints]  # type: ignore[union-attr]
+        result_ = _ensure_manhattan_waypoints(waypoints, start_port)
+        return [gf.kdb.DPoint(to_float(x), to_float(y)) for x, y in result_]  # type: ignore[misc]
     if len(waypoints) < 2:
         return list(waypoints)
 

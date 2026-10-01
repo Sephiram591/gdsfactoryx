@@ -26,6 +26,7 @@ ComponentParams = ParamSpec("ComponentParams")
 
 MAX_NAME_LENGTH = 99
 _CACHES: list[dict[Any, Any]] = []
+_BY_NAME: dict[str, Any] = {}
 factories: dict[str, Callable[..., Any]] = {}
 """Registry of cell functions (name -> decorated function)."""
 
@@ -79,6 +80,12 @@ def get_cell_name(cell_type: str, max_cellname_length: int | None = None, **kwar
 
     params = {k: _concrete(v) for k, v in kwargs.items()}
     return _kf_get_cell_name(cell_type, max_cellname_length=max_cellname_length, **params)
+
+
+def _layout_cache_enabled() -> bool:
+    from gdsfactory.config import CONF
+
+    return bool(getattr(CONF, "cell_layout_cache", False))
 
 
 def _metadata(value: Any) -> Any:
@@ -141,6 +148,7 @@ def _freeze(value: Any) -> Any:
 def clear_cache() -> None:
     for c in _CACHES:
         c.clear()
+    _BY_NAME.clear()
 
 
 def cached_cells() -> list[Any]:
@@ -205,6 +213,15 @@ def cell(
                     key = None
                 if key is not None and key in _cache:
                     return cast("Component", _cache[key])
+                if set_name and _layout_cache_enabled():
+                    # like upstream (CONF.cell_layout_cache): reuse an existing cell
+                    # with the same name (e.g. a function passed by its name)
+                    name = get_cell_name(_basename or func.__name__, **params)
+                    existing = _BY_NAME.get(name)
+                    if existing is not None:
+                        if key is not None:
+                            _cache[key] = existing
+                        return cast("Component", existing)
 
             c = func(*bound.args, **bound.kwargs)
             if not isinstance(c, Component):
@@ -236,6 +253,8 @@ def cell(
             c.locked = True
             if key is not None:
                 _cache[key] = c
+                if set_name:
+                    _BY_NAME.setdefault(c.name, c)
             return c
 
         wrapper.is_gf_cell = True  # type: ignore[attr-defined]

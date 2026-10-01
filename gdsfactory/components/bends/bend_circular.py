@@ -6,8 +6,10 @@ import warnings
 from functools import partial
 from typing import Literal, overload
 
+import numpy as np
+
 import gdsfactory as gf
-from gdsfactory._jax import maybe_float, to_float
+from gdsfactory._jax import maybe_float, to_float, to_numpy
 from gdsfactory.component import Component, ComponentAllAngle
 from gdsfactory.path import arc
 from gdsfactory.snap import snap_to_grid
@@ -107,9 +109,9 @@ def _bend_circular(
         min_bend_radius=radius,
     )
     for prt in c.ports:  # positive radius for outward left turning
-        if all(prt.center == p.points[0]):
+        if np.allclose(to_numpy(prt.center_array), to_numpy(p.points[0])):
             prt.info["radius"] = -radius if angle > 0 else radius
-        elif all(prt.center == p.points[-1]):
+        elif np.allclose(to_numpy(prt.center_array), to_numpy(p.points[-1])):
             prt.info["radius"] = radius if angle > 0 else -radius
     return c
 

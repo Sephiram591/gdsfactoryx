@@ -5,6 +5,7 @@ __all__ = ["ring_single_dut"]
 from typing import Any
 
 import gdsfactory as gf
+from gdsfactory._jax import to_float
 from gdsfactory.component import Component
 from gdsfactory.snap import assert_on_2x_grid
 from gdsfactory.typings import ComponentSpec
@@ -56,7 +57,7 @@ def ring_single_dut(
           length_x
     """
     component = gf.get_component(component)
-    assert_on_2x_grid(gap)
+    assert_on_2x_grid(to_float(gap))
 
     coupler = gf.get_component(
         coupler,

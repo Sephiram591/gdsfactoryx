@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 
 import gdsfactory as gf
+from gdsfactory._jax import xp
 from gdsfactory.cross_section import Section, rib
 from gdsfactory.typings import (
     ComponentSpec,
@@ -101,7 +102,7 @@ def ring_double_pn(
 
     th_waveguide_path = gf.Path()
     th_waveguide_path.append(
-        gf.path.straight(length=2 * radius * np.sin(np.pi / 360 * undoping_angle))
+        gf.path.straight(length=2 * radius * xp.sin(np.pi / 360 * undoping_angle))
     )
     th_waveguide = c << th_waveguide_path.extrude(cross_section=cross_section_)
     th_waveguide.x = 0
@@ -202,7 +203,7 @@ def ring_double_pn(
     if with_drop:
         drop_waveguide_path = gf.Path()
         drop_waveguide_path.append(
-            gf.path.straight(length=2 * radius * np.sin(np.pi / 360 * undoping_angle))
+            gf.path.straight(length=2 * radius * xp.sin(np.pi / 360 * undoping_angle))
         )
         drop_waveguide = c << drop_waveguide_path.extrude(cross_section=cross_section_)
         drop_waveguide.x = 0
@@ -254,7 +255,7 @@ def ring_single_pn(
     pn_xs = gf.get_cross_section(pn_cross_section)
     bus_waveguide_path = gf.Path()
     bus_waveguide_path.append(
-        gf.path.straight(length=2 * radius * np.sin(np.pi / 360 * undoping_angle))
+        gf.path.straight(length=2 * radius * xp.sin(np.pi / 360 * undoping_angle))
     )
     bus_waveguide = c << bus_waveguide_path.extrude(cross_section=cross_section)
     bus_waveguide.x = 0

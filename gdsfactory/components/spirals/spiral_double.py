@@ -3,6 +3,7 @@ from __future__ import annotations
 __all__ = ["spiral_double"]
 
 import gdsfactory as gf
+from gdsfactory._jax import to_float
 from gdsfactory.path import spiral_archimedean
 from gdsfactory.typings import ComponentSpec, CrossSectionSpec
 
@@ -56,6 +57,6 @@ def spiral_double(
 
     component.add_port("o1", port=spiral1.ports["o2"])
     component.add_port("o2", port=spiral2.ports["o2"])
-    component.info["length"] = float(path.length() + bend.info["length"]) * 2
+    component.info["length"] = to_float(path.length() + bend.info["length"]) * 2
     component.flatten()
     return component

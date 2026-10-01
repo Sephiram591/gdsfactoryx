@@ -245,6 +245,32 @@ def round_st(x: Any, decimals: int = 0, step: float | None = None) -> Any:
     return xa + jax.lax.stop_gradient(rounded - xa)
 
 
+DBU = 1e-3
+
+
+def snap_dbu(x: Any) -> Any:
+    """Snaps to the 1 nm grid like KLayout (round half away from zero).
+
+    Straight-through for traced values (value snapped, gradient identity).
+    Disabled when ``gdsfactory.snap.SNAP_ENABLED`` is False.
+    """
+    from gdsfactory import snap
+
+    if not snap.SNAP_ENABLED:
+        return x
+    if _is_jax(x):
+        xs = jax.lax.stop_gradient(x) / DBU
+        snapped = jnp.sign(xs) * jnp.floor(jnp.abs(xs) + 0.5) * DBU
+        return x + jax.lax.stop_gradient(snapped - x)
+    if isinstance(x, int | float):
+        v = x / DBU
+        return float(np.sign(v) * np.floor(abs(v) + 0.5) * DBU)
+    arr = np.asarray(x, dtype=np.float64) / DBU
+    out = np.sign(arr) * np.floor(np.abs(arr) + 0.5) * DBU
+    out.flags.writeable = False
+    return out
+
+
 def stop_gradient(x: Any) -> Any:
     """jax.lax.stop_gradient that leaves numpy/python values untouched."""
     return jax.lax.stop_gradient(x) if _is_jax(x) else x

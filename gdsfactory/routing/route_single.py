@@ -230,7 +230,10 @@ def route_single(
                     f" points (um): {[(to_float(a), to_float(b)) for a, b in pts]}"
                 ) from e
             if on_placer_error == "show_error":
-                raise
+                _show_placer_error(component, p1, p2, pts, route_width or p1.width, e)
+                raise kf.routing.generic.PlacerError(
+                    f"Error while trying to place route from {p1.name} to {p2.name}"
+                ) from e
             if on_placer_error == "warning":
                 gf.logger.error(f"Error in route_single: {e}")
                 warnings.warn(f"Routing failed: {e}", stacklevel=2)
@@ -286,6 +289,26 @@ def route_single(
                 place_layer=gf.CONF.layer_error_path,
             )
             return route[0]
+
+
+def _show_placer_error(
+    component: Component, p1: Port, p2: Port, pts: Sequence[Any], width: Any, e: Exception
+) -> None:
+    """Shows the failed route in KLayout's marker database (like upstream)."""
+    import klayout.db as kdb
+
+    db = kf.rdb.ReportDatabase("Route Placing Errors")
+    cell = db.create_cell(component.name or "")
+    cat = db.create_category(f"{p1.name} - {p2.name}")
+    it = db.create_item(cell=cell, category=cat)
+    pts_um = [(to_float(a), to_float(b)) for a, b in pts]
+    it.add_value(
+        f"Error while trying to place route from {p1.name} to {p2.name} at points (um): {pts_um}"
+    )
+    it.add_value(f"Exception: {e}")
+    path = kdb.DPath([kdb.DPoint(x, y) for x, y in pts_um], to_float(width))
+    it.add_value(path.polygon())
+    component.show(lyrdb=db)
 
 
 def _error_path(

@@ -10,6 +10,7 @@ __all__ = [
 import numpy as np
 
 import gdsfactory as gf
+from gdsfactory._jax import is_tracer, stop_gradient, to_float, xp
 from gdsfactory.component import Component
 from gdsfactory.routing.route_bundle import route_bundle
 from gdsfactory.typings import (
@@ -73,7 +74,7 @@ def spiral_racetrack(
             _bend = gf.get_component(
                 bend,
                 angle=180,
-                radius=min_radius + np.sum(spacings[:i]),
+                radius=min_radius + xp.sum(xp.asarray(spacings[:i])),
                 cross_section=cross_section,
             )
             bend_ref = c << _bend
@@ -95,7 +96,7 @@ def spiral_racetrack(
         bend_ref = c << gf.get_component(
             bend,
             angle=90,
-            radius=min_radius + np.sum(spacings),
+            radius=min_radius + xp.sum(xp.asarray(spacings)),
             cross_section=cross_section,
         )
         bend_ref.connect("o1", ports[1])
@@ -248,6 +249,10 @@ def _req_straight_len(
     xs = gf.get_cross_section(cross_section)
     min_radius = min_radius or xs.radius
     assert min_radius
+    # the sweep below is discrete: run it on concrete values
+    min_radius = to_float(min_radius)
+    in_out_port_spacing = to_float(in_out_port_spacing)
+    spacings = tuple(to_float(s) for s in spacings)
 
     # "Brute force" approach - sweep length and save total length
     lens: list[float] = []
@@ -314,7 +319,14 @@ def _req_straight_len(
 
     # get the required spacing to achieve the required length (interpolate)
     f = interp1d(lens, straight_lengths)
-    return float(f(length))
+    length_ = to_float(length)
+    straight_length = float(f(length_))
+    if is_tracer(length):
+        # piecewise-linear interpolation: d(straight_length)/d(length) is the local slope
+        d = 1e-6
+        slope = float((f(length_ + d) - f(length_ - d)) / (2 * d))
+        return straight_length + (length - stop_gradient(length)) * slope  # type: ignore[no-any-return]
+    return straight_length
 
 
 @gf.cell_with_module_name(schematic_function=spiral_schematic, tags=["spirals"])

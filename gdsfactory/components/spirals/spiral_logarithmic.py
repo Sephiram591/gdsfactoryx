@@ -5,6 +5,7 @@ __all__ = ["spiral_logarithmic"]
 import numpy as np
 
 import gdsfactory as gf
+from gdsfactory._jax import to_float, xp
 from gdsfactory.component import Component
 from gdsfactory.typings import LayerSpec
 
@@ -31,32 +32,32 @@ def spiral_logarithmic(
     c = Component()
 
     theta_max = n_turns * 2 * np.pi
-    n_points = int(np.ceil(theta_max / np.radians(angle_resolution))) + 1
-    theta = np.linspace(0, theta_max, n_points)
+    n_points = int(np.ceil(theta_max / np.radians(to_float(angle_resolution)))) + 1
+    theta = xp.linspace(0, theta_max, n_points)
 
-    r_center = a * np.exp(b * theta)
+    r_center = a * xp.exp(b * theta)
     hw = width / 2.0
 
     # Tangent direction: dr/dtheta = a * b * exp(b * theta) = b * r
     dr = b * r_center
-    tx = dr * np.cos(theta) - r_center * np.sin(theta)
-    ty = dr * np.sin(theta) + r_center * np.cos(theta)
-    t_len = np.sqrt(tx**2 + ty**2)
-    t_len = np.where(t_len == 0, 1.0, t_len)
+    tx = dr * xp.cos(theta) - r_center * xp.sin(theta)
+    ty = dr * xp.sin(theta) + r_center * xp.cos(theta)
+    t_len = xp.sqrt(tx**2 + ty**2)
+    t_len = xp.where(t_len == 0, 1.0, t_len)
     nx = -ty / t_len
     ny = tx / t_len
 
-    x_center = r_center * np.cos(theta)
-    y_center = r_center * np.sin(theta)
+    x_center = r_center * xp.cos(theta)
+    y_center = r_center * xp.sin(theta)
 
     outer_x = x_center + nx * hw
     outer_y = y_center + ny * hw
     inner_x = x_center - nx * hw
     inner_y = y_center - ny * hw
 
-    points_x = np.concatenate([outer_x, inner_x[::-1]])
-    points_y = np.concatenate([outer_y, inner_y[::-1]])
-    points = np.stack((points_x, points_y), axis=-1)
+    points_x = xp.concatenate([outer_x, inner_x[::-1]])
+    points_y = xp.concatenate([outer_y, inner_y[::-1]])
+    points = xp.stack((points_x, points_y), axis=-1)
 
     c.add_polygon(points, layer=layer)
     return c

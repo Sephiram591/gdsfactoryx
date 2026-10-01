@@ -2,9 +2,9 @@ from __future__ import annotations
 
 __all__ = ["spiral_rectangular"]
 
-import numpy as np
 
 import gdsfactory as gf
+from gdsfactory._jax import to_float, xp
 from gdsfactory.component import Component
 from gdsfactory.typings import LayerSpec
 
@@ -64,8 +64,8 @@ def spiral_rectangular(
     for i in range(len(cx) - 1):
         seg_dx = cx[i + 1] - cx[i]
         seg_dy = cy[i + 1] - cy[i]
-        seg_len = np.sqrt(seg_dx**2 + seg_dy**2)
-        if seg_len == 0:
+        seg_len = xp.sqrt(seg_dx**2 + seg_dy**2)
+        if to_float(seg_len) == 0:
             continue
         # Normal direction (perpendicular, pointing left of travel).
         nx = -seg_dy / seg_len

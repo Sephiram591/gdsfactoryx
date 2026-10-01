@@ -30,6 +30,7 @@ from gdsfactory._jax import (
     xp,
     maybe_float,
     points_array,
+    snap_dbu,
     stop_gradient,
     to_float,
     to_numpy,
@@ -127,6 +128,23 @@ class Label:
         return f"Label({self.text!r}, ({to_float(self.x)}, {to_float(self.y)}), {self.layer})"
 
 
+class Point2(tuple):  # type: ignore[type-arg]
+    """(x, y) tuple with ``.x`` / ``.y`` accessors (like kdb.DPoint)."""
+
+    __slots__ = ()
+
+    def __new__(cls, x: Any, y: Any) -> Point2:
+        return super().__new__(cls, (x, y))
+
+    @property
+    def x(self) -> Any:
+        return self[0]
+
+    @property
+    def y(self) -> Any:
+        return self[1]
+
+
 class Box:
     """Differentiable axis-aligned box with KLayout DBox-like accessors."""
 
@@ -151,21 +169,24 @@ class Box:
     def height(self) -> Any:
         return self.top - self.bottom
 
-    def center(self) -> Array:
-        return xp.stack(
-            [asarray((self.left + self.right) / 2), asarray((self.bottom + self.top) / 2)]
-        )
+    def center(self) -> Point2:
+        return Point2((self.left + self.right) / 2, (self.bottom + self.top) / 2)
 
     @property
-    def p1(self) -> Array:
-        return xp.stack([asarray(self.left), asarray(self.bottom)])
+    def p1(self) -> Point2:
+        return Point2(self.left, self.bottom)
 
     @property
-    def p2(self) -> Array:
-        return xp.stack([asarray(self.right), asarray(self.top)])
+    def p2(self) -> Point2:
+        return Point2(self.right, self.top)
 
     def to_array(self) -> Array:
-        return xp.stack([self.p1, self.p2])
+        return xp.stack(
+            [
+                xp.stack([asarray(self.left), asarray(self.bottom)]),
+                xp.stack([asarray(self.right), asarray(self.top)]),
+            ]
+        )
 
     def inside(self, other: Box) -> bool:
         return (
@@ -423,7 +444,8 @@ class ComponentReference(_BBoxMixin):
         x = round(to_float(t.x) * 1000)
         y = round(to_float(t.y) * 1000)
         name = f"{self.cell.name}_{x}_{y}"
-        angle = round(to_float(t.rotation) % 360, 9) % 360
+        # KLayout's own angle (atan2 of the stored sin/cos), like kfactory
+        angle = t.to_klayout().angle
         if angle != 0:
             if float(angle).is_integer():
                 name += f"_A{int(angle)}"
@@ -475,6 +497,17 @@ class ComponentReference(_BBoxMixin):
         return self.nb
 
     # ---------------------------------------------------------- transforms
+    @property
+    def transform(self) -> Transform:
+        return self._transform
+
+    @transform.setter
+    def transform(self, t: Transform) -> None:
+        # like KLayout: instance displacements are stored on the dbu grid
+        self._transform = Transform(
+            snap_dbu(t.x), snap_dbu(t.y), t.rotation, t.mirror, t.magnification
+        )
+
     def _array_transform(self, ia: int = 0, ib: int = 0) -> Transform:
         if ia == 0 and ib == 0:
             return self.transform
@@ -1034,7 +1067,7 @@ class Component(_BBoxMixin):
         for arr in _to_point_arrays(points):
             if arr.shape[0] < 3:
                 continue
-            self.polygons.setdefault(key, []).append(arr)
+            self.polygons.setdefault(key, []).append(snap_dbu(arr))
         return None
 
     def add_polygons(self, polygons: Iterable[Any], layer: LayerSpec) -> None:
@@ -1505,6 +1538,13 @@ class Component(_BBoxMixin):
         keys = sorted({k for k, v in self._flat_polygons().items() if v})
         return [get_layer_tuple(k) for k in keys]
 
+    def begin_shapes_rec(self, layer: Any) -> Any:
+        """KLayout recursive shape iterator over an export of this component (concrete)."""
+        from gdsfactory.pdk import get_layer_info
+
+        kc = self.to_kfactory()
+        return kc.kdb_cell.begin_shapes_rec(kc.kcl.layout.layer(get_layer_info(layer)))
+
     def get_region(self, layer: LayerSpec, merge: bool = False, smooth: float | None = None) -> kdb.Region:
         from gdsfactory import klayout_bridge as kb
 
@@ -1520,7 +1560,7 @@ class Component(_BBoxMixin):
     def flatten(self, merge: bool = False) -> Self:
         """Flattens all references into this component (in place)."""
         self._check_unlocked()
-        polys = self._flat_polygons()
+        polys = {k: [snap_dbu(p) for p in v] for k, v in self._flat_polygons().items()}
         self.labels = self._flat_labels()
         self.insts.clear()
         self.polygons = polys
@@ -2241,7 +2281,7 @@ class _ShapesProxy:
             self._c._paths.setdefault(self._layer, []).append((pts, dpath.width))
         for arr in _to_point_arrays(shape):
             if arr.shape[0] >= 3:
-                self._c.polygons.setdefault(self._layer, []).append(arr)
+                self._c.polygons.setdefault(self._layer, []).append(snap_dbu(arr))
         return shape
 
     def each(self, *args: Any) -> Iterator[Any]:

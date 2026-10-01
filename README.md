@@ -11,6 +11,19 @@
 
 GDSFactory is a Python library for designing chips (Photonics, Analog, Quantum, MEMS), PCBs, and 3D-printable objects. We aim to make hardware design accessible, intuitive, and fun—empowering everyone to build the future.
 
+> **gdsfactoryx** is a fork of GDSFactory with a differentiable [JAX](https://jax.readthedocs.io) geometry backend:
+> polygons, ports, references and routes are float64 JAX-compatible arrays, so any scalar computed from a layout can be
+> differentiated with `jax.grad` with respect to the parameters of the cell functions. KLayout is kept for GDS I/O,
+> viewing and boolean operations. See [docs/differentiable.md](docs/differentiable.md).
+>
+> ```python
+> import jax
+> import gdsfactory as gf
+>
+> gf.gpdk.PDK.activate()
+> jax.grad(lambda r: gf.components.ring_single(radius=r).dxsize)(10.0)
+> ```
+
 As input you write python code, as an output GDSFactory creates CAD files (GDS, OASIS, STL, GERBER).
 
 ![cad](https://raw.githubusercontent.com/gdsfactory/gdsfactory/main/docs/images/cad.png)
