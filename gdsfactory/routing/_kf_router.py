@@ -1,26 +1,20 @@
 """Differentiable manhattan routing on top of kfactory's routers.
 
-kfactory's routers (``route_smart`` + placers) decide the *topology* of the
-routes (which corners, where the bundle bends, tapers, path length matching
-loops, ...). Those decisions are discrete, so they are made on concrete values
-in a private "mirror" KLayout layout. The placed instances are then rebuilt as
+kfactory's routers (``route_smart`` + placers) decide the routes (corners,
+bundling, tapers, path length matching loops, ...) on concrete values in a
+private "mirror" KLayout layout, and their placed instances are rebuilt as
 references of the corresponding (possibly traced) gdsfactoryx Components.
 
 Gradients:
-    The forward values are exactly kfactory's. Derivative information is added
-    on top with a differentiable model of the placement:
-
-    1. the backbone corners are linearised with respect to every traced input
-       (port positions, separation, start/end straight lengths, bend radius,
-       waypoints) by re-running the router (without placement) on perturbed
-       inputs,
-    2. the instances of every route are re-chained from the start port to the
-       end port with their traced geometry, the straights absorbing the change
-       of segment length.
-
-    The result is a route whose straight lengths, element positions and total
-    length are differentiable, consistent with finite differences of the router
-    as long as the routing topology does not change.
+    When any input carries a JAX tracer, the backbones are recomputed with
+    :mod:`gdsfactory.routing._traced_manhattan`, a port of kfactory's router on
+    dual numbers: the routing decisions are kfactory's (checked to the dbu),
+    and every corner coordinate is a traced function of the inputs (port
+    positions, bend radius, separation, start/end straights, waypoints and
+    port bounding boxes). The instances of every route are then re-chained
+    with their traced geometry, the straights absorbing the change of segment
+    length. Gradients are exact within a routing topology; they are undefined
+    where the router switches topology.
 """
 
 from __future__ import annotations
@@ -44,6 +38,9 @@ if TYPE_CHECKING:
     from gdsfactory.component import Component, ComponentReference
 
 DBU = 1e-3
+
+# Debug switch: run (and check against kfactory) the traced router on every route.
+_CHECK_TRACED_ROUTER = bool(__import__("os").environ.get("GDSFACTORYX_CHECK_TRACED_ROUTER"))
 
 
 def _sg(x: Any) -> Any:
@@ -196,12 +193,13 @@ class _Record:
 
 
 class _Hook:
-    """Wraps kfactory's generic route_bundle (records backbones, enables probing)."""
+    """Wraps kfactory's generic route_bundle to record the placed backbones."""
 
-    def __init__(self, probe: bool = False, radius_delta_dbu: float = 0.0) -> None:
-        self.probe = probe
-        self.radius_delta_dbu = radius_delta_dbu
+    def __init__(self) -> None:
         self.records: list[_Record] = []
+        self.start_ports: list[Any] = []
+        self.end_ports: list[Any] = []
+        self.bend90_cell: Any = None
 
     @contextlib.contextmanager
     def installed(self) -> Iterator[_Hook]:
@@ -216,22 +214,9 @@ class _Hook:
 
             def recording_placer(c: Any, p1: Any, p2: Any, pts: Any, **kw: Any) -> Any:
                 hook.records.append(_Record(list(pts), p1, p2))
-                if hook.probe:
-                    from kfactory.routing.generic import ManhattanRoute as KFRoute
-
-                    return KFRoute(backbone=list(pts), start_port=p1, end_port=p2)
                 return placer(c, p1, p2, pts, **kw)
 
             kwargs["placer_function"] = recording_placer
-            if hook.probe:
-                kwargs["on_collision"] = None
-                kwargs["on_placer_error"] = None
-                kwargs["constraints"] = kwargs.get("constraints")
-            if hook.radius_delta_dbu:
-                rk = dict(kwargs.get("routing_kwargs") or {})
-                if rk.get("bend90_radius"):
-                    rk["bend90_radius"] = int(round(rk["bend90_radius"] + hook.radius_delta_dbu))
-                kwargs["routing_kwargs"] = rk
             return originals[0](*args, **kwargs)
 
         kfo.route_bundle_generic = wrapped
@@ -240,82 +225,6 @@ class _Hook:
             yield self
         finally:
             kfo.route_bundle_generic, kfe.route_bundle_generic = originals
-
-
-# ---------------------------------------------------------------------------
-# Inputs that may carry derivatives
-# ---------------------------------------------------------------------------
-@dataclass
-class TracedInput:
-    """A scalar input of the router that may carry a derivative."""
-
-    value: Any  # traced jax scalar
-    apply: Callable[[dict[str, Any], float], None]  # mutate concrete kwargs by +delta
-    kind: str = "generic"  # "radius" handled through the hook
-
-
-def _corner_jacobian(
-    run_probe: Callable[[dict[str, Any], float], list[Any] | None],
-    base_kwargs: dict[str, Any],
-    base_backbones: list[npt_array],
-    inputs: list[TracedInput],
-    h: float = 0.2,
-) -> list[np.ndarray]:
-    """d(backbone points)/d(input) for every input: list of (n_routes, ...) arrays.
-
-    Returns for each input a list (per route) of (N_k, 2) arrays (um/um).
-    """
-    jac: list[list[np.ndarray]] = []
-    for inp in inputs:
-        res = []
-        for sign in (+1, -1):
-            kwargs = _copy_kwargs(base_kwargs)
-            radius_delta = 0.0
-            if inp.kind == "radius":
-                radius_delta = sign * h
-            else:
-                inp.apply(kwargs, sign * h)
-            bbs = run_probe(kwargs, radius_delta)
-            res.append(bbs)
-        plus, minus = res
-        per_route = []
-        for i, base in enumerate(base_backbones):
-            ok = (
-                plus is not None
-                and minus is not None
-                and len(plus) == len(base_backbones)
-                and len(minus) == len(base_backbones)
-                and plus[i].shape == base.shape
-                and minus[i].shape == base.shape
-            )
-            if not ok:
-                per_route.append(np.zeros_like(base))
-                continue
-            d_plus = (plus[i] - base) / h
-            d_minus = (base - minus[i]) / h
-            d = 0.5 * (d_plus + d_minus)
-            # router coordinates are piecewise affine with small rational slopes
-            snapped = np.round(d * 2) / 2
-            d = np.where(np.abs(d - snapped) < 0.02, snapped, d)
-            per_route.append(d)
-        jac.append(per_route)
-    return jac
-
-
-npt_array = np.ndarray
-
-
-def _copy_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
-    out = dict(kwargs)
-    for k in ("start_ports", "end_ports"):
-        if k in out:
-            out[k] = [dict(p) for p in out[k]]
-    if out.get("waypoints") is not None:
-        out["waypoints"] = [list(p) for p in out["waypoints"]]
-    for k in ("starts", "ends"):
-        if isinstance(out.get(k), list):
-            out[k] = list(out[k])
-    return out
 
 
 # ---------------------------------------------------------------------------
@@ -410,53 +319,13 @@ def route_bundle_kf(
         "route_width": num(route_width),
     }
 
-    inputs: list[TracedInput] = []
-
-    def add_port_inputs(key: str, plist: list[Port]) -> None:
-        for i, p in enumerate(plist):
-            for axis in ("x", "y"):
-                v = getattr(p, axis)
-                if is_tracer(v):
-
-                    def ap(kw: dict[str, Any], d: float, key: str = key, i: int = i, axis: str = axis) -> None:
-                        kw[key][i][axis] += d
-
-                    inputs.append(TracedInput(v, ap))
-
-    add_port_inputs("start_ports", ports1)
-    add_port_inputs("end_ports", ports2)
-    if is_tracer(separation):
-
-        def ap_sep(kw: dict[str, Any], d: float) -> None:
-            kw["separation"] += d
-
-        inputs.append(TracedInput(separation, ap_sep))
-    for key, val in (("starts", starts), ("ends", ends)):
-        if is_tracer(val):
-
-            def ap_se(kw: dict[str, Any], d: float, key: str = key) -> None:
-                kw[key] += d
-
-            inputs.append(TracedInput(val, ap_se))
-        elif isinstance(val, list | tuple):
-            for i, v in enumerate(val):
-                if is_tracer(v):
-
-                    def ap_sei(kw: dict[str, Any], d: float, key: str = key, i: int = i) -> None:
-                        kw[key][i] += d
-
-                    inputs.append(TracedInput(v, ap_sei))
-    if waypoints is not None:
-        for i, p in enumerate(waypoints):
-            for j in range(2):
-                if is_tracer(p[j]):
-
-                    def ap_wp(kw: dict[str, Any], d: float, i: int = i, j: int = j) -> None:
-                        kw["waypoints"][i][j] += d
-
-                    inputs.append(TracedInput(p[j], ap_wp))
-    if radius is not None and is_tracer(radius):
-        inputs.append(TracedInput(radius, lambda kw, d: None, kind="radius"))
+    traced = (
+        _CHECK_TRACED_ROUTER
+        or any(_port_traced(p) for p in (*ports1, *ports2))
+        or _has_tracers_any(separation, starts, ends, waypoints, route_width)
+        or any(isinstance(b, PortBox) and b.traced for b in (bboxes or []))
+        or _has_traced_geometry(bend90, taper)
+    )
 
     # --------------------------------------------------- concrete components
     bend90_concrete = _concrete_component(bend90) if bend90 is not None else None
@@ -472,9 +341,9 @@ def route_bundle_kf(
         straight_cells[kc.cell_index()] = (width, length)
         return kc
 
-    def run(kwargs: dict[str, Any], probe: bool, radius_delta: float = 0.0) -> tuple[Any, _Hook, Any]:
+    def run(kwargs: dict[str, Any]) -> tuple[Any, _Hook, Any]:
         cell = m.new_cell()
-        if obstacles is not None and not probe and on_collision is not None:
+        if obstacles is not None and on_collision is not None:
             obs = m.export(obstacles)
             cell.create_inst(obs)
         sp = [
@@ -488,18 +357,20 @@ def route_bundle_kf(
         wps = None
         if kwargs["waypoints"] is not None:
             wps = [kdb.DPoint(x, y) for x, y in kwargs["waypoints"]]
-        hook = _Hook(probe=probe, radius_delta_dbu=radius_delta / DBU)
+        hook = _Hook()
+        hook.start_ports = sp
+        hook.end_ports = ep
         common = dict(
             separation=kwargs["separation"],
             starts=kwargs["starts"],
             ends=kwargs["ends"],
             waypoints=wps,
             route_width=kwargs["route_width"],
-            bboxes=[_dbox(b) for b in (bboxes or [])],
-            on_collision=None if probe else on_collision,
-            on_placer_error=None if probe else on_placer_error,
+            bboxes=[_dbox(b.dbox if isinstance(b, PortBox) else b) for b in (bboxes or [])],
+            on_collision=on_collision,
+            on_placer_error=on_placer_error,
             collision_check_layers=None
-            if probe or not collision_check_layers
+            if not collision_check_layers
             else [m.kcl.layout.get_info(m.layer(lay)) for lay in collision_check_layers],
             **kf_kwargs,
         )
@@ -508,10 +379,10 @@ def route_bundle_kf(
                 assert bend90_concrete is not None
                 kb = m.export(bend90_concrete)
                 kt = m.export(taper_concrete) if taper_concrete is not None else None
-                if not probe:
-                    special["bend"] = kb.cell_index()
-                    if kt is not None:
-                        special["taper"] = kt.cell_index()
+                special["bend"] = kb.cell_index()
+                if kt is not None:
+                    special["taper"] = kt.cell_index()
+                hook.bend90_cell = kb
                 sb = None
                 if sbend_factory is not None:
 
@@ -541,38 +412,38 @@ def route_bundle_kf(
                 )
         return routes, hook, cell
 
-    routes_kf, hook, cell = run(base, probe=False)
+    routes_kf, hook, cell = run(base)
 
     # ------------------------------------------------------------ backbones
     base_bbs = [np.asarray([[p.x * DBU, p.y * DBU] for p in r.pts], dtype=float) for r in hook.records]
     route_records = list(hook.records)
-
-    jac: list[list[np.ndarray]] = []
-    if inputs:
-
-        def run_probe(kwargs: dict[str, Any], radius_delta: float) -> list[np.ndarray] | None:
-            try:
-                _, h2, cell2 = run(kwargs, probe=True, radius_delta=radius_delta)
-                cell2.delete()
-            except Exception:
-                return None
-            bbs = [np.asarray([[p.x * DBU, p.y * DBU] for p in r.pts], dtype=float) for r in h2.records]
-            return _match_order(bbs, base_bbs)
-
-        jac = _corner_jacobian(run_probe, base, base_bbs, inputs)
+    traced_bbs: list[Array] | None = None
+    if traced:
+        traced_bbs = _traced_backbones(
+            hook,
+            ports1,
+            ports2,
+            router=router,
+            bend90=bend90,
+            separation=separation,
+            starts=starts,
+            ends=ends,
+            waypoints=waypoints,
+            route_width=route_width,
+            bboxes=bboxes,
+            sbend=sbend_factory is not None,
+            kf_kwargs=kf_kwargs,
+        )
 
     def traced_backbone(i: int) -> Array:
-        pts = asarray(base_bbs[i])
-        for j, inp in enumerate(inputs):
-            pts = pts + asarray(jac[j][i]) * _tangent(inp.value)
-        return pts
+        return traced_bbs[i] if traced_bbs is not None else asarray(base_bbs[i])
 
     # ------------------------------------------------------- rebuild routes
     out: list[ManhattanRoute] = []
     start_lookup = {_key(p): p for p in ports1}
     end_lookup = {_key(p): p for p in ports2}
     for i, (rk, rec) in enumerate(zip(routes_kf, route_records, strict=False)):
-        bb = traced_backbone(i) if inputs else asarray(base_bbs[i])
+        bb = traced_backbone(i)
         p_start = start_lookup.get(_kkey(rec.start)) or ports1[min(i, len(ports1) - 1)]
         p_end = end_lookup.get(_kkey(rec.end)) or ports2[min(i, len(ports2) - 1)]
         if router == "optical":
@@ -588,7 +459,7 @@ def route_bundle_kf(
                 straight_cells=straight_cells,
                 sbend_cells=sbend_cells,
                 sbend_factory=sbend_factory,
-                traced=bool(inputs) or _has_traced_geometry(bend90, taper),
+                traced=traced,
                 route_width=route_width,
                 special=special,
             )
@@ -697,6 +568,158 @@ def _dbox(b: Any) -> Any:
     return kdb.DBox(*map(to_float, vals))
 
 
+class PortBox:
+    """Bounding box of (possibly traced) points, used as a routing obstacle.
+
+    kfactory sees the concrete ``kdb.DBox``; the traced router sees a dual box
+    whose corners carry the derivatives of the points.
+    """
+
+    def __init__(self, points: Sequence[Any]) -> None:
+        import klayout.db as kdb
+
+        self.points = [(p[0], p[1]) for p in points]
+        self.dbox = kdb.DBox()
+        for x, y in self.points:
+            self.dbox += kdb.DPoint(to_float(x), to_float(y))
+
+    @property
+    def traced(self) -> bool:
+        return any(is_tracer(c) for p in self.points for c in p)
+
+    def dual(self) -> Any:
+        from gdsfactory.routing._dual import Box, Point
+        from gdsfactory.routing._traced_router import to_dbu
+
+        b = Box()
+        for x, y in self.points:
+            b += Point(to_dbu(x), to_dbu(y))
+        return b
+
+
+def _port_traced(p: Port) -> bool:
+    return any(is_tracer(v) for v in (p.x, p.y, p.width))
+
+
+def _has_tracers_any(*values: Any) -> bool:
+    from gdsfactory._jax import has_tracers
+
+    return any(has_tracers(v) for v in values if v is not None)
+
+
+def _dual_port(kp: Any, p: Port) -> Any:
+    """Dual Trans of a kfactory port (exact kfactory integers + traced position)."""
+    from gdsfactory.routing._dual import DNum, Trans
+
+    t = kp.trans
+    x = DNum.traced(p.x / DBU if is_tracer(p.x) else None, t.disp.x)
+    y = DNum.traced(p.y / DBU if is_tracer(p.y) else None, t.disp.y)
+    return Trans(t.angle, t.is_mirror(), x, y)
+
+
+def _traced_bend_radius(bend90: Component | None, kb: Any, port_type: str) -> Any:
+    """kfactory's get_radius of the bend, with the derivative of the traced bend."""
+    from kfactory.routing.generic import get_radius
+
+    from gdsfactory.routing._dual import DNum
+
+    if bend90 is None or kb is None:
+        return DNum(0)
+    v = get_radius(kb.ports.filter(port_type=port_type))
+    ports = [p for p in bend90.ports if p.port_type == port_type]
+    if not bend90.has_tracers() or len(ports) != 2:
+        return DNum(v)
+    p1, p2 = ports
+    if manhattan_index(p1) == manhattan_index(p2):
+        r = xp.sqrt(xp.sum((p1.center_array - p2.center_array) ** 2)) / DBU
+    else:
+        c = _virtual_corner(p1, p2)
+        r1 = xp.sqrt(xp.sum((p1.center_array - c) ** 2))
+        r2 = xp.sqrt(xp.sum((p2.center_array - c) ** 2))
+        r = (r1 if to_float(r1) >= to_float(r2) else r2) / DBU
+    return DNum.traced(r, v)
+
+
+def manhattan_index(p: Port) -> int:
+    return round(to_float(p.orientation) / 90) % 4
+
+
+def _traced_backbones(
+    hook: _Hook,
+    ports1: list[Port],
+    ports2: list[Port],
+    *,
+    router: str,
+    bend90: Component | None,
+    separation: Any,
+    starts: Any,
+    ends: Any,
+    waypoints: Any,
+    route_width: Any,
+    bboxes: Any,
+    sbend: bool,
+    kf_kwargs: dict[str, Any],
+) -> list[Array]:
+    """Backbones from the traced port of kfactory's router (checked against kfactory)."""
+    from gdsfactory.routing._dual import Box, DNum, Point
+    from gdsfactory.routing._traced_router import to_dbu, traced_route_bundle
+
+    port_type = kf_kwargs.get("place_port_type", "optical")
+    start_ts = [_dual_port(kp, p) for kp, p in zip(hook.start_ports, ports1, strict=True)]
+    end_ts = [_dual_port(kp, p) for kp, p in zip(hook.end_ports, ports2, strict=True)]
+    widths = [
+        DNum.traced(p.width / DBU if is_tracer(p.width) else None, kp.width)
+        for kp, p in zip(hook.start_ports, ports1, strict=True)
+    ]
+    if router == "optical":
+        bend90_radius = _traced_bend_radius(bend90, getattr(hook, "bend90_cell", None), port_type)
+    else:
+        bend90_radius = DNum(0)
+    wps = None
+    if waypoints is not None:
+        wps = [Point(to_dbu(x), to_dbu(y)) for x, y in waypoints]
+    dual_boxes = []
+    for b in bboxes or []:
+        if isinstance(b, PortBox):
+            dual_boxes.append(b.dual())
+        else:
+            dual_boxes.append(Box(_dbox(b).to_itype(DBU)))
+    routers = traced_route_bundle(
+        start_ts,
+        end_ts,
+        widths,
+        separation=separation,
+        bend90_radius=bend90_radius,
+        starts=starts,
+        ends=ends,
+        route_width=route_width,
+        sort_ports=kf_kwargs.get("sort_ports", False),
+        bbox_routing=kf_kwargs.get("bbox_routing", "minimal"),
+        bboxes=dual_boxes,
+        waypoints=wps,
+        start_angles=kf_kwargs.get("start_angles"),
+        end_angles=kf_kwargs.get("end_angles"),
+        allow_sbend=sbend,
+        constraints=kf_kwargs.get("constraints"),
+    )
+    out: list[Array] = []
+    for i, (r, rec) in enumerate(zip(routers, hook.records, strict=True)):
+        pts = r.start.pts
+        concrete = [(int(p.x.v), int(p.y.v)) for p in pts]
+        expected = [(p.x, p.y) for p in rec.pts]
+        if concrete != expected:
+            raise RuntimeError(
+                "Traced manhattan router diverged from kfactory for route "
+                f"{i}: {concrete} != {expected}. Please report this as a bug."
+            )
+        out.append(
+            xp.stack(
+                [xp.stack([asarray(p.x.tv()) * DBU, asarray(p.y.tv()) * DBU]) for p in pts]
+            )
+        )
+    return out
+
+
 def _is_number(v: Any) -> bool:
     return isinstance(v, int | float) or is_tracer(v) or type(v).__module__.startswith("jax")
 
@@ -719,28 +742,6 @@ def _key(p: Port) -> tuple[int, int]:
 def _kkey(p: Any) -> tuple[int, int]:
     t = p.dcplx_trans
     return (round(t.disp.x / DBU), round(t.disp.y / DBU))
-
-
-def _match_order(bbs: list[np.ndarray], base: list[np.ndarray]) -> list[np.ndarray] | None:
-    """Matches perturbed backbones to the base ones (same start/end port order)."""
-    if len(bbs) != len(base):
-        return None
-    used = set()
-    out = []
-    for b in base:
-        best = None
-        best_d = np.inf
-        for j, q in enumerate(bbs):
-            if j in used:
-                continue
-            d = np.linalg.norm(q[0] - b[0]) + np.linalg.norm(q[-1] - b[-1])
-            if d < best_d:
-                best, best_d = j, d
-        if best is None:
-            return None
-        used.add(best)
-        out.append(bbs[best])
-    return out
 
 
 def _has_traced_geometry(*components: Component | None) -> bool:
@@ -1064,7 +1065,7 @@ def _rebuild_electrical(
 __all__ = [
     "ManhattanRoute",
     "OpticalManhattanRoute",
-    "TracedInput",
+    "PortBox",
     "mirror",
     "place_manhattan_kf",
     "route_bundle_kf",

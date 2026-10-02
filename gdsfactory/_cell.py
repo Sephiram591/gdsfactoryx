@@ -204,7 +204,10 @@ def cell(
             for name, p in sig.parameters.items():
                 if p.kind is inspect.Parameter.VAR_KEYWORD and name in params:
                     params.update(params.pop(name))
-            traced = has_tracers(params)
+            # unsnapped cells (gf.snap.SNAP_ENABLED = False) never enter the cache
+            from gdsfactory import snap as _snap
+
+            traced = has_tracers(params) or not _snap.SNAP_ENABLED
             key = None
             if not traced:
                 try:

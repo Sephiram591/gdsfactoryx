@@ -6,11 +6,12 @@ import math
 import warnings
 from typing import Any
 
+import jax
 import numpy as np
 import numpy.typing as npt
 
 import gdsfactory as gf
-from gdsfactory._jax import has_tracers, maybe_float, stop_gradient, to_float, xp
+from gdsfactory._jax import has_tracers, is_tracer, maybe_float, stop_gradient, to_float, xp
 from gdsfactory.component import Component
 from gdsfactory.config import ErrorType
 from gdsfactory.functions import angles_deg, curvature, snap_angle
@@ -257,11 +258,14 @@ def _get_euler_sbend_angle_middle_length_from_jog(
             # implicit differentiation of euler_displacement(angle) = jog:
             # the value stays the optimizer's result, the gradient is
             # d(angle) = -(d displacement) / (d displacement / d angle).
-            h = 1e-4
-            slope = (
-                to_float(euler_displacement(angle_deg + h))
-                - to_float(euler_displacement(angle_deg - h))
-            ) / (2 * h)
+            radius_c, p_c = to_float(radius), to_float(p)
+            slope = float(
+                jax.grad(
+                    lambda th: gf.path.euler(
+                        radius=radius_c, angle=th, use_eff=use_eff, p=p_c
+                    ).ysize
+                )(float(angle_deg))
+            )
             residual = (euler_displacement(angle_deg) - jog) / slope
             angle_deg = angle_deg - (residual - stop_gradient(residual))
     else:
@@ -375,7 +379,9 @@ def get_min_sbend_size(
 
     # Guess sizes, iterate over them until we cannot achieve the min radius
     # the max size corresponds to an ellipsoid
-    max_size = float(np.sqrt(np.abs(min_radius * known_s)) * 2.5)
+    # the sweep is discrete: run it on concrete values
+    size_list[1 - ind] = to_float(known_s)
+    max_size = float(np.sqrt(np.abs(min_radius * to_float(known_s))) * 2.5)
     sizes = np.linspace(max_size, 0.1 * max_size, num_points)
 
     for s in sizes:
@@ -393,4 +399,10 @@ def get_min_sbend_size(
             min_size = s
             break
 
+    if is_tracer(known_s) and np.isfinite(min_size):
+        # sizes[k] = max_size * (1 - 0.9 k / (num_points - 1)) with k discrete
+        k = int(np.argmin(np.abs(sizes - min_size)))
+        traced = xp.sqrt(xp.abs(min_radius * known_s)) * 2.5
+        traced = traced * (1 - 0.9 * k / (num_points - 1))
+        return min_size + (traced - stop_gradient(traced))  # type: ignore[no-any-return]
     return min_size

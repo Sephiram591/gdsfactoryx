@@ -27,7 +27,7 @@ from gdsfactory._jax import to_float
 from gdsfactory._ports import Pin as _Pin
 from gdsfactory._ports import Port as _Port
 from gdsfactory.config import CONF
-from gdsfactory.routing._kf_router import ManhattanRoute, route_bundle_kf
+from gdsfactory.routing._kf_router import ManhattanRoute, PortBox, route_bundle_kf
 from gdsfactory.routing.auto_taper import add_auto_tapers
 from gdsfactory.routing.resolve_pins import resolve_pins
 from gdsfactory.routing.sort_ports import get_port_x, get_port_y
@@ -439,26 +439,12 @@ def route_bundle(
         ports1_ = ports1_new
         ports2_ = ports2_new
 
-        bbox1 = gf.kdb.DBox()
-        bbox2 = gf.kdb.DBox()
-
-        for port in ports1_:
-            bbox1 += _dpoint(port)
-
-        for port in ports2_:
-            bbox2 += _dpoint(port)
-
-        bboxes.append(bbox1)
-        bboxes.append(bbox2)
+        bboxes.append(PortBox([p.center for p in ports1_]))
+        bboxes.append(PortBox([p.center for p in ports2_]))
 
     elif auto_taper:
-        bbox1 = gf.kdb.DBox()
-        bbox2 = gf.kdb.DBox()
-        for port in ports1_:
-            bbox1 += _dpoint(port)
-
-        for port in ports2_:
-            bbox2 += _dpoint(port)
+        bbox1_points = [p.center for p in ports1_]
+        bbox2_points = [p.center for p in ports2_]
 
         ports1_ = add_auto_tapers(
             component, ports1_, cross_section=xs, layer_transitions=layer_transitions
@@ -467,14 +453,11 @@ def route_bundle(
             component, ports2_, cross_section=xs, layer_transitions=layer_transitions
         )
 
-        for port in ports1_:
-            bbox1 += _dpoint(port)
+        bbox1_points += [p.center for p in ports1_]
+        bbox2_points += [p.center for p in ports2_]
 
-        for port in ports2_:
-            bbox2 += _dpoint(port)
-
-        bboxes.append(bbox1)
-        bboxes.append(bbox2)
+        bboxes.append(PortBox(bbox1_points))
+        bboxes.append(PortBox(bbox2_points))
 
     if steps and waypoints:
         raise ValueError("Provide only one of steps or waypoints")

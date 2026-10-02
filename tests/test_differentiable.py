@@ -141,6 +141,56 @@ def test_route_bundle_gradients(name: str) -> None:
     check_grad(f, {"pitch": 10.0, "dy": 200.0, "separation": 5.0}[name], h=0.01)
 
 
+def _all_angle_route(case: str, v: Any) -> Any:
+    c = gf.ComponentAllAngle()
+    a = c.add_ref_off_grid(gf.components.straight(length=5))
+    b = c.add_ref_off_grid(gf.components.straight(length=5))
+    if case == "crossing":  # the port axes cross: no optimization
+        b.rotate(30.0)
+        b.move((80.0, v))
+        routes = gf.routing.route_bundle_all_angle(c, [a.ports["o2"]], [b.ports["o1"]])
+    elif case == "optimized":  # kfactory solves for the connection angle
+        b.rotate(190.0)
+        b.move((80.0, v))
+        routes = gf.routing.route_bundle_all_angle(c, [a.ports["o2"]], [b.ports["o2"]])
+    else:  # backbone + separation
+        a2 = c.add_ref_off_grid(gf.components.straight(length=5))
+        a2.move((0, -5))
+        b2 = c.add_ref_off_grid(gf.components.straight(length=5))
+        b2.move((0, -5))
+        for r in (b, b2):
+            r.rotate(10.0)
+            r.move((140.0, 80.0))
+        routes = gf.routing.route_bundle_all_angle(
+            c,
+            [a.ports["o2"], a2.ports["o2"]],
+            [b.ports["o1"], b2.ports["o1"]],
+            backbone=[(37.0, -2.5), (54.0, 48.0), (100.0, 64.0)],
+            separation=v,
+        )
+    return sum(r.length for r in routes) * 1e-3 + sum(
+        jnp.sum(r.backbone_um[1]) for r in routes
+    )
+
+
+@pytest.mark.parametrize(
+    "case,x0,rtol",
+    [("crossing", 40.0, 1e-5), ("optimized", 30.0, 1e-3), ("backbone", 3.0, 1e-4)],
+)
+def test_route_bundle_all_angle_gradients(case: str, x0: float, rtol: float) -> None:
+    # "optimized": the value is scipy's bounded minimizer (xatol 1e-5), the
+    # derivative its implicit derivative, so FD carries the optimizer's noise.
+    check_grad(lambda v: _all_angle_route(case, v), x0, rtol=rtol, h=0.01)
+
+
+def test_spiral_fixed_length_gradient() -> None:
+    def f(length: Any) -> Any:
+        c = gf.components.spiral_racetrack_fixed_length(length=length)
+        return c.info["straight_length"] + c.xsize * 0.01
+
+    check_grad(f, 1000.0, h=0.01)
+
+
 def test_rasterize_gradient() -> None:
     def f(width: Any) -> Any:
         c = gf.components.straight(length=5, width=width)
@@ -176,6 +226,7 @@ def test_export_with_traced_values(tmp_path: Any) -> None:
 
 
 def test_cache_is_bypassed_when_traced() -> None:
+    gf.snap.SNAP_ENABLED = True  # unsnapped cells are never cached
     c1 = gf.components.straight(length=10.0)
     assert gf.components.straight(length=10.0) is c1
 

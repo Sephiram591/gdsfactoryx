@@ -58,13 +58,26 @@ which needs concrete values for decisions like the number of points of a bend.
 - **Cell cache**: `@gf.cell` caches components by their arguments. Calls whose
   arguments contain tracers bypass the cache, so every gradient evaluation
   rebuilds the traced cells.
-- **Routing**: kfactory's routers still decide the route topology (corners,
-  bundle ordering, tapers, path-length-matching loops) on concrete values, in a
-  private KLayout layout. The placed instances are rebuilt as references of the
-  (possibly traced) gdsfactoryx components. Derivatives of the router's corner
-  coordinates are obtained by re-running the router on perturbed inputs; the
-  straights absorb the change of each segment length. The forward geometry is
-  exactly kfactory's.
+- **Routing**: route gradients come from autodiff, never from finite
+  differences.
+  - *Manhattan* (`route_single`, `route_bundle`): kfactory's manhattan router
+    (`gdsfactory/routing/_traced_manhattan.py`) is ported onto dual numbers. Each
+    coordinate holds kfactory's exact integer, which drives every comparison and
+    branch, plus a JAX value that carries the derivative. The router therefore
+    makes the same decisions as kfactory (corners, bundle ordering, path-length
+    loops), and the corners are differentiable. Every route is checked against
+    kfactory's output. Placed straights absorb the change of each segment length.
+  - *All-angle* (`route_bundle_all_angle`): bundle offsets and port connections
+    come from a traced port of kfactory's geometry. Where kfactory finds the
+    connection angle with `scipy.optimize.minimize_scalar`, the value is
+    kfactory's and the derivative comes from the implicit function theorem on the
+    optimum (`r2(theta, inputs) = 0`).
+  - The derivative is exact for the chosen topology. Changing a corner count or
+    bundle order is a discrete jump, and its gradient is zero.
+- **Swept cells**: `spiral_racetrack_fixed_length` interpolates a sweep the way
+  upstream does. The two bracketing sweep points are rebuilt with traced
+  geometry, so the straight length is differentiable in the length, the port
+  spacing, the radius and the spacings.
 - **KLayout** is only used for inherently discrete operations: GDS/OASIS I/O,
   `show`/`plot`, booleans, sizing/offset, DRC fixes, fill, merged areas. Values
   crossing into KLayout are concrete (gradients stop there).
@@ -86,8 +99,8 @@ which needs concrete values for decisions like the number of points of a bend.
 - `Component` and `ComponentReference` are gdsfactoryx classes, no longer
   kfactory `DKCell`/`DInstance` objects. Use `component.to_kfactory()` to get a
   (concrete) kfactory cell.
-- `ComponentAllAngle` is an alias of `Component`. Every reference supports any
-  angle and float positions, so there are no "virtual" instances.
+- `ComponentAllAngle` is a virtual cell, as upstream: shapes and references may
+  be off-grid and are materialized on export like kfactory's `VInstance`.
 - `component.get_polygons()` returns KLayout polygons, as upstream does.
   `component.get_polygons_points()` returns the differentiable arrays.
 - `port.center` is an `(x, y)` tuple, as upstream. Use `port.center_array` (or
