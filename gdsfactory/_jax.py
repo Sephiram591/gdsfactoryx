@@ -249,8 +249,11 @@ DBU = 1e-3
 
 
 def snap_dbu(x: Any) -> Any:
-    """Snaps to the 1 nm grid like KLayout (round half away from zero).
+    """Snaps to the 1 nm grid exactly like KLayout.
 
+    KLayout converts um to dbu by multiplying with 1/dbu and rounds half away
+    from zero; the floating point arithmetic is reproduced so that values on
+    half-dbu boundaries round the same way as upstream.
     Straight-through for traced values (value snapped, gradient identity).
     Disabled when ``gdsfactory.snap.SNAP_ENABLED`` is False.
     """
@@ -258,15 +261,16 @@ def snap_dbu(x: Any) -> Any:
 
     if not snap.SNAP_ENABLED:
         return x
+    inv = 1.0 / DBU
     if _is_jax(x):
-        xs = jax.lax.stop_gradient(x) / DBU
-        snapped = jnp.sign(xs) * jnp.floor(jnp.abs(xs) + 0.5) * DBU
-        return x + jax.lax.stop_gradient(snapped - x)
+        v = np.asarray(primal(x), dtype=np.float64) * inv
+        snapped = np.sign(v) * np.floor(np.abs(v) + 0.5) * DBU
+        return x + jax.lax.stop_gradient(jnp.asarray(snapped) - x)
     if isinstance(x, int | float):
-        v = x / DBU
+        v = x * inv
         return float(np.sign(v) * np.floor(abs(v) + 0.5) * DBU)
-    arr = np.asarray(x, dtype=np.float64) / DBU
-    out = np.sign(arr) * np.floor(np.abs(arr) + 0.5) * DBU
+    v = np.asarray(x, dtype=np.float64) * inv
+    out = np.sign(v) * np.floor(np.abs(v) + 0.5) * DBU
     out.flags.writeable = False
     return out
 

@@ -33,7 +33,8 @@ def _kdb() -> Any:
 def array_to_kpolygon(points: Any) -> kdb.Polygon:
     """(N, 2) um array -> integer kdb.Polygon (rounded to 1 nm)."""
     kdb = _kdb()
-    pts = np.round(to_numpy(points) / DBU).astype(np.int64)
+    v = to_numpy(points) * (1.0 / DBU)
+    pts = (np.sign(v) * np.floor(np.abs(v) + 0.5)).astype(np.int64)  # KLayout rounding
     return kdb.Polygon([kdb.Point(int(x), int(y)) for x, y in pts])
 
 
@@ -189,8 +190,11 @@ def to_kfactory(
                 kdb.DText(lab.text, to_float(lab.x), to_float(lab.y))
             )
         for r in c.insts:
-            child = build(r.cell)
+            if r.virtual:
+                insert_virtual(kc, r, kdb.DCplxTrans())
+                continue
             t = r.transform.to_klayout()
+            child = build(r.cell)
             if r.na > 1 or r.nb > 1:
                 a = to_numpy(r.a)
                 b = to_numpy(r.b)
@@ -235,7 +239,200 @@ def to_kfactory(
             cache[id(c)] = (c, kc)
         return kc
 
+    virtual_built: dict[tuple[int, int], Any] = {}
+
+    def insert_virtual(parent: Any, r: Any, trans: Any) -> None:
+        """kfactory ``VInstance.insert_into``: manhattan base transform for the
+        instance, the residual transformation baked into a copy of the cell."""
+        trans_ = trans * r.transform.to_klayout()
+        base = kdb.DCplxTrans(kdb.ICplxTrans(trans_, DBU).s_trans().to_dtype(DBU))
+        residual = base.inverted() * trans_
+        if not r.cell._virtual and residual == kdb.DCplxTrans():
+            child = build(r.cell)
+        else:
+            child = build_virtual(r.cell, residual)
+        if r.na > 1 or r.nb > 1:
+            a = to_numpy(r.a)
+            b = to_numpy(r.b)
+            inst = kdb.DCellInstArray(
+                child.cell_index(),
+                kdb.DCplxTrans(),
+                kdb.DVector(float(a[0]), float(a[1])),
+                kdb.DVector(float(b[0]), float(b[1])),
+                r.na,
+                r.nb,
+            )
+        else:
+            inst = kdb.DCellInstArray(child.cell_index(), kdb.DCplxTrans())
+        kinst = parent.kdb_cell.insert(inst)
+        kinst.transform(base)
+        if r.is_named:
+            from kfactory.conf import PROPID
+
+            kinst.set_property(PROPID.NAME, r.name)
+
+    def build_virtual(c: Component, residual: Any) -> Any:
+        key = (id(c), residual.hash())
+        if key in virtual_built:
+            return virtual_built[key]
+        from gdsfactory.transform import Transform
+
+        name = names.get(id(c), c.name)
+        if residual != kdb.DCplxTrans():
+            name += f"_{residual.hash():x}"
+        kc = kf.DKCell(name=name, kcl=kcl)
+        rt = Transform.from_klayout(residual)
+        if c._virtual:
+            # VKCell: float shapes transformed, then rounded once; child
+            # instances inserted recursively
+            for lay, polys in c.polygons.items():
+                if lay in excluded or not polys:
+                    continue
+                shapes = kc.kdb_cell.shapes(layer_index(lay))
+                for poly in polys:
+                    shapes.insert(array_to_kdpolygon(poly).transformed(residual).to_itype(DBU))
+            for lab in c.labels:
+                if lab.layer not in excluded:
+                    kc.kdb_cell.shapes(layer_index(lab.layer)).insert(
+                        kdb.DText(lab.text, to_float(lab.x), to_float(lab.y)).transformed(residual)
+                    )
+            for r in c.insts:
+                insert_virtual(kc, r, residual)
+            for li in kcl.layer_indexes():
+                shapes = kc.kdb_cell.shapes(li)
+                if not shapes.is_empty():
+                    region = kdb.Region(shapes)
+                    region.merge()
+                    shapes.clear()
+                    shapes.insert(region)
+        else:
+            # KCell: flatten + merge on the grid, then KLayout transforms the
+            # integer shapes
+            itrans = kdb.ICplxTrans(residual, DBU)
+            for lay, polys in c._flat_polygons_klayout().items():
+                if lay in excluded or not polys:
+                    continue
+                region = kdb.Region()
+                for poly in polys:
+                    region.insert(array_to_kpolygon(poly))
+                region.merge()
+                kc.kdb_cell.shapes(layer_index(lay)).insert(region.transformed(itrans))
+            for lab in c._flat_labels(rt):
+                if lab.layer not in excluded:
+                    kc.kdb_cell.shapes(layer_index(lab.layer)).insert(
+                        kdb.DText(lab.text, to_float(lab.x), to_float(lab.y))
+                    )
+        if add_ports:
+            for p in c.ports:
+                q = p.copy(rt, on_grid=False)
+                orientation = to_float(q.orientation) if q.orientation is not None else 0.0
+                kp = kc.create_port(
+                    name=q.name,
+                    width=round(to_float(q.width) / DBU) * DBU,
+                    layer=layer_index(q.layer),
+                    port_type=q.port_type,
+                    dcplx_trans=kdb.DCplxTrans(1, orientation, False, to_float(q.x), to_float(q.y)),
+                )
+                with contextlib.suppress(Exception):
+                    kp.info.update(_clean(dict(q.info)))
+        with contextlib.suppress(Exception):
+            kc.info.update(_clean(dict(c.info)))
+        with contextlib.suppress(Exception):
+            kc.settings = kf.KCellSettings(**_clean(dict(c.settings)))
+        if c.function_name:
+            kc.function_name = c.function_name
+        if c.basename:
+            kc.basename = c.basename
+        virtual_built[key] = kc
+        return kc
+
     return build(component)
+
+
+def flatten_exact(component: Component, merge: bool = True) -> tuple[dict[int, list[Array]], list[Any]]:
+    """Flattens a (concrete) component exactly like kfactory's ``KCell.flatten``.
+
+    Virtual references are inserted with ``insert_into_flat`` semantics (float
+    shapes transformed then rounded once), regular references are flattened by
+    KLayout (integer shapes and ICplxTrans), then shapes are merged per layer.
+
+    Returns:
+        polygons per layer index and labels.
+    """
+    import kfactory as kf
+
+    from gdsfactory.component import Component as _C
+    from gdsfactory.component import Label
+    from gdsfactory.pdk import get_layer, get_layer_info
+
+    kdb = _kdb()
+    kcl = kf.KCLayout(f"gdsfactoryx_flatten_{next(_EXPORT_COUNTER)}")
+    kcl.layout.dbu = DBU
+    shell = _C(name=f"{component.name}_flat")
+    shell.polygons = dict(component.polygons)
+    shell.labels = list(component.labels)
+    for r in component.insts:
+        if not r.virtual:
+            shell.insts.append(r)
+    kc = to_kfactory(shell, kcl=kcl, add_ports=False)
+    cache: dict[int, tuple[Any, Any]] = {}
+
+    def layer_index(layer: int) -> int:
+        return kcl.layout.layer(get_layer_info(layer))
+
+    def insert_flat(r: Any, trans: Any) -> None:
+        trans_ = trans * r.transform.to_klayout()
+        transforms = [trans_]
+        if r.na > 1 or r.nb > 1:
+            a, b = to_numpy(r.a), to_numpy(r.b)
+            transforms = [
+                kdb.DCplxTrans(float(ia * a[0] + ib * b[0]), float(ia * a[1] + ib * b[1])) * trans_
+                for ia in range(r.na)
+                for ib in range(r.nb)
+            ]
+        for tr in transforms:
+            if r.cell._virtual:
+                for lay, polys in r.cell.polygons.items():
+                    shapes = kc.kdb_cell.shapes(layer_index(lay))
+                    for poly in polys:
+                        shapes.insert(array_to_kdpolygon(poly).transformed(tr).to_itype(DBU))
+                for lab in r.cell.labels:
+                    kc.kdb_cell.shapes(layer_index(lab.layer)).insert(
+                        kdb.DText(lab.text, to_float(lab.x), to_float(lab.y)).transformed(tr)
+                    )
+                for rr in r.cell.insts:
+                    insert_flat(rr, tr)
+            else:
+                child = to_kfactory(r.cell, kcl=kcl, add_ports=False, cache=cache, unique_prefix="f_")
+                for li in kcl.layer_indexes():
+                    reg = kdb.Region(child.kdb_cell.begin_shapes_rec(li))
+                    if not reg.is_empty():
+                        reg.transform(kdb.ICplxTrans(tr, DBU))
+                        kc.kdb_cell.shapes(li).insert(reg)
+
+    for r in component.insts:
+        if r.virtual:
+            insert_flat(r, kdb.DCplxTrans())
+    kc.kdb_cell.flatten(False)
+    polys: dict[int, list[Array]] = {}
+    labels: list[Any] = []
+    for li in kcl.layout.layer_indexes():
+        info = kcl.layout.get_info(li)
+        try:
+            lay = int(get_layer((info.layer, info.datatype)))
+        except Exception:
+            continue
+        shapes = kc.kdb_cell.shapes(li)
+        reg = kdb.Region(shapes)
+        if merge:
+            reg.merge()
+        out = region_to_arrays(reg)
+        if out:
+            polys[lay] = out
+        for sh in shapes.each(kdb.Shapes.STexts):
+            t = sh.dtext
+            labels.append(Label(t.string, (t.x, t.y), lay))
+    return polys, labels
 
 
 def _clean(d: dict[str, Any]) -> dict[str, Any]:

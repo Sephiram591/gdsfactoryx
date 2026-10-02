@@ -104,6 +104,9 @@ def reflect_points(
 
 
 def _angle_deg(dy: Any, dx: Any) -> Any:
+    if to_float(dy) == 0 and to_float(dx) == 0:
+        # degenerate (zero-length) segment: arctan2's gradient is NaN at the origin
+        return 0.0
     return xp.arctan2(dy, dx) / xp.pi * 180
 
 

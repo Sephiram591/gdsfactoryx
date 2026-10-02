@@ -404,6 +404,10 @@ def extrude_path(
     else:
         pts = xp.vstack((points + offsets, points_back))
 
+    from gdsfactory import snap
+
+    if not snap.SNAP_ENABLED:
+        return pts  # type: ignore[no-any-return]
     return round_st(pts, step=grid)  # type: ignore[no-any-return]
 
 

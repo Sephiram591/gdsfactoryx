@@ -5,6 +5,7 @@ __all__ = ["grating_coupler_array"]
 import kfactory as kf
 
 import gdsfactory as gf
+from gdsfactory._jax import to_float
 from gdsfactory.component import Component
 from gdsfactory.routing.auto_taper import add_auto_tapers
 from gdsfactory.typings import ComponentSpec, CrossSectionSpec
@@ -76,20 +77,22 @@ def grating_coupler_array(
         port0 = ports["o0"]
         port1 = ports[f"o{n - 1}"]
         assert radius is not None
-        radius_dbu = c.kcl.to_dbu(radius)
+        radius_dbu = c.kcl.to_dbu(to_float(radius))
         d_loop_um = straight_to_grating_spacing + max(
             [
                 grating_coupler.ysize,
                 grating_coupler.xsize,
             ]
         )
-        d_loop = c.kcl.to_dbu(d_loop_um) + radius_dbu
+        d_loop = c.kcl.to_dbu(to_float(d_loop_um)) + radius_dbu
 
         port0 = add_auto_tapers(c, [port0], cross_section)[0]
         port1 = add_auto_tapers(c, [port1], cross_section)[0]
+        from gdsfactory.routing._kf_router import to_kf_port
+
         waypoints = kf.routing.optical.route_loopback(
-            port0.to_itype(),
-            port1.to_itype(),
+            to_kf_port(port0),
+            to_kf_port(port1),
             bend90_radius=radius_dbu,
             d_loop=d_loop,
         )

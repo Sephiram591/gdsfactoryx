@@ -170,7 +170,11 @@ class Box:
         return self.top - self.bottom
 
     def center(self) -> Point2:
-        return Point2((self.left + self.right) / 2, (self.bottom + self.top) / 2)
+        # same floating point formula as KLayout's DBox::center
+        return Point2(
+            self.left + (self.right - self.left) / 2,
+            self.bottom + (self.top - self.bottom) / 2,
+        )
 
     @property
     def p1(self) -> Point2:
@@ -266,12 +270,12 @@ class _BBoxMixin:
     @property
     def x(self) -> Any:
         b = self.dbbox()
-        return (b.left + b.right) / 2
+        return b.left + (b.right - b.left) / 2  # KLayout's DBox::center formula
 
     @property
     def y(self) -> Any:
         b = self.dbbox()
-        return (b.bottom + b.top) / 2
+        return b.bottom + (b.top - b.bottom) / 2
 
     @property
     def center(self) -> tuple[Any, Any]:
@@ -433,6 +437,9 @@ class ComponentReference(_BBoxMixin):
         self.a = asarray(a)
         self.b = asarray(b)
         self._ports = ReferencePorts(self)
+        # all-angle ("virtual") references: upstream flattens them into polygons,
+        # so their bbox is tight; regular references use the transformed cell bbox
+        self.virtual = False
 
     # ------------------------------------------------------------ naming
     @property
@@ -503,7 +510,11 @@ class ComponentReference(_BBoxMixin):
 
     @transform.setter
     def transform(self, t: Transform) -> None:
-        # like KLayout: instance displacements are stored on the dbu grid
+        # like KLayout: instance displacements are stored on the dbu grid, except
+        # for all-angle (virtual) references, which keep float positions
+        if getattr(self, "virtual", False):
+            self._transform = t
+            return
         self._transform = Transform(
             snap_dbu(t.x), snap_dbu(t.y), t.rotation, t.mirror, t.magnification
         )
@@ -528,6 +539,8 @@ class ComponentReference(_BBoxMixin):
 
     def _get_ports(self) -> list[Port]:
         t = self.transform
+        if self.virtual:
+            return [p.copy(t, on_grid=False) for p in self.cell.ports]
         return [p.copy(t) for p in self.cell.ports]
 
     @property
@@ -580,7 +593,9 @@ class ComponentReference(_BBoxMixin):
 
     def transform_by(self, t: Transform) -> Self:
         """Applies t after the current transform (in the parent's frame)."""
-        self.transform = t * self.transform
+        self.transform = _kl_value(
+            t * self.transform, t.to_klayout() * self.transform.to_klayout()
+        )
         self.a = t.apply_vector(self.a)
         self.b = t.apply_vector(self.b)
         return self
@@ -689,7 +704,9 @@ class ComponentReference(_BBoxMixin):
         else:
             local = self.cell.ports[port]
 
-        if not allow_width_mismatch and abs(to_float(local.width) - to_float(op.width)) > 1e-6:
+        if not allow_width_mismatch and round(to_float(local.width) * 1000) != round(
+            to_float(op.width) * 1000
+        ):
             raise PortWidthMismatchError(
                 f"Width mismatch {self.cell.name}:{local.name} ({to_float(local.width)}) "
                 f"!= {op.name} ({to_float(op.width)})"
@@ -716,14 +733,23 @@ class ComponentReference(_BBoxMixin):
         op_t = Transform(op.x, op.y, op.orientation, op_mirror, 1.0)
         conn = Transform(0.0, 0.0, 180.0, conn_mirror, 1.0)
         p_t = Transform(local.x, local.y, local.orientation, local.mirror, 1.0)
-        self.transform = op_t * conn * p_t.inverted()
+        self.transform = _kl_value(
+            op_t * conn * p_t.inverted(),
+            op_t.to_klayout() * conn.to_klayout() * p_t.to_klayout().inverted(),
+        )
         return self
 
     # -------------------------------------------------------------- geometry
+    def _bbox_points(self, t: Transform, layer: Any = None) -> Array | None:
+        if self.virtual:
+            return self.cell._transformed_bbox_points(t, layer)
+        return self.cell._transformed_bbox_corners(t, layer)
+
     def dbbox(self, layer: Any = None) -> Box:
+        """Bounding box of the reference (cell bbox corners transformed, like kfactory)."""
         boxes = []
         for t in self.array_transforms():
-            pts = self.cell._transformed_bbox_points(t, layer)
+            pts = self._bbox_points(t, layer)
             if pts is not None:
                 boxes.append(pts)
         if not boxes:
@@ -942,11 +968,16 @@ def remap_layer_index(old: int, new: int) -> None:
 class Component(_BBoxMixin):
     """Canvas where you add polygons, references and ports.
 
+    (``ComponentAllAngle`` subclasses keep shapes and ports off-grid, like
+    kfactory's virtual cells.)
+
     - stores settings that you use to build the component
     - stores info that you want to use
     - polygons, ports and references are differentiable jax arrays
     - can write to GDS/OASIS and show in KLayout (via an export to kfactory)
     """
+
+    _virtual: bool = False
 
     def __new__(cls, name: str | None = None, base: Any = None, **kwargs: Any) -> Any:
         if isinstance(base, Component):
@@ -1067,7 +1098,7 @@ class Component(_BBoxMixin):
         for arr in _to_point_arrays(points):
             if arr.shape[0] < 3:
                 continue
-            self.polygons.setdefault(key, []).append(snap_dbu(arr))
+            self.polygons.setdefault(key, []).append(arr if self._virtual else snap_dbu(arr))
         return None
 
     def add_polygons(self, polygons: Iterable[Any], layer: LayerSpec) -> None:
@@ -1172,6 +1203,7 @@ class Component(_BBoxMixin):
             port_type=port_type,
             info=info,
             mirror=mirror,
+            on_grid=not self._virtual,
         )
         if xs_name and xs is not None:
             _port.info["cross_section"] = xs_name
@@ -1219,11 +1251,28 @@ class Component(_BBoxMixin):
 
         pprint_ports(self.get_ports_list(**kwargs))
 
-    def auto_rename_ports(self, **kwargs: Any) -> None:
-        self._check_unlocked()
-        from gdsfactory.port import auto_rename_ports
+    def auto_rename_ports(
+        self, rename_func: Callable[..., None] | None = None, **kwargs: Any
+    ) -> None:
+        """Renames ports clockwise per port type (o1, o2, ... / e1, e2, ...).
 
-        auto_rename_ports(self, **kwargs)
+        Without arguments this is kfactory's ``rename_clockwise_multi`` (the
+        upstream default); with keyword arguments it is
+        :func:`gdsfactory.port.auto_rename_ports`.
+        """
+        self._check_unlocked()
+        if rename_func is not None:
+            rename_func(self.ports, **kwargs)
+            return
+        if kwargs:
+            from gdsfactory.port import auto_rename_ports
+
+            auto_rename_ports(self, **kwargs)
+            return
+        for port_type, prefix in (("optical", "o"), ("electrical", "e")):
+            _rename_clockwise(
+                [p for p in self.ports if p.port_type == port_type], prefix=prefix
+            )
 
     def create_port(self, **kwargs: Any) -> Port:
         self._check_unlocked()
@@ -1292,11 +1341,21 @@ class Component(_BBoxMixin):
             a=xp.stack([asarray(column_pitch), asarray(0.0)]),
             b=xp.stack([asarray(0.0), asarray(row_pitch)]),
         )
+        if self._virtual:
+            # references in virtual (all-angle) cells are virtual (kfactory VInstance)
+            ref.virtual = True
         self.insts.append(ref)
         return ref
 
-    add_ref_off_grid = add_ref
-    create_vinst = add_ref
+    def add_ref_off_grid(
+        self, component: Component, name: str | None = None
+    ) -> ComponentReference:
+        """Adds an all-angle reference (upstream: a virtual instance)."""
+        ref = self.add_ref(component, name=name)
+        ref.virtual = True
+        return ref
+
+    create_vinst = add_ref_off_grid
 
     def create_inst(self, component: Component, **kwargs: Any) -> ComponentReference:
         na = kwargs.pop("na", 1)
@@ -1362,6 +1421,30 @@ class Component(_BBoxMixin):
                     out.setdefault(lay, []).extend(polys)
         return out
 
+    def _flat_polygons_klayout(
+        self, t: Transform | None = None, kt: Any = None
+    ) -> dict[int, list[Array]]:
+        """Flattened polygons rounded exactly like KLayout's flatten.
+
+        KLayout transforms the integer (dbu) shapes of each child with the
+        product of the instances' ICplxTrans and rounds once. The value
+        reproduces that; the derivative is the one of the float transformation
+        (straight-through).
+        """
+        import klayout.db as kdb
+
+        t = t or Transform()
+        kt = kt if kt is not None else kdb.ICplxTrans()
+        out: dict[int, list[Array]] = {}
+        for lay, polys in self.polygons.items():
+            out.setdefault(lay, []).extend(_klayout_apply(t, kt, p) for p in polys)
+        for r in self.insts:
+            for rt in r.array_transforms():
+                krt = kdb.ICplxTrans(rt.to_klayout(), 1e-3)
+                for lay, polys in r.cell._flat_polygons_klayout(t * rt, kt * krt).items():
+                    out.setdefault(lay, []).extend(polys)
+        return out
+
     def _flat_labels(self, t: Transform | None = None) -> list[Label]:
         t = t or Transform()
         out = [lab.transformed(t) for lab in self.labels]
@@ -1372,18 +1455,35 @@ class Component(_BBoxMixin):
 
     def _transformed_bbox_points(self, t: Transform, layer: Any = None) -> Array | None:
         """Points whose bounding box is the bbox of this cell transformed by t."""
-        manhattan = manhattan_angle(t.rotation) is not None
-        if manhattan:
-            b = self.dbbox(layer)
-            if b is None or self._is_empty(layer):
-                return None
-            corners = _rect_points(b.left, b.bottom, b.right, b.top)
-            return t.apply(corners)
-        polys = self._flat_polygons(t, layer)
-        pts = [p for ps in polys.values() for p in ps]
-        if not pts:
+        # tight: exact for manhattan transforms (bbox corners), polygon points otherwise
+        if self._is_empty(layer):
             return None
-        return xp.concatenate(pts)
+        if manhattan_angle(t.rotation) is not None:
+            b = self.dbbox(layer)
+            return t.apply(_rect_points(b.left, b.bottom, b.right, b.top))
+        lay_key = _layer_key(layer) if layer is not None else None
+        pts = [
+            t.apply(p)
+            for k, ps in self.polygons.items()
+            if lay_key is None or k == lay_key
+            for p in ps
+        ]
+        for r in self.insts:
+            for rt in r.array_transforms():
+                rp = r._bbox_points(t * rt, layer)
+                if rp is not None:
+                    pts.append(rp)
+        return xp.concatenate(pts) if pts else None
+
+    def _transformed_bbox_corners(self, t: Transform, layer: Any = None) -> Array | None:
+        """Cell bbox corners transformed by t (kfactory's loose instance bbox).
+
+        Rounded like KLayout's ``Box.transformed(ICplxTrans)`` (integer corners).
+        """
+        if self._is_empty(layer):
+            return None
+        b = self.dbbox(layer)
+        return _klayout_apply(t, None, _rect_points(b.left, b.bottom, b.right, b.top))
 
     def _is_empty(self, layer: Any = None) -> bool:
         if layer is None:
@@ -1403,7 +1503,7 @@ class Component(_BBoxMixin):
             pts.extend(polys)
         for r in self.insts:
             for rt in r.array_transforms():
-                rp = r.cell._transformed_bbox_points(rt, layer)
+                rp = r._bbox_points(rt, layer)
                 if rp is not None:
                     pts.append(rp)
         if not pts:
@@ -1557,19 +1657,27 @@ class Component(_BBoxMixin):
         return r
 
     # --------------------------------------------------------------- edits
-    def flatten(self, merge: bool = False) -> Self:
-        """Flattens all references into this component (in place)."""
+    def flatten(self, merge: bool = True) -> Self:
+        """Flattens all references into this component (in place).
+
+        Without tracers this is exactly kfactory's ``KCell.flatten`` (KLayout
+        flatten, then merge per layer when ``merge``). With tracers the polygons
+        are transformed differentiably and not merged (same union of geometry,
+        values within 1 nm of the untraced result).
+        """
         self._check_unlocked()
-        polys = {k: [snap_dbu(p) for p in v] for k, v in self._flat_polygons().items()}
+        from gdsfactory import snap
+
+        if snap.SNAP_ENABLED and not self.has_tracers():
+            from gdsfactory.klayout_bridge import flatten_exact
+
+            self.polygons, self.labels = flatten_exact(self, merge=merge)
+            self.insts.clear()
+            return self
+        polys = self._flat_polygons_klayout()
         self.labels = self._flat_labels()
         self.insts.clear()
         self.polygons = polys
-        if merge:
-            from gdsfactory import klayout_bridge as kb
-
-            self.polygons = {
-                k: kb.region_to_arrays(kb.merge_arrays(v)) for k, v in polys.items()
-            }
         return self
 
     def copy(self) -> Component:
@@ -1586,6 +1694,7 @@ class Component(_BBoxMixin):
             nr = ComponentReference(
                 r.cell, r.transform.copy(), r._name, c, r.na, r.nb, r.a, r.b
             )
+            nr.virtual = r.virtual
             c.insts.append(nr)
         c.ports = Ports(p.copy() for p in self.ports)
         c.pins = Pins(
@@ -2247,7 +2356,16 @@ class Component(_BBoxMixin):
         return False
 
 
-ComponentAllAngle = Component
+class ComponentAllAngle(Component):
+    """All-angle component (kfactory's VKCell): shapes and ports stay off-grid.
+
+    References inside it, and references to it added with ``add_ref_off_grid``,
+    are virtual: they are materialized on export like upstream (the residual
+    non-manhattan transformation is baked into a copy of the cell).
+    """
+
+    _virtual = True
+
 ComponentBase = Component
 AnyComponent: TypeAlias = Component
 
@@ -2281,7 +2399,9 @@ class _ShapesProxy:
             self._c._paths.setdefault(self._layer, []).append((pts, dpath.width))
         for arr in _to_point_arrays(shape):
             if arr.shape[0] >= 3:
-                self._c.polygons.setdefault(self._layer, []).append(snap_dbu(arr))
+                self._c.polygons.setdefault(self._layer, []).append(
+                    arr if self._c._virtual else snap_dbu(arr)
+                )
         return shape
 
     def each(self, *args: Any) -> Iterator[Any]:
@@ -2321,6 +2441,87 @@ class _ShapesProxy:
         for p in self.each():
             b += p.bbox()
         return b
+
+def _kl_value(t: Transform, kt: Any) -> Transform:
+    """t with values taken from KLayout's composition kt (straight-through).
+
+    Reproduces KLayout's floating point arithmetic (same rounding as upstream)
+    while keeping the derivatives of the differentiable composition t.
+    """
+    rot = t.rotation
+    if manhattan_angle(rot) is not None:
+        # kfactory uses exact integer transformations for manhattan placements
+        return t
+    r = to_float(rot)
+    a = kt.angle
+    a_adj = r + ((a - r + 180) % 360 - 180)
+
+    def st(value: Any, target: float) -> Any:
+        if is_tracer(value) or isinstance(value, jax_array_types()):
+            return value + stop_gradient(target - value)
+        return target
+
+    return Transform(
+        st(t.x, kt.disp.x),
+        st(t.y, kt.disp.y),
+        st(rot, a_adj) if abs(a_adj - r) > 0 else rot,
+        t.mirror,
+        t.magnification,
+    )
+
+
+def _klayout_apply(t: Transform, kt: Any, points: Array) -> Array:
+    """t.apply(points) with the value computed by KLayout's ICplxTrans kt (dbu).
+
+    Used where upstream geometry goes through KLayout's integer transformation
+    (flatten, instance bounding boxes) so that rounding matches exactly.
+    """
+    import klayout.db as kdb
+
+    from gdsfactory import snap
+
+    if t.is_identity():
+        return points
+    exact = t.apply(points)
+    if not snap.SNAP_ENABLED:
+        return exact
+    if kt is None:
+        kt = kdb.ICplxTrans(t.to_klayout(), 1e-3)
+    q = np.round(to_numpy(points) * 1000.0).astype(np.int64)
+    if kt.is_ortho() and not kt.is_mag() and float(kt.disp.x).is_integer() and float(kt.disp.y).is_integer():
+        # integer arithmetic: exact
+        st = kt.s_trans()
+        res = [st.trans(kdb.Point(int(x), int(y))) for x, y in q]
+    else:
+        res = [kt.trans(kdb.Point(int(x), int(y))) for x, y in q]
+    rounded = np.array([[p.x, p.y] for p in res], dtype=np.float64) * 1e-3
+    if is_tracer(exact) or isinstance(exact, jax_array_types()):
+        return exact + stop_gradient(asarray(rounded) - exact)
+    rounded.flags.writeable = False
+    return rounded
+
+
+def jax_array_types() -> tuple[type, ...]:
+    import jax
+
+    return (jax.Array,)
+
+
+def _rename_clockwise(ports: list[Port], prefix: str = "o", start: int = 1) -> None:
+    """kfactory ``rename_clockwise`` (sorts on the integer port transformation)."""
+
+    def sort_key(port: Port) -> tuple[int, int, int]:
+        t = port.trans
+        angle = {2: 0, 1: 1, 0: 2}.get(t.angle, 3)
+        dir_1 = 1 if angle < 2 else -1
+        dir_2 = -1 if t.angle < 2 else 1
+        key_1 = dir_1 * (t.disp.x if angle % 2 else t.disp.y)
+        key_2 = dir_2 * (t.disp.y if angle % 2 else t.disp.x)
+        return angle, key_1, key_2
+
+    for i, p in enumerate(sorted(ports, key=sort_key), start=start):
+        p.name = f"{prefix}{i}"
+
 
 def polygon_area(points: Array) -> Any:
     """Signed shoelace area (differentiable)."""

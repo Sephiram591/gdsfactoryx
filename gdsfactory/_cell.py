@@ -63,7 +63,8 @@ def _concrete(value: Any) -> Any:
         arr = np.asarray(value)
         return arr.item() if arr.ndim == 0 else arr.tolist()
     if isinstance(value, dict):
-        return {k: _concrete(v) for k, v in value.items()}
+        # kfactory sorts nested dict keys when naming
+        return {k: _concrete(value[k]) for k in sorted(value)}
     if isinstance(value, list):
         return [_concrete(v) for v in value]
     if isinstance(value, tuple):

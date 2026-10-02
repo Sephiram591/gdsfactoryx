@@ -38,6 +38,9 @@ def assert_on_grid(
     nm: int | None = None,
     grid_factor: int = 1,
 ) -> None:
+    from gdsfactory._jax import to_numpy
+
+    x = to_numpy(x)
     x_grid = snap_to_grid(x, nm=nm, grid_factor=grid_factor)
     if not np.isclose(x_grid, x, rtol=0).all():
         raise ValueError(f"{x} needs to be on 1nm grid and should be {x_grid}")

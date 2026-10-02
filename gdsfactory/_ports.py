@@ -67,6 +67,7 @@ class Port:
         "mirror",
         "name",
         "port_type",
+        "on_grid",
         "__dict__",  # allows extra attributes (e.g. name_original)
     )
 
@@ -81,8 +82,10 @@ class Port:
         info: dict[str, Any] | None = None,
         mirror: bool = False,
         cross_section: Any = None,
+        on_grid: bool = True,
     ) -> None:
         self.name = name
+        self.on_grid = on_grid
         self._orientation = _angle(orientation)
         self._center = self._snap_center(_point(center))
         self._width = snap_dbu(maybe_float(width)) if width is not None else None
@@ -97,6 +100,8 @@ class Port:
     # ------------------------------------------------------------------ props
     def _snap_center(self, c: Any) -> Any:
         """Manhattan ports live on the dbu grid (kfactory integer ports)."""
+        if not getattr(self, "on_grid", True):
+            return c
         if self._orientation is None or manhattan_angle(self._orientation) is not None:
             return snap_dbu(c)
         return c
@@ -242,19 +247,8 @@ class Port:
 
     @property
     def trans(self) -> Any:
-        import klayout.db as kdb
-
-        from gdsfactory.config import CONF
-
-        dbu = 1e-3
-        _ = CONF
-        a = manhattan_angle(self._orientation) or 0
-        return kdb.Trans(
-            a // 90,
-            self.mirror,
-            round(to_float(self.x) / dbu),
-            round(to_float(self.y) / dbu),
-        )
+        """Integer (dbu) simple transformation, like kfactory's ``Port.trans``."""
+        return self.dcplx_trans.s_trans().to_itype(1e-3)
 
     # -------------------------------------------------------------- methods
     def copy(
@@ -264,6 +258,7 @@ class Port:
         **kwargs: Any,
     ) -> Port:
         p = Port.__new__(Port)
+        p.on_grid = kwargs.pop("on_grid", getattr(self, "on_grid", True))
         p.name = self.name if name is None else name
         p._center = self._center
         p._width = self._width

@@ -205,8 +205,12 @@ def route_single(
             (p.x, p.y) if hasattr(p, "x") and hasattr(p, "y") else (p[0], p[1])
             for p in waypoints_list
         ]
-        # place the route through exactly these points (start, waypoints, end)
-        pts = [(p1.x, p1.y), *w, (p2.x, p2.y)]
+        if isinstance(waypoints_list[0], kf.kdb.DPoint):
+            # like upstream: DPoint waypoints are the full backbone (incl. the ports)
+            pts = w
+        else:
+            # place the route through exactly these points (start, waypoints, end)
+            pts = [(p1.x, p1.y), *w, (p2.x, p2.y)]
         kf_on_placer_error = (
             "error" if on_placer_error == "warning" else on_placer_error
         )
