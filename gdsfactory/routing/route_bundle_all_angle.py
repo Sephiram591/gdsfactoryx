@@ -25,7 +25,7 @@ import jax
 import numpy as np
 
 import gdsfactory as gf
-from gdsfactory._jax import asarray, is_tracer, stop_gradient, to_float, to_numpy, xp
+from gdsfactory._jax import asarray, has_tracers, is_tracer, stop_gradient, to_float, to_numpy, xp
 from gdsfactory.component import Component, ComponentReference
 from gdsfactory.routing._kf_router import ManhattanRoute
 from gdsfactory.typings import (
@@ -239,11 +239,13 @@ def _kf_port(cell: Any, m: Any, p: _P, name: str, layer: Any) -> Any:
 class _Router:
     """Runs kfactory's all-angle backbone algorithm and its traced port side by side."""
 
-    def __init__(self, bend_func: Callable[..., Component], bend_ports: tuple[str, str], layer: Any) -> None:
+    def __init__(
+        self, cell: Any, bend_func: Callable[..., Component], bend_ports: tuple[str, str], layer: Any
+    ) -> None:
         from gdsfactory.routing._kf_router import mirror
 
         self.m = mirror()
-        self.cell = self.m.new_cell("aa")
+        self.cell = cell
         self.bend_func = bend_func
         self.bend_ports = bend_ports
         self.layer = layer
@@ -382,69 +384,80 @@ def _backbones(
     import kfactory.routing.aa.optical as aa
     import klayout.db as kdb
 
+    from gdsfactory.routing._kf_router import _CHECK_TRACED_ROUTER, mirror
+
     layer = ports1[0].layer
-    r = _Router(bend_func, bend_ports, layer)
     p1s = [_P(p.center_array, p.orientation, p.width) for p in ports1]
     p2s = [_P(p.center_array, p.orientation, p.width) for p in ports2]
 
-    traced_routes: list[list[Any]] = []
-    if backbone:
-        bb = [_vec(x, y) for x, y in backbone]
-        bundles = _backbone2bundle(bb, [p.w for p in p1s], separation)
-        for ps, pe, pts in zip(p1s, p2s, bundles, strict=False):
-            v_start = pts[0] - pts[1]
-            v_end = pts[-1] - pts[-2]
-            psb = _P(pts[0], xp.rad2deg(xp.arctan2(v_start[1], v_start[0])), ps.w)
-            peb = _P(pts[-1], xp.rad2deg(xp.arctan2(v_end[1], v_end[0])), pe.w)
-            pts_ = r.connection(ps, psb, list(pts))
-            pts_.reverse()
-            pts_ = r.connection(pe, peb, pts_)
-            pts_.reverse()
-            traced_routes.append(pts_)
-    else:
-        for ps, pe in zip(p1s, p2s, strict=False):
-            pts_ = r.connection(ps, pe, [])
-            pts_.append(pe.c)
-            traced_routes.append(pts_)
+    traced = _CHECK_TRACED_ROUTER or has_tracers(
+        ([(p.c, p.a, p.w) for p in (*p1s, *p2s)], backbone, list(separation))
+    )
+    if not traced:
+        w = to_float(p1s[0].w)
+        traced = bend_func(width=w, angle=90).has_tracers()
 
-    # kfactory's own computation (concrete values)
-    sps = [r.kport(_P(to_numpy(p.c), to_float(p.a), to_float(p.w))) for p in p1s]
-    eps = [r.kport(_P(to_numpy(p.c), to_float(p.a), to_float(p.w))) for p in p2s]
-    kf_routes: list[np.ndarray] = []
-    if backbone:
-        pts_list = aa.backbone2bundle(
-            backbone=[kdb.DPoint(to_float(x), to_float(y)) for x, y in backbone],
-            port_widths=[p.dwidth for p in sps],
-            spacings=[to_float(s) for s in separation],
-        )
-        for ps, pe, pts in zip(sps, eps, pts_list, strict=False):
-            v_start = pts[0] - pts[1]
-            v_end = pts[-1] - pts[-2]
-            psb = ps.copy()
-            psb.dcplx_trans = kdb.DCplxTrans(
-                1, float(np.rad2deg(np.arctan2(v_start.y, v_start.x))), False, pts[0].to_v()
+    with mirror().scratch() as cell:
+        r = _Router(cell, bend_func, bend_ports, layer)
+        # kfactory's own computation (concrete values)
+        sps = [r.kport(_P(to_numpy(p.c), to_float(p.a), to_float(p.w))) for p in p1s]
+        eps = [r.kport(_P(to_numpy(p.c), to_float(p.a), to_float(p.w))) for p in p2s]
+        kf_routes: list[np.ndarray] = []
+        if backbone:
+            pts_list = aa.backbone2bundle(
+                backbone=[kdb.DPoint(to_float(x), to_float(y)) for x, y in backbone],
+                port_widths=[p.dwidth for p in sps],
+                spacings=[to_float(s) for s in separation],
             )
-            peb = pe.copy()
-            peb.dcplx_trans = kdb.DCplxTrans(
-                1, float(np.rad2deg(np.arctan2(v_end.y, v_end.x))), False, pts[-1].to_v()
-            )
-            pts_ = aa._get_connection_between_ports(
-                port_start=ps, port_end=psb, bend_factory=r.kf_bend, bend_ports=bend_ports, backbone=pts
-            )
-            pts_.reverse()
-            pts_ = aa._get_connection_between_ports(
-                port_start=pe, port_end=peb, bend_factory=r.kf_bend, backbone=pts_, bend_ports=bend_ports
-            )
-            pts_.reverse()
-            kf_routes.append(np.array([[p.x, p.y] for p in pts_]))
-    else:
-        for ps, pe in zip(sps, eps, strict=False):
-            pts_ = aa._get_connection_between_ports(
-                port_start=ps, port_end=pe, bend_factory=r.kf_bend, bend_ports=bend_ports, backbone=[]
-            )
-            pts_.append(pe.dcplx_trans.disp.to_p())
-            kf_routes.append(np.array([[p.x, p.y] for p in pts_]))
-    r.cell.delete()
+            for ps, pe, pts in zip(sps, eps, pts_list, strict=False):
+                v_start = pts[0] - pts[1]
+                v_end = pts[-1] - pts[-2]
+                psb = ps.copy()
+                psb.dcplx_trans = kdb.DCplxTrans(
+                    1, float(np.rad2deg(np.arctan2(v_start.y, v_start.x))), False, pts[0].to_v()
+                )
+                peb = pe.copy()
+                peb.dcplx_trans = kdb.DCplxTrans(
+                    1, float(np.rad2deg(np.arctan2(v_end.y, v_end.x))), False, pts[-1].to_v()
+                )
+                pts_ = aa._get_connection_between_ports(
+                    port_start=ps, port_end=psb, bend_factory=r.kf_bend, bend_ports=bend_ports, backbone=pts
+                )
+                pts_.reverse()
+                pts_ = aa._get_connection_between_ports(
+                    port_start=pe, port_end=peb, bend_factory=r.kf_bend, backbone=pts_, bend_ports=bend_ports
+                )
+                pts_.reverse()
+                kf_routes.append(np.array([[p.x, p.y] for p in pts_]))
+        else:
+            for ps, pe in zip(sps, eps, strict=False):
+                pts_ = aa._get_connection_between_ports(
+                    port_start=ps, port_end=pe, bend_factory=r.kf_bend, bend_ports=bend_ports, backbone=[]
+                )
+                pts_.append(pe.dcplx_trans.disp.to_p())
+                kf_routes.append(np.array([[p.x, p.y] for p in pts_]))
+        if not traced:
+            return [asarray(kr) for kr in kf_routes]
+        traced_routes: list[list[Any]] = []
+        if backbone:
+            bb = [_vec(x, y) for x, y in backbone]
+            bundles = _backbone2bundle(bb, [p.w for p in p1s], separation)
+            for ps, pe, pts in zip(p1s, p2s, bundles, strict=False):
+                v_start = pts[0] - pts[1]
+                v_end = pts[-1] - pts[-2]
+                psb = _P(pts[0], xp.rad2deg(xp.arctan2(v_start[1], v_start[0])), ps.w)
+                peb = _P(pts[-1], xp.rad2deg(xp.arctan2(v_end[1], v_end[0])), pe.w)
+                pts_ = r.connection(ps, psb, list(pts))
+                pts_.reverse()
+                pts_ = r.connection(pe, peb, pts_)
+                pts_.reverse()
+                traced_routes.append(pts_)
+        else:
+            for ps, pe in zip(p1s, p2s, strict=False):
+                pts_ = r.connection(ps, pe, [])
+                pts_.append(pe.c)
+                traced_routes.append(pts_)
+
 
     out = []
     for i, (tr, kr) in enumerate(zip(traced_routes, kf_routes, strict=True)):

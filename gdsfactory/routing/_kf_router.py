@@ -123,6 +123,7 @@ class _Mirror:
         self.keep: dict[int, Any] = {}
         self.by_index: dict[int, Any] = {}
         self.tree_cache: dict[int, tuple[Any, Any]] = {}
+        self._pool: list[Any] = []
 
     def layer(self, layer: Any) -> int:
         from gdsfactory.pdk import get_layer_info
@@ -156,6 +157,22 @@ class _Mirror:
         import kfactory as kf
 
         return kf.DKCell(name=f"{name}_{next(self._counter)}", kcl=self.kcl)
+
+    @contextlib.contextmanager
+    def scratch(self) -> Iterator[Any]:
+        """A cleared scratch cell, returned to a pool afterwards.
+
+        Deleting cells makes kfactory rebuild its cell index, which made every
+        routing call O(number of cells); reusing cleared cells avoids that.
+        Nested routing calls (e.g. from a factory) get their own cell.
+        """
+        cell = self._pool.pop() if self._pool else self.new_cell()
+        try:
+            yield cell
+        finally:
+            cell.kdb_cell.clear()
+            cell.ports.clear()
+            self._pool.append(cell)
 
     def port(self, cell: Any, p: Port, name: str | None = None) -> Any:
         import klayout.db as kdb
@@ -341,11 +358,9 @@ def route_bundle_kf(
         straight_cells[kc.cell_index()] = (width, length)
         return kc
 
-    def run(kwargs: dict[str, Any]) -> tuple[Any, _Hook, Any]:
-        cell = m.new_cell()
-        if obstacles is not None and on_collision is not None:
-            obs = m.export(obstacles)
-            cell.create_inst(obs)
+    def run(cell: Any, kwargs: dict[str, Any], with_obstacles: bool) -> tuple[Any, _Hook]:
+        if with_obstacles:
+            cell.create_inst(m.export(obstacles))
         sp = [
             m.port(cell, _port_from_dict(d), name=f"s{i}")
             for i, d in enumerate(kwargs["start_ports"])
@@ -367,7 +382,7 @@ def route_bundle_kf(
             waypoints=wps,
             route_width=kwargs["route_width"],
             bboxes=[_dbox(b.dbox if isinstance(b, PortBox) else b) for b in (bboxes or [])],
-            on_collision=on_collision,
+            on_collision=on_collision_run,
             on_placer_error=on_placer_error,
             collision_check_layers=None
             if not collision_check_layers
@@ -410,67 +425,85 @@ def route_bundle_kf(
                 routes = kf.routing.electrical.route_bundle(
                     cell, sp, ep, place_layer=layer_info, **common
                 )
-        return routes, hook, cell
+        return routes, hook
 
-    routes_kf, hook, cell = run(base)
-
-    # ------------------------------------------------------------ backbones
-    base_bbs = [np.asarray([[p.x * DBU, p.y * DBU] for p in r.pts], dtype=float) for r in hook.records]
-    route_records = list(hook.records)
-    traced_bbs: list[Array] | None = None
-    if traced:
-        traced_bbs = _traced_backbones(
-            hook,
-            ports1,
-            ports2,
-            router=router,
-            bend90=bend90,
-            separation=separation,
-            starts=starts,
-            ends=ends,
-            waypoints=waypoints,
-            route_width=route_width,
-            bboxes=bboxes,
-            sbend=sbend_factory is not None,
-            kf_kwargs=kf_kwargs,
-        )
-
-    def traced_backbone(i: int) -> Array:
-        return traced_bbs[i] if traced_bbs is not None else asarray(base_bbs[i])
-
-    # ------------------------------------------------------- rebuild routes
-    out: list[ManhattanRoute] = []
-    start_lookup = {_key(p): p for p in ports1}
-    end_lookup = {_key(p): p for p in ports2}
-    for i, (rk, rec) in enumerate(zip(routes_kf, route_records, strict=False)):
-        bb = traced_backbone(i)
-        p_start = start_lookup.get(_kkey(rec.start)) or ports1[min(i, len(ports1) - 1)]
-        p_end = end_lookup.get(_kkey(rec.end)) or ports2[min(i, len(ports2) - 1)]
-        if router == "optical":
-            route = _rebuild_optical(
-                component,
-                rk,
-                bb,
-                p_start,
-                p_end,
+    # The rest of the layout only matters for displaying a collision
+    # ("show_error"): check without it, and export it only if a collision
+    # is found (kfactory's check itself looks at the new routes only).
+    on_collision_run = on_collision
+    lazy_obstacles = obstacles is not None and on_collision is not None
+    if lazy_obstacles:
+        on_collision_run = "error"
+    with m.scratch() as cell:
+        try:
+            routes_kf, hook = run(cell, base, with_obstacles=False)
+        except RuntimeError as e:
+            if not (
+                lazy_obstacles
+                and on_collision == "show_error"
+                and "collision" in str(e).lower()
+            ):
+                raise
+            cell.kdb_cell.clear()
+            cell.ports.clear()
+            on_collision_run = on_collision
+            run(cell, base, with_obstacles=True)  # shows the error and raises
+            raise
+        # ------------------------------------------------------------ backbones
+        base_bbs = [np.asarray([[p.x * DBU, p.y * DBU] for p in r.pts], dtype=float) for r in hook.records]
+        route_records = list(hook.records)
+        traced_bbs: list[Array] | None = None
+        if traced:
+            traced_bbs = _traced_backbones(
+                hook,
+                ports1,
+                ports2,
+                router=router,
                 bend90=bend90,
-                taper=taper,
-                straight_factory=straight_factory,
-                straight_cells=straight_cells,
-                sbend_cells=sbend_cells,
-                sbend_factory=sbend_factory,
-                traced=traced,
+                separation=separation,
+                starts=starts,
+                ends=ends,
+                waypoints=waypoints,
                 route_width=route_width,
-                special=special,
+                bboxes=bboxes,
+                sbend=sbend_factory is not None,
+                kf_kwargs=kf_kwargs,
             )
-        else:
-            route = _rebuild_electrical(
-                component, rk, bb, p_start, p_end, route_width=route_width, place_layer=place_layer
-            )
-        out.append(route)
-    with contextlib.suppress(Exception):
-        cell.delete()
-    return out
+
+        def traced_backbone(i: int) -> Array:
+            return traced_bbs[i] if traced_bbs is not None else asarray(base_bbs[i])
+
+        # ------------------------------------------------------- rebuild routes
+        out: list[ManhattanRoute] = []
+        start_lookup = {_key(p): p for p in ports1}
+        end_lookup = {_key(p): p for p in ports2}
+        for i, (rk, rec) in enumerate(zip(routes_kf, route_records, strict=False)):
+            bb = traced_backbone(i)
+            p_start = start_lookup.get(_kkey(rec.start)) or ports1[min(i, len(ports1) - 1)]
+            p_end = end_lookup.get(_kkey(rec.end)) or ports2[min(i, len(ports2) - 1)]
+            if router == "optical":
+                route = _rebuild_optical(
+                    component,
+                    rk,
+                    bb,
+                    p_start,
+                    p_end,
+                    bend90=bend90,
+                    taper=taper,
+                    straight_factory=straight_factory,
+                    straight_cells=straight_cells,
+                    sbend_cells=sbend_cells,
+                    sbend_factory=sbend_factory,
+                    traced=traced,
+                    route_width=route_width,
+                    special=special,
+                )
+            else:
+                route = _rebuild_electrical(
+                    component, rk, bb, p_start, p_end, route_width=route_width, place_layer=place_layer
+                )
+            out.append(route)
+        return out
 
 
 def place_manhattan_kf(
@@ -495,52 +528,50 @@ def place_manhattan_kf(
     from kfactory.routing.optical import place_manhattan
 
     m = mirror()
-    cell = m.new_cell("route_pts")
-    kp1 = m.port(cell, p1, name="s0")
-    kp2 = m.port(cell, p2, name="e0")
-    bend90_concrete = _concrete_component(bend90)
-    kb = m.export(bend90_concrete)
-    straight_cells: dict[int, tuple[float, float]] = {}
+    with m.scratch() as cell:
+        kp1 = m.port(cell, p1, name="s0")
+        kp2 = m.port(cell, p2, name="e0")
+        bend90_concrete = _concrete_component(bend90)
+        kb = m.export(bend90_concrete)
+        straight_cells: dict[int, tuple[float, float]] = {}
 
-    def kf_straight(width: int, length: int, **kw: Any) -> Any:
-        comp = straight_factory(width=width * DBU, length=length * DBU)
-        kc = m.export(comp)
-        straight_cells[kc.cell_index()] = (width * DBU, length * DBU)
-        return m.kcl[kc.cell_index()]
+        def kf_straight(width: int, length: int, **kw: Any) -> Any:
+            comp = straight_factory(width=width * DBU, length=length * DBU)
+            kc = m.export(comp)
+            straight_cells[kc.cell_index()] = (width * DBU, length * DBU)
+            return m.kcl[kc.cell_index()]
 
-    pts_dbu = [kdb.Point(round(to_float(x) / DBU), round(to_float(y) / DBU)) for x, y in pts]
-    rk = place_manhattan(
-        m.kcl[cell.cell_index()],
-        p1=m.kcl[cell.cell_index()].ports[kp1.name],
-        p2=m.kcl[cell.cell_index()].ports[kp2.name],
-        straight_factory=kf_straight,
-        bend90_cell=m.kcl[kb.cell_index()],
-        pts=pts_dbu,
-        port_type=port_type,
-        allow_width_mismatch=allow_width_mismatch,
-        route_width=round(to_float(route_width) / DBU) if route_width is not None else None,
-    )
-    backbone = xp.stack([xp.stack([asarray(x), asarray(y)]) for x, y in pts])
-    traced = is_tracer(backbone) or _has_traced_geometry(bend90) or is_tracer(p1.center_array) or is_tracer(p2.center_array)
-    route = _rebuild_optical(
-        component,
-        rk,
-        backbone,
-        p1,
-        p2,
-        bend90=bend90,
-        taper=None,
-        straight_factory=straight_factory,
-        straight_cells=straight_cells,
-        sbend_cells={},
-        sbend_factory=None,
-        traced=traced,
-        route_width=route_width,
-        special={"bend": kb.cell_index()},
-    )
-    with contextlib.suppress(Exception):
-        cell.delete()
-    return route
+        pts_dbu = [kdb.Point(round(to_float(x) / DBU), round(to_float(y) / DBU)) for x, y in pts]
+        rk = place_manhattan(
+            m.kcl[cell.cell_index()],
+            p1=m.kcl[cell.cell_index()].ports[kp1.name],
+            p2=m.kcl[cell.cell_index()].ports[kp2.name],
+            straight_factory=kf_straight,
+            bend90_cell=m.kcl[kb.cell_index()],
+            pts=pts_dbu,
+            port_type=port_type,
+            allow_width_mismatch=allow_width_mismatch,
+            route_width=round(to_float(route_width) / DBU) if route_width is not None else None,
+        )
+        backbone = xp.stack([xp.stack([asarray(x), asarray(y)]) for x, y in pts])
+        traced = is_tracer(backbone) or _has_traced_geometry(bend90) or is_tracer(p1.center_array) or is_tracer(p2.center_array)
+        route = _rebuild_optical(
+            component,
+            rk,
+            backbone,
+            p1,
+            p2,
+            bend90=bend90,
+            taper=None,
+            straight_factory=straight_factory,
+            straight_cells=straight_cells,
+            sbend_cells={},
+            sbend_factory=None,
+            traced=traced,
+            route_width=route_width,
+            special={"bend": kb.cell_index()},
+        )
+        return route
 
 
 def to_kf_port(p: Port) -> Any:
