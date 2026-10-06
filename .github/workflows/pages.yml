@@ -19,27 +19,13 @@ jobs:
       - name: Cancel Workflow Action
         uses: styfle/cancel-workflow-action@0.13.1
       - uses: actions/checkout@v7
-      - uses: actions/cache@v6.1.0
-        with:
-          path: |
-            ~/.gdsfactory/
-          key: 0.0.1
-          restore-keys: 0.0.1
       - name: Set up Python 3.12
         uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - name: Install uv
         uses: astral-sh/setup-uv@v7
-      - name: Installing the library
-        run: |
-          make install
-          sudo apt install graphviz graphviz-dev -y
-          uv run gf install-klayout-genericpdk
       - name: Build the docs
-        env:
-          GDSFACTORY_DISPLAY_TYPE: klayout
-          KFACTORY_DISPLAY_TYPE: image
         run: |
           make docs
       - name: Upload artifact

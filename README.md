@@ -1,48 +1,47 @@
-# GDSFactory 9.51.0
+# gdsfactoryx
 
-[![docs](https://github.com/gdsfactory/gdsfactory/actions/workflows/pages.yml/badge.svg)](https://gdsfactory.github.io/gdsfactory/)
-[![PyPI](https://img.shields.io/pypi/v/gdsfactory)](https://pypi.org/project/gdsfactory/)
-[![PyPI Python](https://img.shields.io/pypi/pyversions/gdsfactory.svg)](https://pypi.python.org/pypi/gdsfactory)
-[![Downloads](https://static.pepy.tech/badge/gdsfactory)](https://pepy.tech/project/gdsfactory)
-[![MIT](https://img.shields.io/github/license/gdsfactory/gdsfactory)](https://choosealicense.com/licenses/mit/)
-[![codecov](https://img.shields.io/codecov/c/github/gdsfactory/gdsfactory)](https://codecov.io/gh/gdsfactory/gdsfactory/tree/main/gdsfactory)
-[![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/gdsfactory/binder-sandbox/HEAD)
-[![inspect.software](https://raw.githubusercontent.com/inspect-software/badges/main/v1/g/gdsfactory/gdsfactory.svg)](https://inspect.software/software/gdsfactory/gdsfactory)
+[![docs](https://github.com/Sephiram591/gdsfactoryx/actions/workflows/pages.yml/badge.svg)](https://sephiram591.github.io/gdsfactoryx/)
+[![tests](https://github.com/Sephiram591/gdsfactoryx/actions/workflows/test_code.yml/badge.svg)](https://github.com/Sephiram591/gdsfactoryx/actions/workflows/test_code.yml)
+[![MIT](https://img.shields.io/github/license/Sephiram591/gdsfactoryx)](https://choosealicense.com/licenses/mit/)
+
+**gdsfactoryx** is a port of [GDSFactory](https://github.com/gdsfactory/gdsfactory) (9.51.0) with a differentiable
+[JAX](https://jax.readthedocs.io) geometry backend: polygons, ports, references and routes are float64 JAX-compatible
+arrays, so any scalar computed from a layout can be differentiated with `jax.grad` with respect to the parameters of
+the cell functions. KLayout is kept for GDS I/O, viewing and boolean operations. Components and their `LayerStack`
+can be simulated directly in [fdtdx](https://github.com/ymahlau/fdtdx) with `gdsfactory.fdtdx_stack.StackDevice`,
+with gradients flowing from the simulation back to the layout.
+
+- **gdsfactoryx docs** (the port, differentiability, fdtdx): https://sephiram591.github.io/gdsfactoryx/
+- **gdsfactory docs** (everything else): https://gdsfactory.github.io/gdsfactory/
+
+```python
+import jax
+import gdsfactory as gf
+
+gf.gpdk.PDK.activate()
+jax.grad(lambda r: gf.components.ring_single(radius=r).dxsize)(10.0)
+```
+
+## Installation
+
+gdsfactoryx is not on PyPI. The distribution is still named `gdsfactory`, so it replaces an upstream gdsfactory
+installed in the same environment:
+
+```bash
+pip install "gdsfactory[fdtdx] @ git+https://github.com/Sephiram591/gdsfactoryx.git"
+```
+
+---
+
+*The rest of this README is upstream GDSFactory's.*
 
 GDSFactory is a Python library for designing chips (Photonics, Analog, Quantum, MEMS), PCBs, and 3D-printable objects. We aim to make hardware design accessible, intuitive, and fun—empowering everyone to build the future.
-
-> **gdsfactoryx** is a fork of GDSFactory with a differentiable [JAX](https://jax.readthedocs.io) geometry backend:
-> polygons, ports, references and routes are float64 JAX-compatible arrays, so any scalar computed from a layout can be
-> differentiated with `jax.grad` with respect to the parameters of the cell functions. KLayout is kept for GDS I/O,
-> viewing and boolean operations. See [docs/differentiable.md](docs/differentiable.md).
->
-> ```python
-> import jax
-> import gdsfactory as gf
->
-> gf.gpdk.PDK.activate()
-> jax.grad(lambda r: gf.components.ring_single(radius=r).dxsize)(10.0)
-> ```
 
 As input you write python code, as an output GDSFactory creates CAD files (GDS, OASIS, STL, GERBER).
 
 ![cad](https://raw.githubusercontent.com/gdsfactory/gdsfactory/main/docs/images/cad.png)
 
 ## Quick Start
-
-Here's a simple example to get you started:
-
-```bash
-pip install gdsfactory
-```
-
-If you prefer a faster setup, you can use the installer package:
-
-```bash
-pip install gdsfactory_install
-gfi install
-```
-
 
 ```python
 import gdsfactory as gf

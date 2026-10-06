@@ -109,14 +109,13 @@ nbdocs: ## Convert Jupytext Python notebooks to markdown
 	rm -f docs/notebooks/*.ipynb
 	uv run python docs/hooks.py docs/notebooks/*.md
 
-docs: nbdocs ## Build documentation
-	uv run python docs/write_cells.py
-	uv run --extra docs zensical build --strict -f docs/zensical.yml
-	uv run python docs/write_legacy_redirects.py docs/_build/html
+docs: ## Build documentation
+	uv run --extra docs --extra fdtdx zensical build --strict -f docs/zensical.yml
+	# docs_dir is docs/, so drop upstream's notebooks and build files copied as static files
+	rm -rf docs/_build/html/notebooks docs/_build/html/hooks.py docs/_build/html/zensical.yml
 
-docs-serve: nbdocs ## Serve documentation locally
-	uv run python docs/write_cells.py
-	uv run --extra docs zensical serve -f docs/zensical.yml -a localhost:8080
+docs-serve: ## Serve documentation locally
+	uv run --extra docs --extra fdtdx zensical serve -f docs/zensical.yml -a localhost:8080
 
 git-rm-merged: ## Delete merged git branches
 	git fetch --prune
