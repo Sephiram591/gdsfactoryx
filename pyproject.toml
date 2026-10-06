@@ -58,6 +58,7 @@ version = "9.51.0"
 [project.optional-dependencies]
 bench = ["asv>=0.6,<1"]
 cad = ["kweb>=1.1.9,<2.1"]
+fdtdx = ["fdtdx>=0.6.2"]
 dev = [
   "hypothesis",
   "ipykernel",
