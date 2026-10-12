@@ -15,16 +15,28 @@ and only :mod:`gdsfactory.viewer.widget` wraps it in a widget.
 
 from __future__ import annotations
 
+import math
 from typing import Any, NamedTuple
 
 from gdsfactory.viewer.palette import fallback_color
-from gdsfactory.viewer.solids import LevelSolid, PortGlyph, SolidMesh, build
+from gdsfactory.viewer.solids import (
+    LevelSolid,
+    PortGlyph,
+    SolidMesh,
+    SolidSet,
+    analytic_solids,
+    background_mesh,
+    level_solids,
+)
 
 __all__ = ["LayerStyle", "ViewerState"]
 
 #: Default opacity of a fill level and of every other level (spec R2, Q5).
 FILL_OPACITY = 0.15
 LEVEL_OPACITY = 0.9
+
+#: The section planes the 2D viewport can show (spec R4).
+PLANES = ("xy", "xz", "yz")
 
 
 class LayerStyle(NamedTuple):
@@ -77,12 +89,15 @@ class ViewerState:
             stack: a :class:`~gdsfactory.fdtdx_stack.StackDevice`.
         """
         self.stack = stack
-        origin, size, levels, background, ports = build(stack)
-        self.origin: tuple[float, float, float] = origin
-        self.size: tuple[float, float, float] = size
-        self.levels: list[LevelSolid] = levels
-        self.background: SolidMesh = background
-        self.ports: tuple[PortGlyph, ...] = ports
+        solids = analytic_solids(stack)
+        #: the manifolds behind the meshes; the 2D section slices these, so the
+        #: geometry is built once and shared (spec D3 risk, R4)
+        self.solids: SolidSet = solids
+        self.origin: tuple[float, float, float] = solids.origin
+        self.size: tuple[float, float, float] = solids.size
+        self.levels: list[LevelSolid] = level_solids(stack, solids)
+        self.background: SolidMesh = background_mesh(solids)
+        self.ports: tuple[PortGlyph, ...] = solids.ports
 
         self.styles: dict[str, LayerStyle] = {
             level.name: LayerStyle(
@@ -90,12 +105,28 @@ class ViewerState:
                 opacity=FILL_OPACITY if level.fill else LEVEL_OPACITY,
                 visible=True,
             )
-            for index, level in enumerate(levels)
+            for index, level in enumerate(self.levels)
         }
-        self.port_visible: dict[str, bool] = {port.name: True for port in ports}
+        self.port_visible: dict[str, bool] = {port.name: True for port in self.ports}
         self.selection: dict[str, str] | None = None
         self.active_viewport: str = "3d"
         self.show_full: bool = False
+        self.plane: str = "xy"
+        lo, hi = self.plane_bounds()
+        self.plane_position: float = 0.5 * (lo + hi)  # the box center (spec C5)
+
+    # ------------------------------------------------------------------ section
+
+    def plane_bounds(self) -> tuple[float, float]:
+        """The section slider's ``(min, max)`` along the active plane's normal (spec R4).
+
+        The range is the device box along that axis, from ``origin``/``size``
+        (both measured from the box center, spec C5).
+        """
+        axis = {"xy": 2, "xz": 1, "yz": 0}[self.plane]
+        half = 0.5 * self.size[axis]
+        center = self.origin[axis]
+        return center - half, center + half
 
     # ------------------------------------------------------------------ patching
 
@@ -103,10 +134,10 @@ class ViewerState:
         """Applies one browser patch in place (spec D10).
 
         Recognised keys: ``styles`` (per-level partial ``{color, opacity,
-        visible}``), ``port_visible``, ``selection``, ``active_viewport`` and
-        ``show_full``. Unknown names or keys raise ``ValueError``; the widget
-        handler catches it and re-syncs the canonical state, so a bad patch
-        cannot corrupt the state.
+        visible}``), ``port_visible``, ``selection``, ``active_viewport``,
+        ``show_full``, ``plane`` and ``plane_position``. Unknown names or keys
+        raise ``ValueError``; the widget handler catches it and re-syncs the
+        canonical state, so a bad patch cannot corrupt the state.
 
         Args:
             patch: the partial state the browser sent.
@@ -120,6 +151,8 @@ class ViewerState:
             "selection",
             "active_viewport",
             "show_full",
+            "plane",
+            "plane_position",
         }
         if unknown:
             raise ValueError(f"Unknown state keys: {sorted(unknown)}")
@@ -153,6 +186,20 @@ class ViewerState:
         if "show_full" in patch:
             self.show_full = bool(patch["show_full"])
 
+        if "plane" in patch:
+            if patch["plane"] not in PLANES:
+                raise ValueError(f"Unknown plane {patch['plane']!r}")
+            self.plane = patch["plane"]
+            lo, hi = self.plane_bounds()
+            self.plane_position = min(hi, max(lo, self.plane_position))
+
+        if "plane_position" in patch:
+            position = float(patch["plane_position"])
+            if not math.isfinite(position):
+                raise ValueError(f"Non-finite plane position {patch['plane_position']!r}")
+            lo, hi = self.plane_bounds()
+            self.plane_position = min(hi, max(lo, position))
+
     # ------------------------------------------------------------------ wire
 
     def to_state(self) -> dict[str, Any]:
@@ -166,6 +213,9 @@ class ViewerState:
             "selection": self.selection,
             "active_viewport": self.active_viewport,
             "show_full": self.show_full,
+            "plane": self.plane,
+            "plane_position": self.plane_position,
+            "plane_bounds": list(self.plane_bounds()),
         }
 
 

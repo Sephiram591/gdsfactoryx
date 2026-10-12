@@ -1,12 +1,14 @@
 """The viewer's ``anywidget`` app shell (spec D2, D7, D9, D10).
 
-One widget owns the menubar, the explorer and the 3D viewport (spec D9). It
+One widget owns the menubar, the explorer and both viewports (spec D9). It
 holds the shared :class:`~gdsfactory.viewer.state.ViewerState` in the kernel and
-syncs three traits to the browser:
+syncs four traits to the browser:
 
 - ``geometry`` and ``meta`` — set once, from
   :func:`gdsfactory.viewer.payload.build_payload`; they carry the mesh buffers.
 - ``state`` — the small JSON state, re-sent on every edit.
+- ``section`` — the 2D cross-section rings (spec R4), rebuilt only when the
+  plane or its position changes, so a color edit never reslices.
 
 The browser edits the state by sending ``{"event": "set_state", "patch": ...}``;
 :meth:`Viewer._on_msg` applies it to the kernel's state and syncs the canonical
@@ -22,7 +24,7 @@ from typing import Any
 import anywidget
 import traitlets
 
-from gdsfactory.viewer.payload import build_payload
+from gdsfactory.viewer.payload import build_payload, build_section_payload
 from gdsfactory.viewer.state import ViewerState
 
 __all__ = ["Viewer", "view"]
@@ -42,6 +44,8 @@ class Viewer(anywidget.AnyWidget):
     meta = traitlets.Dict(default_value={}).tag(sync=True)
     #: the shared state, re-sent on every edit (spec D10)
     state = traitlets.Dict(default_value={}).tag(sync=True)
+    #: the 2D cross-section rings, rebuilt when the plane changes (spec R4)
+    section = traitlets.Dict(default_value={}).tag(sync=True)
 
     def __init__(self, stack: Any, **kwargs: Any) -> None:
         """Builds the device's geometry and prepares the widget.
@@ -56,6 +60,7 @@ class Viewer(anywidget.AnyWidget):
         self.geometry = geometry
         self.meta = meta
         self.state = self._viewer_state.to_state()
+        self.section = build_section_payload(self._viewer_state)
         self.on_msg(self._on_msg)
 
     @property
@@ -67,11 +72,15 @@ class Viewer(anywidget.AnyWidget):
         """Applies a browser patch to the kernel state and re-syncs it (spec D10)."""
         if content.get("event") != "set_state":
             return
+        before = (self._viewer_state.plane, self._viewer_state.plane_position)
         try:
             self._viewer_state.apply_patch(content.get("patch") or {})
         except (ValueError, TypeError):
             pass  # a bad patch leaves the state unchanged
         self.state = self._viewer_state.to_state()
+        after = (self._viewer_state.plane, self._viewer_state.plane_position)
+        if after != before:
+            self.section = build_section_payload(self._viewer_state)
 
 
 def view(stack: Any) -> Viewer:

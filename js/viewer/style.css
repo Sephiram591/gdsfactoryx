@@ -2,9 +2,10 @@
 .gfx-shell {
   display: grid;
   grid-template-columns: auto 1fr;
-  grid-template-rows: auto 1fr;
+  grid-template-rows: auto auto 1fr;
   grid-template-areas:
     "menubar menubar"
+    "section section"
     "explorer viewport";
   height: 640px;
   min-height: 360px;
@@ -181,4 +182,66 @@
 
 .gfx-viewport canvas {
   display: block;
+}
+
+/* the 2D cross-section region (spec R4) */
+.gfx-section-controls {
+  grid-area: section;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 10px;
+  background: #202027;
+  border-bottom: 1px solid #3a3a42;
+}
+
+.gfx-section-controls[hidden] {
+  display: none;
+}
+
+.gfx-plane-toggle {
+  display: flex;
+  gap: 4px;
+}
+
+.gfx-section-controls .gfx-control {
+  margin-left: 0;
+}
+
+.gfx-numeric {
+  width: 72px;
+  padding: 2px 4px;
+  border: 1px solid #4a4a55;
+  border-radius: 4px;
+  background: #2f2f37;
+  color: inherit;
+}
+
+.gfx-viewport-3d,
+.gfx-section {
+  position: absolute;
+  inset: 0;
+}
+
+.gfx-viewport-3d[hidden],
+.gfx-section[hidden] {
+  display: none;
+}
+
+.gfx-section-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: crosshair;
+}
+
+.gfx-readout {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(20, 20, 24, 0.75);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
 }

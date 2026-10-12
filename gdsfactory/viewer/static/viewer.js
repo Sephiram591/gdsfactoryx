@@ -17900,14 +17900,14 @@ function WebGLBindingStates(gl, attributes) {
   const maxVertexAttributes = gl.getParameter(gl.MAX_VERTEX_ATTRIBS);
   const bindingStates = {};
   const defaultState = createBindingState(null);
-  let currentState = defaultState;
+  let currentState2 = defaultState;
   let forceUpdate = false;
   function setup(object, material, program, geometry, index) {
     let updateBuffers = false;
     const state = getBindingState(object, geometry, program, material);
-    if (currentState !== state) {
-      currentState = state;
-      bindVertexArrayObject(currentState.object);
+    if (currentState2 !== state) {
+      currentState2 = state;
+      bindVertexArrayObject(currentState2.object);
     }
     updateBuffers = needsUpdate(object, geometry, program, index);
     if (updateBuffers) saveCache(object, geometry, program, index);
@@ -17979,7 +17979,7 @@ function WebGLBindingStates(gl, attributes) {
     };
   }
   function needsUpdate(object, geometry, program, index) {
-    const cachedAttributes = currentState.attributes;
+    const cachedAttributes = currentState2.attributes;
     const geometryAttributes = geometry.attributes;
     let attributesNum = 0;
     const programAttributes = program.getAttributes();
@@ -17998,8 +17998,8 @@ function WebGLBindingStates(gl, attributes) {
         attributesNum++;
       }
     }
-    if (currentState.attributesNum !== attributesNum) return true;
-    if (currentState.index !== index) return true;
+    if (currentState2.attributesNum !== attributesNum) return true;
+    if (currentState2.index !== index) return true;
     return false;
   }
   function saveCache(object, geometry, program, index) {
@@ -18024,12 +18024,12 @@ function WebGLBindingStates(gl, attributes) {
         attributesNum++;
       }
     }
-    currentState.attributes = cache;
-    currentState.attributesNum = attributesNum;
-    currentState.index = index;
+    currentState2.attributes = cache;
+    currentState2.attributesNum = attributesNum;
+    currentState2.index = index;
   }
   function initAttributes() {
-    const newAttributes = currentState.newAttributes;
+    const newAttributes = currentState2.newAttributes;
     for (let i = 0, il = newAttributes.length; i < il; i++) {
       newAttributes[i] = 0;
     }
@@ -18038,9 +18038,9 @@ function WebGLBindingStates(gl, attributes) {
     enableAttributeAndDivisor(attribute, 0);
   }
   function enableAttributeAndDivisor(attribute, meshPerAttribute) {
-    const newAttributes = currentState.newAttributes;
-    const enabledAttributes = currentState.enabledAttributes;
-    const attributeDivisors = currentState.attributeDivisors;
+    const newAttributes = currentState2.newAttributes;
+    const enabledAttributes = currentState2.enabledAttributes;
+    const attributeDivisors = currentState2.attributeDivisors;
     newAttributes[attribute] = 1;
     if (enabledAttributes[attribute] === 0) {
       gl.enableVertexAttribArray(attribute);
@@ -18052,8 +18052,8 @@ function WebGLBindingStates(gl, attributes) {
     }
   }
   function disableUnusedAttributes() {
-    const newAttributes = currentState.newAttributes;
-    const enabledAttributes = currentState.enabledAttributes;
+    const newAttributes = currentState2.newAttributes;
+    const enabledAttributes = currentState2.enabledAttributes;
     for (let i = 0, il = enabledAttributes.length; i < il; i++) {
       if (enabledAttributes[i] !== newAttributes[i]) {
         gl.disableVertexAttribArray(i);
@@ -18238,9 +18238,9 @@ function WebGLBindingStates(gl, attributes) {
   function reset() {
     resetDefaultState();
     forceUpdate = true;
-    if (currentState === defaultState) return;
-    currentState = defaultState;
-    bindVertexArrayObject(currentState.object);
+    if (currentState2 === defaultState) return;
+    currentState2 = defaultState;
+    bindVertexArrayObject(currentState2.object);
   }
   function resetDefaultState() {
     defaultState.geometry = null;
@@ -29491,7 +29491,303 @@ function niceLength(value) {
   return step * power;
 }
 
+// viewer/section.ts
+var BG_COLOR = "#15151a";
+var EDGE_COLOR = "#000000";
+var PORT_COLOR = "#ffcc33";
+var SELECTED_COLOR2 = "#66ff66";
+var PORT_CUT_HALF = 0.5;
+var Section2D = class {
+  constructor(meta, onPortSelect) {
+    this.meta = meta;
+    this.onPortSelect = onPortSelect;
+    this.payload = null;
+    this.state = null;
+    this.exaggeration = 1;
+    this.view = { scale: 1, dx: 0, dy: 0 };
+    //: set once the user zooms or pans; until then the view re-fits on every
+    //: resize and payload change (the container starts hidden at zero size)
+    this.userAdjusted = false;
+    this.root = document.createElement("div");
+    this.root.className = "gfx-section";
+    this.canvas = document.createElement("canvas");
+    this.canvas.className = "gfx-section-canvas";
+    this.readout = document.createElement("div");
+    this.readout.className = "gfx-readout";
+    this.root.append(this.canvas, this.readout);
+    const context = this.canvas.getContext("2d");
+    if (!context) throw new Error("2D canvas context unavailable");
+    this.context = context;
+    this.canvas.addEventListener("mousemove", (event) => this.onMove(event));
+    this.canvas.addEventListener("mouseleave", () => this.readout.textContent = "");
+    this.canvas.addEventListener("click", (event) => this.onClick(event));
+    this.canvas.addEventListener("wheel", (event) => this.onWheel(event), { passive: false });
+    this.canvas.addEventListener("mousedown", (event) => this.onPanStart(event));
+    this.resizeObserver = new ResizeObserver(() => {
+      if (!this.userAdjusted) this.fit();
+      else this.draw();
+    });
+    this.resizeObserver.observe(this.root);
+  }
+  setPayload(payload) {
+    this.payload = payload;
+    this.fit();
+    this.draw();
+  }
+  setState(state) {
+    this.state = state;
+    this.draw();
+  }
+  setExaggeration(factor) {
+    this.exaggeration = factor;
+    if (this.userAdjusted) this.draw();
+    else this.fit();
+  }
+  /** Frames the section rectangle in the canvas with equal aspect (spec R4). */
+  fit() {
+    const payload = this.payload;
+    if (!payload) return;
+    const { width, height } = this.size();
+    const [[u0, u1], [v0, v1]] = payload.bounds;
+    const uSpan = Math.max(u1 - u0, 1e-6);
+    const vSpan = Math.max((v1 - v0) * this.exaggeration, 1e-6);
+    const margin = 24;
+    const scale = Math.min((width - 2 * margin) / uSpan, (height - 2 * margin) / vSpan);
+    this.view = { scale, dx: 0, dy: 0 };
+    this.userAdjusted = false;
+    this.draw();
+  }
+  dispose() {
+    this.resizeObserver.disconnect();
+  }
+  // ------------------------------------------------------------------ drawing
+  size() {
+    return {
+      width: Math.max(this.root.clientWidth, 1),
+      height: Math.max(this.root.clientHeight, 1)
+    };
+  }
+  /** Local (u, v) -> screen pixels. v is flipped (v up) and exaggerated. */
+  project(u, v) {
+    const { width, height } = this.size();
+    const cx = width / 2 + this.view.dx;
+    const cy = height / 2 + this.view.dy;
+    return [cx + u * this.view.scale, cy - v * this.view.scale * this.exaggeration];
+  }
+  unproject(px, py) {
+    const { width, height } = this.size();
+    const cx = width / 2 + this.view.dx;
+    const cy = height / 2 + this.view.dy;
+    return [(px - cx) / this.view.scale, (cy - py) / (this.view.scale * this.exaggeration)];
+  }
+  path(rings) {
+    const path = new Path2D();
+    for (const ring of rings) {
+      if (ring.length < 3) continue;
+      const [x0, y0] = this.project(ring[0][0], ring[0][1]);
+      path.moveTo(x0, y0);
+      for (let i = 1; i < ring.length; i++) {
+        const [x, y] = this.project(ring[i][0], ring[i][1]);
+        path.lineTo(x, y);
+      }
+      path.closePath();
+    }
+    return path;
+  }
+  draw() {
+    const { width, height } = this.size();
+    const dpr = window.devicePixelRatio || 1;
+    if (this.canvas.width !== width * dpr || this.canvas.height !== height * dpr) {
+      this.canvas.width = width * dpr;
+      this.canvas.height = height * dpr;
+      this.canvas.style.width = `${width}px`;
+      this.canvas.style.height = `${height}px`;
+    }
+    const ctx = this.context;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = BG_COLOR;
+    ctx.fillRect(0, 0, width, height);
+    const payload = this.payload;
+    const state = this.state;
+    if (!payload || !state) return;
+    const ordered = [...this.meta.levels].sort((a, b) => a.mesh_order - b.mesh_order);
+    for (const level of ordered) {
+      const style = state.styles[level.name];
+      const rings = payload.rings[level.name];
+      if (!style || !style.visible || !rings || rings.length === 0) continue;
+      ctx.globalAlpha = style.opacity;
+      const path = this.path(rings);
+      ctx.fillStyle = style.color;
+      ctx.fill(path, "evenodd");
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = EDGE_COLOR;
+      ctx.lineWidth = 1;
+      ctx.stroke(path);
+    }
+    this.drawPorts(ctx, payload);
+    this.drawAxes(ctx, payload);
+  }
+  drawPorts(ctx, payload) {
+    const state = this.state;
+    if (!state) return;
+    for (const port of this.meta.ports) {
+      if (!(state.port_visible[port.name] ?? true)) continue;
+      const cut = this.portCut(port, payload);
+      if (!cut) continue;
+      const selected = state.selection?.kind === "port" && state.selection.name === port.name;
+      ctx.strokeStyle = selected ? SELECTED_COLOR2 : PORT_COLOR;
+      ctx.lineWidth = 2;
+      const [a, b] = cut;
+      const [x0, y0] = this.project(a[0], a[1]);
+      const [x1, y1] = this.project(b[0], b[1]);
+      ctx.beginPath();
+      ctx.moveTo(x0, y0);
+      ctx.lineTo(x1, y1);
+      ctx.stroke();
+    }
+  }
+  /** A port's outline where the section plane cuts it, in (u, v), or null. */
+  portCut(port, payload) {
+    const half = PORT_CUT_HALF;
+    if (payload.plane === "xy") {
+      if (Math.abs(port.z - payload.position) > half) return null;
+      const angle = (port.orientation ?? 0) * Math.PI / 180;
+      const w = port.width / 2;
+      return [
+        [port.x - w * Math.sin(angle), port.y + w * Math.cos(angle)],
+        [port.x + w * Math.sin(angle), port.y - w * Math.cos(angle)]
+      ];
+    }
+    if (payload.plane === "xz") {
+      if (Math.abs(port.y - payload.position) > half) return null;
+      return [
+        [port.x, port.z - port.width / 2],
+        [port.x, port.z + port.width / 2]
+      ];
+    }
+    if (Math.abs(port.x - payload.position) > half) return null;
+    return [
+      [port.z - port.width / 2, port.y],
+      [port.z + port.width / 2, port.y]
+    ];
+  }
+  drawAxes(ctx, payload) {
+    const [[u0, u1], [v0, v1]] = payload.bounds;
+    ctx.strokeStyle = "rgba(180,180,200,0.35)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    const [ax, ay] = this.project(u0, 0);
+    const [bx, by] = this.project(u1, 0);
+    ctx.moveTo(ax, ay);
+    ctx.lineTo(bx, by);
+    const [cx, cy] = this.project(0, v0);
+    const [dx, dy] = this.project(0, v1);
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(dx, dy);
+    ctx.stroke();
+  }
+  // ------------------------------------------------------------------ hover
+  onMove(event) {
+    const payload = this.payload;
+    const state = this.state;
+    if (!payload || !state) return;
+    const rect = this.canvas.getBoundingClientRect();
+    const [u, v] = this.unproject(event.clientX - rect.left, event.clientY - rect.top);
+    const level = this.levelAt(u, v);
+    const name = level ?? (this.inBackground(u, v) ? "background" : "-");
+    this.readout.textContent = `${payload.axis_u}=${u.toFixed(3)} ${payload.axis_v}=${v.toFixed(3)} \xB5m \xB7 ${name}`;
+  }
+  onClick(event) {
+    const payload = this.payload;
+    const state = this.state;
+    if (!payload || !state) return;
+    const rect = this.canvas.getBoundingClientRect();
+    const [u, v] = this.unproject(event.clientX - rect.left, event.clientY - rect.top);
+    for (const port of this.meta.ports) {
+      const cut = this.portCut(port, payload);
+      if (!cut) continue;
+      if (this.nearSegment(u, v, cut[0], cut[1], 6 / this.view.scale)) {
+        this.onPortSelect(port.name);
+        return;
+      }
+    }
+    this.onPortSelect(null);
+  }
+  /** The topmost visible level containing (u, v) by even-odd, or null. */
+  levelAt(u, v) {
+    const payload = this.payload;
+    const state = this.state;
+    if (!payload || !state) return null;
+    const ordered = [...this.meta.levels].sort((a, b) => b.mesh_order - a.mesh_order);
+    for (const level of ordered) {
+      const style = state.styles[level.name];
+      const rings = payload.rings[level.name];
+      if (!style?.visible || !rings) continue;
+      if (this.containsEvenOdd(u, v, rings)) return level.name;
+    }
+    return null;
+  }
+  inBackground(u, v) {
+    return this.payload ? this.containsEvenOdd(u, v, this.payload.background) : false;
+  }
+  containsEvenOdd(u, v, rings) {
+    let inside = false;
+    for (const ring of rings) {
+      for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+        const [xi, yi] = ring[i];
+        const [xj, yj] = ring[j];
+        if (yi > v !== yj > v && u < (xj - xi) * (v - yi) / (yj - yi) + xi) inside = !inside;
+      }
+    }
+    return inside;
+  }
+  nearSegment(u, v, a, b, tol) {
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    const lengthSq = dx * dx + dy * dy;
+    const t = lengthSq === 0 ? 0 : Math.max(0, Math.min(1, ((u - a[0]) * dx + (v - a[1]) * dy) / lengthSq));
+    const px = a[0] + t * dx;
+    const py = a[1] + t * dy;
+    return Math.hypot(u - px, v - py) <= tol;
+  }
+  // ------------------------------------------------------------------ zoom/pan
+  onWheel(event) {
+    event.preventDefault();
+    const rect = this.canvas.getBoundingClientRect();
+    const mx = event.clientX - rect.left;
+    const my = event.clientY - rect.top;
+    const [u, v] = this.unproject(mx, my);
+    const factor = Math.exp(-event.deltaY * 1e-3);
+    this.view.scale *= factor;
+    const [px, py] = this.project(u, v);
+    this.view.dx += mx - px;
+    this.view.dy += my - py;
+    this.userAdjusted = true;
+    this.draw();
+  }
+  onPanStart(event) {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const startDx = this.view.dx;
+    const startDy = this.view.dy;
+    const move = (moveEvent) => {
+      this.view.dx = startDx + (moveEvent.clientX - startX);
+      this.view.dy = startDy + (moveEvent.clientY - startY);
+      this.userAdjusted = true;
+      this.draw();
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  }
+};
+
 // viewer/index.ts
+var PLANES = ["xy", "xz", "yz"];
 function render({ model, el }) {
   const geometry = model.get("geometry");
   const meta = model.get("meta");
@@ -29504,11 +29800,16 @@ function render({ model, el }) {
   title2.textContent = "gdsfactory viewer";
   const to3d = button("3D", true);
   const to2d = button("2D", false);
-  to2d.disabled = true;
-  to2d.title = "Cross-section (R4) - M3";
   const fit = button("Fit", false);
+  const fullToggle = document.createElement("label");
+  fullToggle.className = "gfx-control";
+  fullToggle.title = "show full extent (unpainted)";
+  const fullInput = document.createElement("input");
+  fullInput.type = "checkbox";
+  fullToggle.append(fullInput, document.createTextNode(" full extent"));
   const exaggeration = document.createElement("label");
   exaggeration.className = "gfx-control";
+  exaggeration.title = "vertical exaggeration (3D)";
   exaggeration.textContent = "z \xD7";
   const exaggerationInput = document.createElement("input");
   exaggerationInput.type = "range";
@@ -29517,22 +29818,57 @@ function render({ model, el }) {
   exaggerationInput.step = "0.5";
   exaggerationInput.value = "1";
   exaggeration.appendChild(exaggerationInput);
-  const fullToggle = document.createElement("label");
-  fullToggle.className = "gfx-control";
-  fullToggle.title = "show full extent (unpainted)";
-  const fullInput = document.createElement("input");
-  fullInput.type = "checkbox";
-  fullToggle.append(fullInput, document.createTextNode(" full extent"));
   menubar.append(title2, to3d, to2d, fit, fullToggle, exaggeration);
+  const sectionControls = document.createElement("div");
+  sectionControls.className = "gfx-section-controls";
+  sectionControls.hidden = true;
+  const planeToggle = document.createElement("div");
+  planeToggle.className = "gfx-plane-toggle";
+  const planeButtons = /* @__PURE__ */ new Map();
+  for (const plane of PLANES) {
+    const planeButton = button(plane, plane === "xy");
+    planeButton.addEventListener("click", () => sendPatch(model, { plane }));
+    planeButtons.set(plane, planeButton);
+    planeToggle.appendChild(planeButton);
+  }
+  const position = document.createElement("label");
+  position.className = "gfx-control";
+  const positionSlider = document.createElement("input");
+  positionSlider.type = "range";
+  positionSlider.step = "0.01";
+  const positionBox = document.createElement("input");
+  positionBox.type = "number";
+  positionBox.step = "0.01";
+  positionBox.className = "gfx-numeric";
+  position.append(positionSlider, positionBox);
+  const sectionExaggeration = document.createElement("label");
+  sectionExaggeration.className = "gfx-control";
+  sectionExaggeration.title = "vertical exaggeration (2D)";
+  sectionExaggeration.textContent = "z \xD7";
+  const sectionExaggerationInput = document.createElement("input");
+  sectionExaggerationInput.type = "range";
+  sectionExaggerationInput.min = "1";
+  sectionExaggerationInput.max = "20";
+  sectionExaggerationInput.step = "0.5";
+  sectionExaggerationInput.value = "1";
+  sectionExaggeration.appendChild(sectionExaggerationInput);
+  sectionControls.append(planeToggle, position, sectionExaggeration);
   const explorer = new Explorer(meta, {
     onPatch: (patch) => sendPatch(model, patch),
     onSelect: (selection) => sendPatch(model, { selection })
   });
   const viewport = document.createElement("div");
   viewport.className = "gfx-viewport";
-  el.append(menubar, explorer.root, viewport);
-  const scene = new Scene3D(viewport);
+  const sceneRoot = document.createElement("div");
+  sceneRoot.className = "gfx-viewport-3d";
+  viewport.appendChild(sceneRoot);
+  el.append(menubar, sectionControls, explorer.root, viewport);
+  const scene = new Scene3D(sceneRoot);
   scene.setBounds(geometry.size);
+  const section = new Section2D(meta, (name) => sendPatch(model, {
+    selection: name ? { kind: "port", name } : null
+  }));
+  viewport.appendChild(section.root);
   const levels = /* @__PURE__ */ new Map();
   for (const level of geometry.levels) {
     const style = currentStyles(model)[level.name];
@@ -29542,17 +29878,61 @@ function render({ model, el }) {
   }
   const glyphs = new PortGlyphs(meta.ports);
   scene.content.add(glyphs.group);
-  fit.addEventListener("click", () => scene.fit());
+  fit.addEventListener("click", () => {
+    if (currentState(model)?.active_viewport === "2d") section.fit();
+    else scene.fit();
+  });
   exaggerationInput.addEventListener(
     "input",
     () => scene.setZExaggeration(Number(exaggerationInput.value))
+  );
+  sectionExaggerationInput.addEventListener(
+    "input",
+    () => section.setExaggeration(Number(sectionExaggerationInput.value))
   );
   fullInput.addEventListener(
     "change",
     () => sendPatch(model, { show_full: fullInput.checked })
   );
+  to3d.addEventListener("click", () => sendPatch(model, { active_viewport: "3d" }));
+  to2d.addEventListener("click", () => sendPatch(model, { active_viewport: "2d" }));
+  let pendingPosition = null;
+  let positionFrame = 0;
+  const flushPosition = () => {
+    positionFrame = 0;
+    if (pendingPosition === null) return;
+    sendPatch(model, { plane_position: pendingPosition });
+    pendingPosition = null;
+  };
+  const queuePosition = (value) => {
+    pendingPosition = value;
+    if (positionFrame === 0) positionFrame = requestAnimationFrame(flushPosition);
+  };
+  positionSlider.addEventListener("input", () => {
+    positionBox.value = positionSlider.value;
+    queuePosition(Number(positionSlider.value));
+  });
+  positionBox.addEventListener("change", () => {
+    const value = Number(positionBox.value);
+    positionSlider.value = String(value);
+    queuePosition(value);
+  });
   const applyState = () => {
     const state = model.get("state");
+    const is2d = state.active_viewport === "2d";
+    to3d.classList.toggle("gfx-active", !is2d);
+    to2d.classList.toggle("gfx-active", is2d);
+    sceneRoot.hidden = is2d;
+    section.root.hidden = !is2d;
+    sectionControls.hidden = !is2d;
+    for (const [plane, planeButton] of planeButtons) {
+      planeButton.classList.toggle("gfx-active", plane === state.plane);
+    }
+    const [lo, hi] = state.plane_bounds;
+    positionSlider.min = String(lo);
+    positionSlider.max = String(hi);
+    if (document.activeElement !== positionBox) positionBox.value = String(state.plane_position);
+    if (document.activeElement !== positionSlider) positionSlider.value = String(state.plane_position);
     for (const [name, meshes] of levels) {
       const style = state.styles[name];
       if (!style) continue;
@@ -29567,11 +29947,20 @@ function render({ model, el }) {
     }
     glyphs.setSelected(state.selection?.kind === "port" ? state.selection.name : null);
     fullInput.checked = state.show_full;
+    section.setState(state);
     explorer.render(state);
   };
+  const applySection = () => {
+    const payload = model.get("section");
+    if (payload && Object.keys(payload).length > 0) section.setPayload(payload);
+  };
   model.on("change:state", applyState);
+  model.on("change:section", applySection);
+  applySection();
   applyState();
   return () => {
+    if (positionFrame !== 0) cancelAnimationFrame(positionFrame);
+    section.dispose();
     scene.dispose();
     for (const meshes of levels.values()) meshes.dispose();
     glyphs.dispose();
@@ -29580,9 +29969,11 @@ function render({ model, el }) {
 function sendPatch(model, patch) {
   model.send({ event: "set_state", patch });
 }
+function currentState(model) {
+  return model.get("state");
+}
 function currentStyles(model) {
-  const state = model.get("state");
-  return state?.styles ?? {};
+  return currentState(model)?.styles ?? {};
 }
 function button(text, active) {
   const element = document.createElement("button");

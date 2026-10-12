@@ -65,7 +65,9 @@ __all__ = [
     "SolidMesh",
     "SolidSet",
     "analytic_solids",
+    "background_mesh",
     "build",
+    "level_solids",
 ]
 
 _ROUND = m3.JoinType.Round
@@ -472,20 +474,22 @@ def _mesh(man: m3.Manifold, origin: tuple[float, float, float]) -> SolidMesh:
     return SolidMesh(positions=vertices, indices=indices)
 
 
-def build(device: Any) -> tuple[tuple[float, float, float], tuple[float, float, float], list[LevelSolid], SolidMesh, tuple[PortGlyph, ...]]:
-    """Build the viewer's geometry for a device (spec M1): meshes, ports and the box.
+def level_solids(device: Any, solids: SolidSet) -> list[LevelSolid]:
+    """Packages a :class:`SolidSet`'s manifolds into one :class:`LevelSolid` per level.
+
+    Split out of :func:`build` so a caller that already holds the ``SolidSet``
+    (the viewer's state, which slices the same manifolds for the 2D section)
+    can reuse it instead of rebuilding the geometry (spec D3 risk: build once).
 
     Args:
-        device: a :class:`~gdsfactory.fdtdx_stack.StackDevice`.
+        device: the :class:`~gdsfactory.fdtdx_stack.StackDevice` the solids were built from.
+        solids: the manifolds from :func:`analytic_solids`.
 
     Returns:
-        ``(origin, size, levels, background, ports)``: the box center and size
-        (um), one :class:`LevelSolid` per level (painted and full meshes), the
-        background mesh, and the port glyphs.
+        One :class:`LevelSolid` per ``device.levels``, in that order.
     """
-    solids = analytic_solids(device)
     origin = solids.origin
-    levels = [
+    return [
         LevelSolid(
             name=level.name,
             material=level.material,
@@ -502,4 +506,28 @@ def build(device: Any) -> tuple[tuple[float, float, float], tuple[float, float, 
         )
         for level in device.levels
     ]
-    return origin, solids.size, levels, _mesh(solids.background, origin), solids.ports
+
+
+def background_mesh(solids: SolidSet) -> SolidMesh:
+    """The background mesh (box minus every level) of an already-built :class:`SolidSet`.
+
+    Split out of :func:`build` alongside :func:`level_solids`, for callers that
+    hold the ``SolidSet`` already.
+    """
+    return _mesh(solids.background, solids.origin)
+
+
+def build(device: Any) -> tuple[tuple[float, float, float], tuple[float, float, float], list[LevelSolid], SolidMesh, tuple[PortGlyph, ...]]:
+    """Build the viewer's geometry for a device (spec M1): meshes, ports and the box.
+
+    Args:
+        device: a :class:`~gdsfactory.fdtdx_stack.StackDevice`.
+
+    Returns:
+        ``(origin, size, levels, background, ports)``: the box center and size
+        (um), one :class:`LevelSolid` per level (painted and full meshes), the
+        background mesh, and the port glyphs.
+    """
+    solids = analytic_solids(device)
+    levels = level_solids(device, solids)
+    return solids.origin, solids.size, levels, background_mesh(solids), solids.ports

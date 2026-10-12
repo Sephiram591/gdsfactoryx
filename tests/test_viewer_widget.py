@@ -189,7 +189,16 @@ def test_state_edit_carries_no_geometry() -> None:
     wire = viewer_state.to_state()
     assert "levels" not in wire
     assert "origin" not in wire
-    assert set(wire) == {"styles", "port_visible", "selection", "active_viewport", "show_full"}
+    assert set(wire) == {
+        "styles",
+        "port_visible",
+        "selection",
+        "active_viewport",
+        "show_full",
+        "plane",
+        "plane_position",
+        "plane_bounds",
+    }
 
 
 # ------------------------------------------------------------------ the widget

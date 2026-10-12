@@ -1,13 +1,15 @@
 """The wire payload the browser receives (spec D5, C5).
 
 The geometry is built once, by :class:`~gdsfactory.viewer.state.ViewerState`,
-and split into two payloads so a style or selection edit never resends meshes:
+and split into payloads so a style or selection edit never resends meshes:
 
 - **geometry** carries the meshes as contiguous ``memoryview`` buffers.
   ipywidgets extracts those from nested trait values and ships them as binary
   comm buffers, so the float32 positions (measured from the box center, spec C5)
   keep their nm precision with no base64 or JSON cost.
 - **meta** carries the level and port metadata as plain JSON.
+- **section** carries the 2D cross-section rings as plain JSON. Rings are a few
+  hundred points, so JSON keeps their nm precision with no binary plumbing.
 
 The ``count`` / ``tris`` integers travel beside each buffer so the browser can
 rebuild the typed arrays without a length probe.
@@ -19,10 +21,11 @@ from typing import Any
 
 import numpy as np
 
+from gdsfactory.viewer.section import section, section_axis_names, section_bounds, section_normal_axis
 from gdsfactory.viewer.solids import SolidMesh
 from gdsfactory.viewer.state import ViewerState
 
-__all__ = ["build_payload"]
+__all__ = ["build_payload", "build_section_payload"]
 
 
 def _mesh_payload(mesh: SolidMesh) -> dict[str, Any]:
@@ -98,3 +101,53 @@ def build_payload(viewer_state: ViewerState) -> tuple[dict[str, Any], dict[str, 
         "background": viewer_state.stack.background,
     }
     return geometry, meta
+
+
+def _rings(rings: tuple[np.ndarray, ...]) -> list[list[list[float]]]:
+    """A section's rings as nested JSON lists (spec R4, C5)."""
+    return [[[float(x), float(y)] for x, y in ring] for ring in rings]
+
+
+def build_section_payload(viewer_state: ViewerState) -> dict[str, Any]:
+    """The 2D cross-section payload for the state's current plane (spec R4, D4).
+
+    Slices the manifolds :class:`ViewerState` already holds (never rebuilding
+    them, spec D3 risk), so the section and the 3D meshes always agree.
+
+    Args:
+        viewer_state: the state built once from a device.
+
+    Returns:
+        ``{"plane", "position", "axis_u", "axis_v", "normal_axis", "bounds",
+        "rings", "background"}``: the plane and its position, the stack-axis
+        names the section's two axes and slider correspond to (for labels), the
+        section rectangle's local ``(u, v)`` bounds, and the level rings.
+    """
+    sliced = section(viewer_state.solids, viewer_state.plane, viewer_state.plane_position)
+    u_bounds, v_bounds = section_bounds(viewer_state.size, viewer_state.plane)
+    return {
+        "plane": viewer_state.plane,
+        "position": float(viewer_state.plane_position),
+        "axis_u": section_axis_names(viewer_state.plane)[0],
+        "axis_v": section_axis_names(viewer_state.plane)[1],
+        "normal_axis": section_normal_axis(viewer_state.plane),
+        "bounds": [list(u_bounds), list(v_bounds)],
+        "rings": {name: _rings(rings) for name, rings in sliced.rings.items()},
+        "background": _rings(sliced.background),
+    }
+
+
+def _section_axis_names(plane: str) -> tuple[str, str]:
+    return {"xy": ("x", "y"), "xz": ("x", "z"), "yz": ("z", "y")}[plane]
+
+
+def _section_normal_axis(plane: str) -> str:
+    return {"xy": "z", "xz": "y", "yz": "x"}[plane]
+
+
+def _section_bounds(size: tuple[float, float, float], plane: str) -> tuple[tuple[float, float], tuple[float, float]]:
+    axes = {"xy": (0, 1), "xz": (0, 2), "yz": (2, 1)}[plane]
+    return (
+        (-0.5 * size[axes[0]], 0.5 * size[axes[0]]),
+        (-0.5 * size[axes[1]], 0.5 * size[axes[1]]),
+    )

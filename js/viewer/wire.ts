@@ -70,6 +70,25 @@ export interface StatePayload {
   selection: Selection | null;
   active_viewport: "3d" | "2d";
   show_full: boolean;
+  plane: "xy" | "xz" | "yz";
+  plane_position: number;
+  plane_bounds: [number, number];
+}
+
+// The 2D cross-section payload (spec R4). Rings are `[u, v]` pairs in the
+// section's local frame (from the box center, spec C5); a level's rings may be
+// outer or hole contours and are filled even-odd.
+export type Ring = [number, number][];
+
+export interface SectionPayload {
+  plane: "xy" | "xz" | "yz";
+  position: number;
+  axis_u: string;
+  axis_v: string;
+  normal_axis: string;
+  bounds: [[number, number], [number, number]];
+  rings: Record<string, Ring[]>;
+  background: Ring[];
 }
 
 // A buffer may arrive as DataView (ipywidgets) or ArrayBuffer. A typed-array
