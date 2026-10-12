@@ -97,7 +97,11 @@ class LevelSolid(NamedTuple):
 
 
 class PortGlyph(NamedTuple):
-    """One port's metadata and the height its glyph is drawn at (spec R3, Q12)."""
+    """One port's metadata and the height its glyph is drawn at (spec R3, Q12).
+
+    ``x``/``y``/``z`` are in the same local-origin frame as the level meshes
+    (spec C5), so the browser draws the glyphs and the solids together.
+    """
 
     name: str
     x: float
@@ -389,13 +393,20 @@ def _port_z(device: Any, layer: int) -> float:
     return float(device.z_center)
 
 
-def _port_glyphs(device: Any) -> tuple[PortGlyph, ...]:
+def _port_glyphs(device: Any, origin: tuple[float, float, float]) -> tuple[PortGlyph, ...]:
+    """Port glyphs in the local-origin frame the meshes use (spec C5).
+
+    ``origin`` is the box center the meshes are shifted by; the glyphs are
+    drawn in the same ``content`` group as the meshes, so their coordinates
+    must be local too.
+    """
+    ox, oy, oz = origin
     return tuple(
         PortGlyph(
             name=p.name,
-            x=float(p.x),
-            y=float(p.y),
-            z=_port_z(device, int(p.layer)),
+            x=float(p.x) - ox,
+            y=float(p.y) - oy,
+            z=_port_z(device, int(p.layer)) - oz,
             orientation=None if p.orientation is None else float(p.orientation),
             width=float(p.width),
             layer=int(p.layer),
@@ -448,7 +459,7 @@ def analytic_solids(device: Any) -> SolidSet:
         painted=painted,
         background=background,
         box=box_man,
-        ports=_port_glyphs(device),
+        ports=_port_glyphs(device, origin),
     )
 
 

@@ -1,0 +1,103 @@
+// The wire format the kernel sends (spec D5, C5).
+//
+// Meshes travel as contiguous binary buffers: ipywidgets extracts them from the
+// trait value and delivers them as DataView, so positions are decoded straight
+// into a Float32Array with no base64 or JSON cost, at float32 precision measured
+// from the box center (spec C5).
+
+export interface MeshPayload {
+  positions: DataView | ArrayBuffer;
+  count: number;
+  indices: DataView | ArrayBuffer;
+  tris: number;
+}
+
+export interface LevelPayload {
+  name: string;
+  painted: MeshPayload;
+  full: MeshPayload;
+}
+
+export interface GeometryPayload {
+  origin: [number, number, number];
+  size: [number, number, number];
+  levels: LevelPayload[];
+  background: MeshPayload;
+}
+
+export interface LevelMeta {
+  name: string;
+  material: string;
+  mesh_order: number;
+  fill: boolean;
+  zmin: number;
+  thickness: number;
+  sidewall_angle: number;
+  bias: number;
+  width_to_z: number;
+}
+
+export interface PortMeta {
+  name: string;
+  x: number;
+  y: number;
+  z: number;
+  orientation: number | null;
+  width: number;
+  layer: number;
+}
+
+export interface MetaPayload {
+  levels: LevelMeta[];
+  ports: PortMeta[];
+  background: string;
+}
+
+export interface LayerStyle {
+  color: string;
+  opacity: number;
+  visible: boolean;
+}
+
+export interface Selection {
+  kind: "level" | "port";
+  name: string;
+}
+
+export interface StatePayload {
+  styles: Record<string, LayerStyle>;
+  port_visible: Record<string, boolean>;
+  selection: Selection | null;
+  active_viewport: "3d" | "2d";
+  show_full: boolean;
+}
+
+// A buffer may arrive as DataView (ipywidgets) or ArrayBuffer. A typed-array
+// view over a DataView's backing buffer requires 4-byte alignment at its
+// byteOffset, which ipywidgets does not guarantee, so copy the bytes out first
+// when the offset is misaligned. Copying is cheap next to the mesh transfer.
+function bytesOf(buffer: DataView | ArrayBuffer): { source: ArrayBuffer; offset: number } {
+  return buffer instanceof ArrayBuffer
+    ? { source: buffer, offset: 0 }
+    : { source: buffer.buffer as ArrayBuffer, offset: buffer.byteOffset };
+}
+
+function asFloat32(buffer: DataView | ArrayBuffer, count: number): Float32Array {
+  const { source, offset } = bytesOf(buffer);
+  if (offset % 4 === 0) return new Float32Array(source, offset, count);
+  return new Float32Array(source.slice(offset, offset + count * 4));
+}
+
+function asUint32(buffer: DataView | ArrayBuffer, count: number): Uint32Array {
+  const { source, offset } = bytesOf(buffer);
+  if (offset % 4 === 0) return new Uint32Array(source, offset, count);
+  return new Uint32Array(source.slice(offset, offset + count * 4));
+}
+
+export function decodePositions(mesh: MeshPayload): Float32Array {
+  return asFloat32(mesh.positions, mesh.count * 3);
+}
+
+export function decodeIndices(mesh: MeshPayload): Uint32Array {
+  return asUint32(mesh.indices, mesh.tris * 3);
+}

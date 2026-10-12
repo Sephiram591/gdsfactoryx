@@ -254,3 +254,25 @@ def test_build_time_is_recorded(capsys: pytest.CaptureFixture[str]) -> None:
         with capsys.disabled():
             print(f"\n{name} build: {elapsed * 1e3:.1f} ms")
         assert elapsed < 30.0, f"{name} build took {elapsed:.1f}s"
+
+
+def test_ports_are_in_the_local_origin_frame() -> None:
+    """Port glyphs share the meshes' local frame, so they draw on the device (spec C5).
+
+    The meshes are shifted by the box center; the glyphs must be shifted too, or
+    the browser (which draws both in one group) places them off the device.
+    """
+    for name in ("F1", "F2", "F3"):
+        device = FIXTURES[name]()
+        origin, size, levels, _, ports = solids.build(device)
+        box = np.array(size) / 2.0
+        for port in ports:
+            point = np.array([port.x, port.y, port.z])
+            # every glyph sits inside the box, and inside the level meshes
+            assert np.all(np.abs(point) <= box + 1e-3), f"{name}/{port.name}: {point} outside {box}"
+            assert any(
+                level.painted.positions.size
+                and np.all(point >= level.painted.positions.min(axis=0) - 1e-3)
+                and np.all(point <= level.painted.positions.max(axis=0) + 1e-3)
+                for level in levels
+            ), f"{name}/{port.name}: {point} inside no level"

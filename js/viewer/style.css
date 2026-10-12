@@ -1,0 +1,147 @@
+/* The app shell: menubar over an explorer + viewport row (spec D9). */
+.gfx-shell {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-rows: auto 1fr;
+  grid-template-areas:
+    "menubar menubar"
+    "explorer viewport";
+  height: 640px;
+  min-height: 360px;
+  border: 1px solid #3a3a42;
+  border-radius: 6px;
+  overflow: hidden;
+  font-family: system-ui, sans-serif;
+  font-size: 12px;
+  color: #e6e6ea;
+  background: #1b1b1f;
+}
+
+.gfx-menubar {
+  grid-area: menubar;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: #26262c;
+  border-bottom: 1px solid #3a3a42;
+}
+
+.gfx-title {
+  font-weight: 600;
+  margin-right: 8px;
+}
+
+.gfx-button {
+  padding: 3px 10px;
+  border: 1px solid #4a4a55;
+  border-radius: 4px;
+  background: #2f2f37;
+  color: inherit;
+  cursor: pointer;
+}
+
+.gfx-button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.gfx-active {
+  background: #4a6fa5;
+  border-color: #6a8fc5;
+}
+
+.gfx-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.gfx-explorer {
+  grid-area: explorer;
+  display: flex;
+  flex-direction: column;
+  width: 260px;
+  min-width: 200px;
+  padding: 8px;
+  gap: 10px;
+  overflow-y: auto;
+  background: #202027;
+  border-right: 1px solid #3a3a42;
+}
+
+.gfx-section-header {
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.7;
+  margin-bottom: 4px;
+}
+
+.gfx-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.gfx-row:hover {
+  background: #2c2c35;
+}
+
+.gfx-selected {
+  background: #3a4a66;
+}
+
+.gfx-swatch {
+  width: 22px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  background: none;
+}
+
+.gfx-opacity {
+  width: 64px;
+}
+
+.gfx-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gfx-note {
+  opacity: 0.5;
+  padding: 2px 4px;
+}
+
+.gfx-properties {
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px solid #3a3a42;
+}
+
+.gfx-properties-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.gfx-property {
+  opacity: 0.85;
+}
+
+.gfx-viewport {
+  grid-area: viewport;
+  flex: 1;
+  position: relative;
+  min-width: 0;
+}
+
+.gfx-viewport canvas {
+  display: block;
+}
