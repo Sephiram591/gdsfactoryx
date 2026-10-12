@@ -7,6 +7,9 @@
   of abutting polygons are not treated as boundaries. :func:`split_t_junctions`
   makes partly shared junction edges (a narrower taper on a waveguide, a taper
   on the side of an MMI) exactly shared, so they are seams too.
+  :func:`topology_changes` tells whether moved vertices still fit that static
+  topology. :func:`nearest_edges` finds the few boundary edges nearest to each
+  point (for the exact fill at polygon corners).
 - :func:`gaussian_random_field`: Gaussian random fields for surface roughness.
 - :func:`align_material_poles` / :class:`SlotPole`: give all materials the same
   dispersive pole slots, so that mixing materials in a voxel mixes only the pole
@@ -18,6 +21,7 @@
 import math
 import warnings
 from collections.abc import Sequence
+from functools import partial
 from typing import Any
 
 import fdtdx
@@ -30,13 +34,20 @@ from fdtdx.dispersion import DispersionModel, Pole
 
 Array = jax.Array
 
+# edges shorter than this fraction of the topology tolerance are points: they
+# are left out of the distance (the tolerance itself would also drop the short
+# edges of a finely sampled curve)
+_POINT = 1e-3
+
 __all__ = [
     "SlotPole",
     "align_material_poles",
     "gaussian_random_field",
+    "nearest_edges",
     "pack_polygons",
     "signed_distance",
     "split_t_junctions",
+    "topology_changes",
     "warn_reversible_losses",
 ]
 
@@ -73,16 +84,39 @@ def split_t_junctions(
     on their edges, so the filled region does not change.
 
     Static (numpy, from concrete vertices); the inserted points copy vertices, so
-    with ``vertices[index]`` they follow those vertices when they move.
+    with ``vertices[index]`` they follow those vertices when they move, which is
+    right as long as they stay inside their edges (see :func:`topology_changes`).
+    A vertex up to ``tol`` off an edge is inserted too: the edge then bends
+    through it by at most ``tol``, where leaving it out would leave a slit
+    between the polygons (layout snapping moves a vertex off a slanted edge it
+    was on).
 
     Args:
         vertices: (E, 2) packed polygon vertices.
         sizes: vertices per polygon.
-        tol: distance tolerance (same units as ``vertices``).
+        tol: distance (same units as ``vertices``) within which a vertex lies on
+            an edge, and within which it is at the edge's end (then the two
+            polygons share that vertex instead).
 
     Returns:
         index: indices into ``vertices`` of the split polygons' vertices.
         sizes: vertices per split polygon.
+    """
+    return _apply_inserts(_t_junction_inserts(vertices, sizes, tol), sizes)
+
+
+def _t_junction_inserts(vertices: np.ndarray, sizes: Sequence[int], tol: float = 1e-6) -> list[list[int]]:
+    """The vertices that lie inside every edge (see :func:`split_t_junctions`).
+
+    Args:
+        vertices: (E, 2) packed polygon vertices.
+        sizes: vertices per polygon.
+        tol: distance tolerance (same units as ``vertices``, see
+            :func:`split_t_junctions`).
+
+    Returns:
+        Per edge (by its start vertex), the indices of the vertices inside it,
+        one per distinct position, ordered along the edge.
     """
     from scipy.spatial import cKDTree
 
@@ -117,6 +151,12 @@ def split_t_junctions(
             if not kept or (ti - kept[-1][0]) * length[e] > tol:
                 kept.append((ti, int(i)))
         inserts[e] = [i for _, i in kept]
+    return inserts
+
+
+def _apply_inserts(inserts: Sequence[Sequence[int]], sizes: Sequence[int]) -> tuple[np.ndarray, tuple[int, ...]]:
+    """Index and sizes of the polygons with ``inserts[e]`` inserted after every vertex e."""
+    starts = np.cumsum([0, *sizes[:-1]])
     index, new_sizes = [], []
     for start, size in zip(starts, sizes, strict=True):
         poly = []
@@ -128,15 +168,104 @@ def split_t_junctions(
     return np.asarray(index, dtype=int), tuple(new_sizes)
 
 
+def _directed(
+    vertices: np.ndarray, nxt: np.ndarray, ids: np.ndarray, num_polygons: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Start and end vertex of every edge, directed with its polygon's filled side on the left.
+
+    Args:
+        vertices: (E, 2) packed polygon vertices.
+        nxt: (E,) end vertex of every edge (polygon order).
+        ids: (E,) polygon index of every edge.
+        num_polygons: number of polygons.
+
+    Returns:
+        src: (E,) start vertex of every directed edge.
+        dst: (E,) end vertex of every directed edge.
+    """
+    v = np.asarray(vertices, dtype=float)
+    cross = v[:, 0] * v[nxt, 1] - v[nxt, 0] * v[:, 1]
+    clockwise = np.bincount(ids, weights=cross, minlength=num_polygons)[ids] < 0
+    edge = np.arange(len(v))
+    return np.where(clockwise, nxt, edge), np.where(clockwise, edge, nxt)
+
+
+def _seams(
+    vertices: np.ndarray, nxt: np.ndarray, ids: np.ndarray, num_polygons: int, tol: float
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Directed edges, the point-like ones, and the edge each other one abuts.
+
+    Two edges abut (a seam: abutting polygons, a KLayout hole cut line, a
+    zero-width spike) when, directed with their polygons' filled sides on the
+    left, one runs back between the other's ends: each end within ``tol`` of
+    the other's opposite end (pairwise, so near points do not chain). The
+    edges must also point opposite ways, which only matters for edges up to
+    about ``tol`` long, whose ends alone do not tell.
+
+    Args:
+        vertices: (E, 2) packed polygon vertices.
+        nxt: (E,) end vertex of every edge (polygon order).
+        ids: (E,) polygon index of every edge.
+        num_polygons: number of polygons.
+        tol: distance within which two vertices are the same point.
+
+    Returns:
+        src: (E,) start vertex of every directed edge.
+        dst: (E,) end vertex of every directed edge.
+        point: (E,) edges shorter than ``_POINT * tol``.
+        partner: (E,) the lowest-index edge each other edge abuts, or -1.
+    """
+    from scipy.spatial import cKDTree
+
+    v = np.asarray(vertices, dtype=float)
+    src, dst = _directed(v, nxt, ids, num_polygons)
+    a, b = v[src], v[dst]
+    d = b - a
+    point = np.hypot(d[:, 0], d[:, 1]) <= _POINT * tol
+    partner = np.full(len(v), -1, dtype=np.int64)
+    live = np.flatnonzero(~point)
+    if live.size < 2:
+        return src, dst, point, partner
+    # candidates within tol per coordinate, then each end within tol
+    tree = cKDTree(np.concatenate([a[live], b[live]], axis=1))
+    found = tree.query_ball_point(np.concatenate([b[live], a[live]], axis=1), r=tol, p=np.inf)
+    counts = np.fromiter((len(f) for f in found), dtype=np.int64, count=len(found))
+    if not counts.sum():
+        return src, dst, point, partner
+    e = np.repeat(live, counts)
+    f = live[np.concatenate([np.asarray(x, dtype=np.int64) for x in found if len(x)])]
+    ok = (
+        (e != f)
+        & (np.linalg.norm(a[f] - b[e], axis=1) <= tol)
+        & (np.linalg.norm(b[f] - a[e], axis=1) <= tol)
+        & (np.sum(d[e] * d[f], axis=1) < 0)
+    )
+    lowest = np.full(len(v), len(v), dtype=np.int64)
+    np.minimum.at(lowest, e[ok], f[ok])
+    partner = np.where(lowest < len(v), lowest, -1)
+    return src, dst, point, partner
+
+
 def _edge_topology(
     vertices: np.ndarray, sizes: Sequence[int], tol: float = 1e-6
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Static edge structure: end index, polygon id and distance mask per edge.
 
-    Edges that coincide with another edge whose polygon lies on the other side
-    (KLayout hole cut lines, seams of abutting polygons, whatever the polygons'
-    orientations) are excluded from the distance: they are not part of the
-    boundary of the union. They are kept for the winding number.
+    Edges that abut another edge whose polygon lies on the other side (KLayout
+    hole cut lines, seams of abutting polygons, whatever the polygons'
+    orientations; ends within ``tol``, see :func:`_seams`) and point-like edges
+    are excluded from the distance: they are not part of the boundary of the
+    union. They are kept for the winding number.
+
+    Args:
+        vertices: (E, 2) packed polygon vertices.
+        sizes: vertices per polygon.
+        tol: distance within which two vertices are the same point.
+
+    Returns:
+        nxt: (E,) end vertex of every edge.
+        ids: (E,) polygon index of every edge.
+        boundary: (E,) mask of the edges that bound the union.
     """
     n = int(sum(sizes))
     if vertices.shape != (n, 2):
@@ -148,18 +277,309 @@ def _edge_topology(
         nxt[start + size - 1] = start
         ids[start : start + size] = i
         start += size
-    q = np.round(vertices / tol).astype(np.int64)
-    a = [tuple(v) for v in q]
-    b = [tuple(v) for v in q[nxt]]
-    # direct every edge as if its polygon were counter-clockwise (filled side on
-    # the left): an edge is then a seam if the reversed edge exists
+    _, _, point, partner = _seams(vertices, nxt, ids, len(sizes), tol)
+    return nxt, ids, ~point & (partner < 0)
+
+
+def _boundary_links(
+    vertices: np.ndarray,
+    sizes: Sequence[int],
+    nxt: np.ndarray,
+    ids: np.ndarray,
+    boundary: np.ndarray,
+    tol: float = 1e-6,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Static boundary connectivity: directed ends and successor of every edge.
+
+    Every edge is directed as in :func:`_edge_topology` (filled side on the
+    left, whatever its polygon's orientation). The successor of a boundary edge
+    is the boundary edge that starts where it ends, found by position, so links
+    cross T-junction seams and hole cut lines: split abutting polygons link like
+    the merged polygon. Edges starting at the very end point (within
+    ``_POINT * tol``) are taken first; only without them, the one within
+    ``tol``.
+
+    Args:
+        vertices: (E, 2) packed polygon vertices.
+        sizes: vertices per polygon.
+        nxt: (E,) end vertex of every edge (from :func:`_edge_topology`).
+        ids: (E,) polygon index of every edge.
+        boundary: (E,) mask of the edges that bound the union.
+        tol: distance within which two vertices are the same point.
+
+    Returns:
+        src: (E,) start vertex of every edge.
+        dst: (E,) end vertex of every edge.
+        succ: (E,) the next boundary edge, or -1 for edges that are not on the
+            boundary and where no boundary edge, or more than one (a pinch),
+            starts at the end.
+    """
+    from scipy.spatial import cKDTree
+
     v = np.asarray(vertices, dtype=float)
-    cross = v[:, 0] * v[nxt, 1] - v[nxt, 0] * v[:, 1]
-    clockwise = np.bincount(ids, weights=cross, minlength=len(sizes))[ids] < 0
-    directed = [(eb, ea) if cw else (ea, eb) for ea, eb, cw in zip(a, b, clockwise, strict=True)]
-    edges = set(directed)
-    boundary = np.array([ea != eb and (eb, ea) not in edges for ea, eb in directed], dtype=bool)
-    return nxt, ids, boundary
+    src, dst = _directed(v, nxt, ids, len(sizes))
+    succ = np.full(len(v), -1, dtype=np.int64)
+    edges = np.flatnonzero(boundary)
+    if not edges.size:
+        return src, dst, succ
+    tree = cKDTree(v[src[edges]])
+    for e, near in zip(edges, tree.query_ball_point(v[dst[edges]], r=tol), strict=True):
+        following = edges[np.asarray(near, dtype=np.int64)]
+        following = following[following != e]
+        gap = np.linalg.norm(v[src[following]] - v[dst[e]], axis=1)
+        exact = following[gap <= _POINT * tol]
+        if exact.size:
+            following = exact
+        if following.size == 1:
+            succ[e] = following[0]
+    return src, dst, succ
+
+
+# ---------------------------------------------------------------- topology checks
+
+
+def _xy(p: np.ndarray) -> str:
+    """A point, for messages."""
+    return f"({p[0]:.6g}, {p[1]:.6g})"
+
+
+def _reordered_polygons(
+    frozen: np.ndarray, current: np.ndarray, sizes: Sequence[int], tol: float, ratio: float
+) -> list[list[tuple[int, int, float, float]]]:
+    """Cycles of polygons that look reordered among the polygons of their size.
+
+    Polygon ``a`` matches the frozen polygon ``b`` if the rms distance between
+    their vertices (by index) is below ``ratio`` times its rms distance to its
+    own frozen vertices, which must exceed ``tol``. Polygons that move far
+    without being reordered, such as the teeth of a stretched grating, can match
+    another polygon this way, but only a reordering closes a cycle (``a``
+    matches ``b``, ..., which matches ``a``).
+
+    Args:
+        frozen: (E, 2) packed vertices before.
+        current: (E, 2) packed vertices now.
+        sizes: vertices per polygon.
+        tol: rms distance up to which a polygon has not moved.
+        ratio: how much closer the other polygon must be.
+
+    Returns:
+        Per cycle, (polygon, the frozen polygon it matches, rms distance to it,
+        rms distance to its own) of each member.
+    """
+    from scipy.spatial import cKDTree
+
+    starts = np.cumsum([0, *sizes[:-1]]).astype(int)
+    match = np.arange(len(sizes))
+    dist = np.zeros((len(sizes), 2))
+    groups: dict[int, list[int]] = {}
+    for p, size in enumerate(sizes):
+        groups.setdefault(int(size), []).append(p)
+    for size, members in groups.items():
+        if len(members) < 2:
+            continue
+        idx = np.asarray(members)
+        rows = starts[idx][:, None] + np.arange(size)
+        f, c = frozen[rows], current[rows]  # (G, N, 2)
+        own = np.sqrt(np.mean(np.sum((c - f) ** 2, axis=-1), axis=-1))
+        moved = np.flatnonzero(own > tol)
+        if not moved.size:
+            continue
+        # an rms distance is at least the distance of the means: only polygons
+        # whose centroids are this close can match
+        near = cKDTree(f.mean(axis=1)).query_ball_point(c[moved].mean(axis=1), ratio * own[moved])
+        for a, candidates in zip(moved, near, strict=True):
+            others = [b for b in candidates if b != a]
+            if not others:
+                continue
+            d = np.sqrt(np.mean(np.sum((c[a] - f[others]) ** 2, axis=-1), axis=-1))
+            b = int(np.argmin(d))
+            if d[b] < ratio * own[a]:
+                match[idx[a]] = idx[others[b]]
+                dist[idx[a]] = d[b], own[a]
+    # cycles of the matches (each polygon matches one: a functional graph)
+    cycles = []
+    state = np.zeros(len(sizes), dtype=int)  # 0 unseen, 1 on the current path, 2 done
+    for start in range(len(sizes)):
+        path, p = [], start
+        while state[p] == 0:
+            state[p] = 1
+            path.append(p)
+            p = int(match[p])
+        if state[p] == 1 and match[p] != p:
+            cycle = path[path.index(p) :]
+            cycles.append([(q, int(match[q]), float(dist[q, 0]), float(dist[q, 1])) for q in cycle])
+        state[path] = 2
+    return cycles
+
+
+def topology_changes(
+    frozen: np.ndarray,
+    current: np.ndarray,
+    sizes: Sequence[int],
+    keep_tol: float,
+    tol: float = 1e-6,
+    oriented: bool = True,
+    ratio: float = 0.25,
+) -> list[str]:
+    """What no longer fits when the static topology of ``frozen`` indexes ``current``.
+
+    The topology of a layer's polygons is computed once, with numpy, from the
+    vertices a device is built with: the T-junctions (:func:`split_t_junctions`),
+    the seams left out of the distance (:func:`_edge_topology`) and the edges'
+    directions (:func:`_boundary_links`). Later vertices, e.g. of the component
+    rebuilt with other parameters, are indexed with it, which is right only while
+    they keep it. This compares, by vertex index:
+
+    - polygons that look reordered among the polygons of their size: one now
+      lies where another one was (rms vertex distance below ``ratio`` times that
+      to its own, in a cycle of such matches, so that polygons that move far
+      without being reordered, e.g. a stretched grating, do not count). Reported
+      alone, since everything else would follow from it;
+    - polygons whose orientation flipped (with ``oriented``);
+    - T-junctions that came apart (a vertex left the edge it was inside, or the
+      vertices inside an edge changed their order) and new ones;
+    - seams that opened (abutting edges parted, or a zero-length edge grew) and
+      new ones (edges that now abut, running the other way).
+
+    ``frozen``'s relations are those found within ``tol``, as the topology was
+    computed; ``current``'s are those a topology computed from it within
+    ``keep_tol`` would have. A relation of ``frozen`` is kept while it holds
+    within ``keep_tol``, and one of ``current`` that ``frozen`` lacks is new.
+    So round-off and moves that keep the topology (a taper end sliding along
+    the side of an MMI, abutting polygons moving together) pass, and when
+    nothing is reported, a topology computed from ``current`` with
+    ``keep_tol`` has the same T-junctions and seams (edges up to ``keep_tol``
+    long may count as points in one and not the other, which moves the
+    boundary by at most that).
+
+    Args:
+        frozen: (E, 2) packed vertices the topology was computed from.
+        current: (E, 2) packed vertices it is used with.
+        sizes: vertices per polygon (of both).
+        keep_tol: distance within which a relation of ``frozen`` still holds,
+            and within which relations of ``current`` are found.
+        tol: distance within which a vertex is on an edge or two vertices
+            coincide, as when the topology was computed from ``frozen``.
+        oriented: also report flipped orientations.
+        ratio: how much closer a reordered polygon lies to another polygon's
+            frozen vertices than to its own.
+
+    Returns:
+        One description per kind of change: its first case (vertices and
+        polygons by index, lengths in the vertices' units) and how many more
+        there are. Empty if the topology still fits.
+
+    Raises:
+        ValueError: if the vertices do not match ``sizes``.
+    """
+    frozen = np.asarray(frozen, dtype=float)
+    current = np.asarray(current, dtype=float)
+    n = int(sum(sizes))
+    if frozen.shape != (n, 2) or current.shape != (n, 2):
+        raise ValueError(f"vertices {frozen.shape} and {current.shape} do not match polygon sizes (sum {n})")
+    if not n:
+        return []
+    found: dict[str, list[str]] = {}
+
+    def report(kind: str, message: str) -> None:
+        found.setdefault(kind, []).append(message)
+
+    def summary() -> list[str]:
+        return [m[0] + (f" (and {len(m) - 1} more like it)" if len(m) > 1 else "") for m in found.values()]
+
+    def edge(polygon: int, i: int, j: int) -> str:
+        return f"edge {i} -> {j} of polygon {polygon}"
+
+    for cycle in _reordered_polygons(frozen, current, sizes, keep_tol, ratio):
+        a, b, d_match, d_own = cycle[0]
+        report(
+            "reordered",
+            f"polygons {', '.join(str(q) for q, *_ in cycle)} ({sizes[a]} vertices each) look reordered: "
+            f"polygon {a} now lies where polygon {b} was (rms vertex distance {d_match:.3g}, and {d_own:.3g} "
+            "to its own vertices)",
+        )
+    if found:
+        return summary()
+
+    nxt, ids, _ = _edge_topology(frozen, sizes, tol)
+    if oriented:
+
+        def twice_area(v: np.ndarray) -> np.ndarray:
+            return np.bincount(ids, weights=v[:, 0] * v[nxt, 1] - v[nxt, 0] * v[:, 1], minlength=len(sizes))
+
+        a_f, a_c = twice_area(frozen), twice_area(current)
+        perimeter = np.bincount(ids, weights=np.linalg.norm(current[nxt] - current, axis=1), minlength=len(sizes))
+        # both clearly nonzero: |area| / perimeter is about half the width
+        flipped = (a_f * a_c < 0) & (np.abs(a_c) > 2 * keep_tol * perimeter)
+        for p in np.flatnonzero(flipped):
+            report(
+                "orientation",
+                f"polygon {p} now runs the other way round (signed area {a_f[p] / 2:.3g}, now {a_c[p] / 2:.3g})",
+            )
+
+    # T-junctions: the frozen ones still inside their edges, in order; no new ones
+    inserts = _t_junction_inserts(frozen, sizes, tol)
+    for e in (e for e in range(n) if inserts[e]):
+        start, ab = current[e], current[nxt[e]] - current[e]
+        length = float(np.hypot(*ab))
+        last = -np.inf
+        for i in inserts[e]:
+            ap = current[i] - start
+            if length > 0:
+                along = float(ap @ ab) / length
+                off = abs(float(ap[0] * ab[1] - ap[1] * ab[0])) / length
+            else:
+                along, off = 0.0, float(np.hypot(*ap))
+            d = math.hypot(off, max(-along, along - length, 0.0))
+            if d > keep_tol:
+                report(
+                    "junction left",
+                    f"vertex {i} of polygon {ids[i]} was inside {edge(ids[e], e, nxt[e])} (a T-junction) and is "
+                    f"now {d:.3g} away from it, at {_xy(current[i])}",
+                )
+            elif along < last - keep_tol:
+                report("junction order", f"the vertices inside {edge(ids[e], e, nxt[e])} changed their order")
+            last = max(last, along)
+    now = _t_junction_inserts(current, sizes, keep_tol)
+    for e in range(n):
+        for i in now[e]:
+            if all(np.hypot(*(current[i] - current[j])) > keep_tol for j in inserts[e]):
+                report(
+                    "new junction",
+                    f"vertex {i} of polygon {ids[i]} now lies inside {edge(ids[e], e, nxt[e])}, at "
+                    f"{_xy(current[i])} (a new T-junction)",
+                )
+
+    # seams, on the frozen split polygons: the frozen ones still closed, no new
+    # ones (as found within tol in frozen and within keep_tol in current)
+    index, split_sizes = _apply_inserts(inserts, sizes)
+    vf, vc = frozen[index], current[index]
+    s_nxt, s_ids, _ = _edge_topology(vf, split_sizes, tol)
+    src, dst, point, partner = _seams(vf, s_nxt, s_ids, len(sizes), tol)
+    _, _, point_now, partner_now = _seams(vc, s_nxt, s_ids, len(sizes), keep_tol)
+    boundary, boundary_now = ~point & (partner < 0), ~point_now & (partner_now < 0)
+
+    def split_edge(s: int) -> str:
+        return edge(s_ids[s], index[s], index[s_nxt[s]])
+
+    for s in np.flatnonzero(point):
+        d = float(np.linalg.norm(vc[dst[s]] - vc[src[s]]))
+        if d > keep_tol:
+            report("grew", f"{split_edge(s)} had zero length (left out of the distance) and is now {d:.3g} long")
+    reported = set()
+    for s in np.flatnonzero(~boundary & ~point & boundary_now):
+        f = int(partner[s])
+        if (f, s) in reported:
+            continue  # each pair once
+        reported.add((s, f))
+        gap = max(float(np.linalg.norm(vc[src[s]] - vc[dst[f]])), float(np.linalg.norm(vc[dst[s]] - vc[src[f]])))
+        report("opened", f"the seam between {split_edge(s)} and {split_edge(f)} opened by {gap:.3g}, near {_xy(vc[s])}")
+    new = boundary & ~boundary_now & ~point_now  # collapsed to a point: its distance is its end's
+    for s in np.flatnonzero(new):
+        f = int(partner_now[s])
+        if s < f or not new[f]:  # each pair once
+            report("new seam", f"{split_edge(s)} now abuts {split_edge(f)}, near {_xy(vc[s])} (a new seam)")
+    return summary()
 
 
 def _chunk_layout(
@@ -205,6 +625,7 @@ def signed_distance(
     poly_ids: np.ndarray,
     boundary: np.ndarray,
     chunk: int = 64,
+    sign_tol: float = 1e-3,
 ) -> Array:
     """Signed distance (negative inside) from points to the union of polygons.
 
@@ -228,6 +649,9 @@ def signed_distance(
         poly_ids: (E,) static polygon index of each edge (non-decreasing).
         boundary: (E,) static mask of the edges that count for the distance.
         chunk: edges processed per step.
+        sign_tol: distance (points' units) from an edge's line within which the
+            line's side is trusted over the winding number (round-off on the
+            boundary); beyond it the winding number signs the distance.
     """
     if np.any(np.diff(poly_ids) < 0):
         raise ValueError("poly_ids must be sorted (edges of a polygon contiguous)")
@@ -306,7 +730,13 @@ def signed_distance(
         dist = jnp.sqrt(m + 1e-12)
         sd_vertex = jnp.where(w != 0, -dist, dist)
         on_edge = (n_int == n_sel) & (n_sel > 0)
-        sd_k = jnp.where(on_edge, lin_sum / jnp.maximum(n_int, 1), sd_vertex)
+        lin_k = lin_sum / jnp.maximum(n_int, 1)
+        # the edge line's side is the polygon's side only near its boundary: with
+        # seam edges excluded, the nearest remaining edge can face away from a
+        # point beyond the seam, so away from the line the winding sets the sign
+        lin_val = jax.lax.stop_gradient(lin_k)
+        agrees = ((lin_val < 0) == (w != 0)) | (jnp.abs(lin_val) <= sign_tol)
+        sd_k = jnp.where(on_edge & agrees, lin_k, sd_vertex)
         sd = jnp.minimum(sd, jnp.min(jnp.where(closed, sd_k, inf), axis=0))
         keep = cont_out
         return (
@@ -340,6 +770,68 @@ def signed_distance(
     )
     (sd, *_), _ = jax.lax.scan(body, init, xs)
     return sd
+
+
+def nearest_edges(
+    points: Array, a: Array, b: Array, boundary: np.ndarray, chunk: int = 64, k: int = 3
+) -> tuple[Array, Array]:
+    """The k nearest boundary edges of every point and their distances.
+
+    Pure JAX, safe under ``jit``. The edges are streamed in chunks like
+    :func:`signed_distance`, keeping the k nearest per point, so memory is
+    ~ (chunk + k) * P. Equally near edges are ordered by edge index. Everything
+    is under ``stop_gradient``: the result only selects edges, and callers
+    rebuild differentiable distances from the selected edges.
+
+    Args:
+        points: (P, 2) query points.
+        a: (E, 2) edge start points.
+        b: (E, 2) edge end points.
+        boundary: (E,) static mask of the edges that count.
+        chunk: edges processed per step.
+        k: edges kept per point.
+
+    Returns:
+        dist: (P, k) unsigned distances to the nearest boundary edges,
+            ascending; inf where there are fewer than k boundary edges.
+        ids: (P, k) int32 indices of those edges (0 where dist is inf).
+    """
+    points, a, b = (jax.lax.stop_gradient(x) for x in (points, a, b))
+    lay = _chunk_layout(np.zeros(a.shape[0], dtype=np.int32), np.asarray(boundary, dtype=bool), chunk)
+    counted = lay["dist_lid"] < chunk  # boundary edges, not padding
+    return _nearest_scan(points, a, b, jnp.asarray(lay["edge_index"], dtype=jnp.int32), jnp.asarray(counted), k)
+
+
+@partial(jax.jit, static_argnames=("k",))
+def _nearest_scan(points: Array, a: Array, b: Array, index: Array, counted: Array, k: int) -> tuple[Array, Array]:
+    """The scan of :func:`nearest_edges` over the edge chunks ``index`` (steps, C), boundary edges ``counted``.
+
+    Jitted with the layout as arrays, so eager calls with the same shapes share
+    the compiled scan.
+    """
+    inf = jnp.asarray(jnp.inf, dtype=points.dtype)
+
+    def body(carry: tuple[Array, Array], inp: tuple[Array, ...]) -> tuple[Any, None]:
+        d2_k, id_k = carry  # (k, P), nearest first
+        ac, bc, idx, m = inp
+        ab = bc - ac
+        ap = points[None, :, :] - ac[:, None, :]  # (C, P, 2)
+        denom = jnp.sum(ab * ab, axis=-1)[:, None]
+        t = jnp.clip(jnp.sum(ap * ab[:, None, :], axis=-1) / jnp.where(denom > 0, denom, 1.0), 0.0, 1.0)
+        d = ap - t[..., None] * ab[:, None, :]
+        d2 = jnp.where(m[:, None], jnp.sum(d * d, axis=-1), inf)  # (C, P)
+        # the carry first: top_k keeps the lower position on ties, i.e. the lower edge index
+        d2_all = jnp.concatenate([d2_k, d2], axis=0)
+        id_all = jnp.concatenate([id_k, jnp.broadcast_to(idx[:, None], d2.shape)], axis=0)
+        neg, pos = jax.lax.top_k(-d2_all.T, k)  # (P, k)
+        return (-neg.T, jnp.take_along_axis(id_all.T, pos, axis=1).T), None
+
+    n_points = points.shape[0]
+    init = (jnp.full((k, n_points), jnp.inf, dtype=points.dtype), jnp.zeros((k, n_points), dtype=jnp.int32))
+    xs = (a[index], b[index], index, counted)
+    (d2, ids), _ = jax.lax.scan(body, init, xs)
+    d2, ids = d2.T, ids.T
+    return jnp.sqrt(d2), jnp.where(jnp.isinf(d2), 0, ids)
 
 
 # ---------------------------------------------------------------- roughness
