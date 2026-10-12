@@ -24,9 +24,13 @@ interface PortRow {
   visible: HTMLInputElement;
 }
 
+const TABS = ["Layout / Ports", "Sources / Detectors", "Simulation"];
+
 export class Explorer {
   readonly root: HTMLElement;
   private readonly properties: HTMLElement;
+  private readonly panels: HTMLElement[];
+  private readonly tabButtons: HTMLButtonElement[] = [];
   private readonly levelRows = new Map<string, LevelRow>();
   private readonly portRows = new Map<string, PortRow>();
 
@@ -39,14 +43,25 @@ export class Explorer {
     this.properties = document.createElement("div");
     this.properties.className = "gfx-properties";
 
-    const sections = [
-      this.section("Layers", this.meta.levels.map((level) => this.buildLevelRow(level))),
-      this.section("Ports", this.meta.ports.map((port) => this.buildPortRow(port))),
-      this.section("Sources", [emptyNote("No sources (R12 - M4).")]),
-      this.section("Detectors", [emptyNote("No detectors (R12 - M4).")]),
-      this.section("Simulation", [emptyNote("Settings (R13 - M4).")]),
+    this.panels = [
+      this.panel([
+        this.section("Layers", this.meta.levels.map((level) => this.buildLevelRow(level))),
+        this.section("Ports", this.meta.ports.map((port) => this.buildPortRow(port))),
+      ]),
+      this.panel([
+        this.section("Sources", [emptyNote("No sources (R12 - M4).")]),
+        this.section("Detectors", [emptyNote("No detectors (R12 - M4).")]),
+      ]),
+      this.panel([this.section("Simulation", [emptyNote("Settings (R13 - M4).")])]),
     ];
-    this.root.append(...sections, this.properties);
+
+    const tabbar = this.buildTabBar();
+    const body = document.createElement("div");
+    body.className = "gfx-tabbody";
+    body.append(...this.panels);
+
+    this.root.append(tabbar, body, this.properties);
+    this.setTab(0);
   }
 
   render(state: StatePayload): void {
@@ -134,6 +149,33 @@ export class Explorer {
     });
     this.portRows.set(port.name, { root, visible });
     return root;
+  }
+
+  private panel(children: HTMLElement[]): HTMLElement {
+    const panel = document.createElement("div");
+    panel.className = "gfx-tabpanel";
+    panel.append(...children);
+    return panel;
+  }
+
+  private buildTabBar(): HTMLElement {
+    const bar = document.createElement("div");
+    bar.className = "gfx-tabbar";
+    TABS.forEach((name, index) => {
+      const tab = document.createElement("button");
+      tab.type = "button";
+      tab.className = "gfx-tab";
+      tab.textContent = name;
+      tab.addEventListener("click", () => this.setTab(index));
+      this.tabButtons.push(tab);
+      bar.appendChild(tab);
+    });
+    return bar;
+  }
+
+  private setTab(index: number): void {
+    this.panels.forEach((panel, i) => (panel.hidden = i !== index));
+    this.tabButtons.forEach((tab, i) => tab.classList.toggle("gfx-active", i === index));
   }
 
   private section(title: string, rows: HTMLElement[]): HTMLElement {

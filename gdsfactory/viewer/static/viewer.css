@@ -56,10 +56,41 @@
   width: 260px;
   min-width: 200px;
   padding: 8px;
-  gap: 10px;
-  overflow-y: auto;
+  gap: 8px;
   background: #202027;
   border-right: 1px solid #3a3a42;
+}
+.gfx-tabbar {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.gfx-tab {
+  flex: 1;
+  padding: 4px 6px;
+  border: 1px solid #3a3a42;
+  border-radius: 4px 4px 0 0;
+  background: #26262c;
+  color: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.gfx-tab.gfx-active {
+  background: #4a6fa5;
+  border-color: #6a8fc5;
+}
+.gfx-tabbody {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.gfx-tabpanel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.gfx-tabpanel[hidden] {
+  display: none;
 }
 .gfx-section-header {
   font-weight: 600;

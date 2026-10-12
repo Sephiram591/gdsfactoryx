@@ -1,22 +1,33 @@
 // viewer/explorer.ts
+var TABS = ["Layout / Ports", "Sources / Detectors", "Simulation"];
 var Explorer = class {
   constructor(meta, callbacks) {
     this.meta = meta;
     this.callbacks = callbacks;
+    this.tabButtons = [];
     this.levelRows = /* @__PURE__ */ new Map();
     this.portRows = /* @__PURE__ */ new Map();
     this.root = document.createElement("div");
     this.root.className = "gfx-explorer";
     this.properties = document.createElement("div");
     this.properties.className = "gfx-properties";
-    const sections = [
-      this.section("Layers", this.meta.levels.map((level) => this.buildLevelRow(level))),
-      this.section("Ports", this.meta.ports.map((port) => this.buildPortRow(port))),
-      this.section("Sources", [emptyNote("No sources (R12 - M4).")]),
-      this.section("Detectors", [emptyNote("No detectors (R12 - M4).")]),
-      this.section("Simulation", [emptyNote("Settings (R13 - M4).")])
+    this.panels = [
+      this.panel([
+        this.section("Layers", this.meta.levels.map((level) => this.buildLevelRow(level))),
+        this.section("Ports", this.meta.ports.map((port) => this.buildPortRow(port)))
+      ]),
+      this.panel([
+        this.section("Sources", [emptyNote("No sources (R12 - M4).")]),
+        this.section("Detectors", [emptyNote("No detectors (R12 - M4).")])
+      ]),
+      this.panel([this.section("Simulation", [emptyNote("Settings (R13 - M4).")])])
     ];
-    this.root.append(...sections, this.properties);
+    const tabbar = this.buildTabBar();
+    const body = document.createElement("div");
+    body.className = "gfx-tabbody";
+    body.append(...this.panels);
+    this.root.append(tabbar, body, this.properties);
+    this.setTab(0);
   }
   render(state) {
     for (const level of this.meta.levels) {
@@ -99,6 +110,30 @@ var Explorer = class {
     });
     this.portRows.set(port.name, { root, visible });
     return root;
+  }
+  panel(children) {
+    const panel = document.createElement("div");
+    panel.className = "gfx-tabpanel";
+    panel.append(...children);
+    return panel;
+  }
+  buildTabBar() {
+    const bar = document.createElement("div");
+    bar.className = "gfx-tabbar";
+    TABS.forEach((name, index) => {
+      const tab = document.createElement("button");
+      tab.type = "button";
+      tab.className = "gfx-tab";
+      tab.textContent = name;
+      tab.addEventListener("click", () => this.setTab(index));
+      this.tabButtons.push(tab);
+      bar.appendChild(tab);
+    });
+    return bar;
+  }
+  setTab(index) {
+    this.panels.forEach((panel, i) => panel.hidden = i !== index);
+    this.tabButtons.forEach((tab, i) => tab.classList.toggle("gfx-active", i === index));
   }
   section(title2, rows) {
     const section = document.createElement("div");
