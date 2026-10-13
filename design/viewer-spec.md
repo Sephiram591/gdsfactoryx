@@ -125,7 +125,10 @@ global settings.
   material, `zmin`, `thickness`, `sidewall_angle`, `bias`, `mesh_order` and
   whether it is a fill level.
 - **Ports:** one row per `StackDevice` port, with a visibility toggle. The
-  properties pane shows the name, center, orientation, width and layer.
+  properties pane shows the name, center, orientation, width and layer. The
+  simulation-volume plane choices (R12) are **not** listed here: they are not
+  ports of the layout, only a placement choice in a source/detector's port
+  dropdown.
 - Selecting an item highlights it in both viewports.
 - Groups have a visibility toggle that applies to all their children.
 

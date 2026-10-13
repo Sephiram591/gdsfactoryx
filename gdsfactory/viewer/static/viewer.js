@@ -29447,7 +29447,12 @@ var Explorer = class {
     this.panels = [
       this.panel([
         this.section("Layers", this.meta.levels.map((level) => this.buildLevelRow(level))),
-        this.section("Ports", this.meta.ports.map((port) => this.buildPortRow(port)))
+        // only device ports here; the simulation-volume planes (spec R12) are a
+        // source/detector placement choice, not a port of the layout
+        this.section(
+          "Ports",
+          this.meta.ports.filter((port) => port.plane === null).map((port) => this.buildPortRow(port))
+        )
       ]),
       this.panel([
         this.section("Sources", [this.sourceEmpty, this.sourceList], this.sourceAdd),
