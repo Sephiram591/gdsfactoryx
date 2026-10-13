@@ -50,7 +50,9 @@ def _(mo):
     on a background thread, so the widget stays live — orbit, switch tabs, scrub
     the section — while the **setup is locked**: the Sources/Detectors and
     Simulation tabs are disabled and the kernel refuses setup edits. A **progress bar** beside Run tracks
-    it (fdtdx's `progress_callback`); there is no cancel (spec §2), so the run ends on its own and unlocks.
+    it (fdtdx's `progress_callback`), labelled with the current phase: `placing` and `compiling` (JAX) report
+    no fraction and dominate the wall time, so the bar sweeps while the label says which one it is in, then
+    `stepping` gives a real fraction. There is no cancel (spec §2), so the run ends on its own and unlocks.
 
     **Export (spec R14 mode 2):** `viewer.objects`, `viewer.config` and
     `viewer.constraints` are computed on access, ready for

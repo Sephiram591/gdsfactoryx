@@ -291,7 +291,8 @@ increasing in separation from the session:
    already occupies (C1: on the compute node) and returns the results. It
    **blocks** until done; there is no cancel (§2). It **does** report progress:
    fdtdx's `run_fdtd` is driven with a `progress_callback`, and the widget shows
-   a progress bar (D15). The kernel's allocation must be sized for the run — a
+   a progress bar (D15) beside a label naming the current phase. The kernel's
+   allocation must be sized for the run — a
    run that needs a GPU must be in a GPU allocation, which the notebook session
    must already be.
 2. **Export.** The widget returns the prepared `objects`, `config` and
@@ -317,7 +318,8 @@ AC:
   FDTD in CI).
 - Mode 1's run is off-thread (`.run()` returns before the run finishes), locks
   the setup while in flight, and mirrors fdtdx's `progress_callback` into the
-  `progress` trait (checked in a test).
+  `progress` trait, along with the run's phase into the `phase` trait (both
+  checked in a test).
 
 ### Later candidates (not v1 unless promoted; see Q9)
 
@@ -586,7 +588,7 @@ question is only how the setup travels to the run.
 
 - **Mode 1 (in the widget).** Run in the kernel the widget occupies (D10), on the
   compute node (C1). Blocks; no cancel. Progress is streamed from fdtdx's
-  `progress_callback` (D15).
+  `progress_callback` (D15), along with the run's phase.
 - **Mode 2 (export).** Return the prepared `objects`, `config` and `constraints`
   as Python values.
 - **Mode 3 (launch code).** Return a self-contained snippet of Python the user
@@ -694,6 +696,15 @@ from that, both settled here.
   known, an indeterminate sweep before that. Passing a callback also turns
   fdtdx's own tqdm bar **off** (`show_progress=False`), so the two do not
   compete for the same output.
+- **The phase is named.** A fraction alone is misleading here: placement and JAX
+  compilation dominate a run's wall time and fdtdx reports no progress for
+  either, so the bar sits in its indeterminate sweep for most of it. `run`
+  therefore also takes a `phase` callback and calls it with `"placing"` (build
+  and place the objects), `"compiling"` (inside `run_fdtd` before the first time
+  step), then `"stepping"` (time-stepping, where `progress` fires — flipped from
+  inside the same callback on its first call). The widget mirrors it into a
+  synced `phase` trait (`""` when idle) and the browser shows it as a short
+  label **to the left of the bar**.
 - **Implemented in M4** (`gdsfactory/viewer/widget.py`, `sim.py`;
   `js/viewer/index.ts`, `style.css`).
 - **Relates to R14, D10, D12, Q20.**
@@ -932,3 +943,8 @@ from that, both settled here.
     determinate once the total is known, an indeterminate sweep before that.
   - Narrowed §2's non-goal: mode 1 is still not cancellable, but it now reports
     progress. Updated R14 (prose and AC) and D12.
+  - Added a **phase label** to the left of the bar: `run` calls a `phase`
+    callback with `placing` → `compiling` → `stepping`, mirrored into a synced
+    `phase` trait. Placement and JAX compilation dominate the wall time and
+    report no fraction, so the label says which phase the indeterminate bar is
+    covering. Updated D15 and R14.

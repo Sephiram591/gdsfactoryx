@@ -34598,6 +34598,11 @@ var Section2D = class {
 
 // viewer/index.ts
 var PLANES = ["xy", "xz", "yz"];
+var PHASE_LABELS = {
+  placing: "placing\u2026",
+  compiling: "compiling\u2026",
+  stepping: "stepping\u2026"
+};
 var CONTROL_LABELS = {
   trackball: "Trackball (free roll)",
   arcball: "Arcball (gizmo)",
@@ -34621,6 +34626,9 @@ function render({ model, el }) {
   const to2d = button("2D", false);
   const fit = iconButton(FIT_ICON, "fit the view to the device");
   const run = iconButton(RUN_ICON, "run the simulation in the kernel (spec R14 mode 1)");
+  const runPhase = document.createElement("span");
+  runPhase.className = "gfx-run-phase";
+  runPhase.hidden = true;
   const runProgress = document.createElement("div");
   runProgress.className = "gfx-run-progress";
   runProgress.hidden = true;
@@ -34650,7 +34658,7 @@ function render({ model, el }) {
   save.className = "gfx-button gfx-save";
   save.title = "save the current viewport as a PNG";
   save.innerHTML = SAVE_ICON;
-  menubar.append(title2, to3d, to2d, fit, run, runProgress, settings, exaggeration, save);
+  menubar.append(title2, to3d, to2d, fit, run, runPhase, runProgress, settings, exaggeration, save);
   const sectionControls = document.createElement("div");
   sectionControls.className = "gfx-section-controls";
   sectionControls.hidden = true;
@@ -34900,8 +34908,12 @@ function render({ model, el }) {
       state.selection && (state.selection.kind === "source" || state.selection.kind === "detector") ? state.selection.name : null
     );
     run.disabled = state.running;
+    runPhase.hidden = !state.running;
     runProgress.hidden = !state.running;
-    if (!state.running) applyProgress();
+    if (!state.running) {
+      applyPhase();
+      applyProgress();
+    }
     fullInput.checked = state.show_full;
     if (document.activeElement !== fadeInput) fadeInput.value = String(state.port_fade_um);
     fadeValue.textContent = `${state.port_fade_um.toFixed(2)} \xB5m`;
@@ -34911,6 +34923,10 @@ function render({ model, el }) {
   const applySection = () => {
     const payload = model.get("section");
     if (payload && Object.keys(payload).length > 0) section.setPayload(payload);
+  };
+  const applyPhase = () => {
+    const name = model.get("phase") ?? "";
+    runPhase.textContent = PHASE_LABELS[name] ?? "";
   };
   const applyProgress = () => {
     const payload = model.get("progress");
@@ -34930,10 +34946,12 @@ function render({ model, el }) {
   };
   model.on("change:state", applyState);
   model.on("change:progress", applyProgress);
+  model.on("change:phase", applyPhase);
   model.on("change:section", applySection);
   applySection();
   applyState();
   applyProgress();
+  applyPhase();
   return () => {
     if (positionFrame !== 0) cancelAnimationFrame(positionFrame);
     section.dispose();

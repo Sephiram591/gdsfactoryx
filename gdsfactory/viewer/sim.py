@@ -359,12 +359,26 @@ def export(stack: Any, state: Any) -> tuple[list[Any], Any, list[Any]]:
     return build_objects(stack, state)
 
 
-def run(stack: Any, state: Any, *, key: Any = None, progress: Any = None) -> RunResult:
+def run(
+    stack: Any, state: Any, *, key: Any = None, progress: Any = None, phase: Any = None
+) -> RunResult:
     """Places and runs the simulation in the kernel (spec R14 mode 1).
 
     Blocks until the run finishes; callers that must not block (the widget's
     background worker, spec D15) run this on a thread. Returns a
     :class:`RunResult`; detector results are on ``result.arrays.detector_states``.
+
+    The run has three phases, and only the last reports a fraction. Placement
+    and JAX compilation dominate the wall time on a large volume, and fdtdx
+    reports no progress for either, so ``phase`` tells the caller which one it
+    is in:
+
+    ``"placing"``
+        building the objects and placing them on the grid;
+    ``"compiling"``
+        inside ``run_fdtd`` before the first time step (mostly XLA compile);
+    ``"stepping"``
+        time-stepping, where ``progress`` fires.
 
     Args:
         stack: the :class:`~gdsfactory.fdtdx_stack.StackDevice`.
@@ -373,23 +387,46 @@ def run(stack: Any, state: Any, *, key: Any = None, progress: Any = None) -> Run
         progress: an optional ``callable(step, total)`` fdtdx calls as the run
             advances (spec D15). When given, fdtdx's own tqdm bar is turned off,
             since the caller is drawing the progress instead.
+        phase: an optional ``callable(name)`` called once per phase above.
     """
     import fdtdx
     import jax
 
     from gdsfactory.fdtdx_stack import apply_stack, init_stack_params
 
+    def _phase(name: str) -> None:
+        if phase is not None:
+            phase(name)
+
+    _phase("placing")
     objects, config, constraints = build_objects(stack, state)
     key = jax.random.PRNGKey(0) if key is None else key
     objects, arrays, params, config, _ = fdtdx.place_objects(objects, config, constraints, key)
     arrays, objects, _ = apply_stack(arrays, objects, {**params, **init_stack_params(objects)}, key)
+
+    # the first time step implies compilation is done, so the phase flips there
+    stepping = False
+
+    def _progress(step: int, total: int) -> None:
+        nonlocal stepping
+        if not stepping:
+            stepping = True
+            _phase("stepping")
+        if progress is not None:
+            progress(step, total)
+
+    # the wrapper is installed when either callback needs it: ``phase`` needs it
+    # to see the flip into "stepping" even when nobody draws a fraction
+    use_callback = progress is not None or phase is not None
+
+    _phase("compiling")
     _, arrays = fdtdx.run_fdtd(
         arrays=arrays,
         objects=objects,
         config=config,
         key=key,
         show_progress=progress is None,
-        progress_callback=progress,
+        progress_callback=_progress if use_callback else None,
     )
     return RunResult(objects=objects, arrays=arrays, config=config)
 

@@ -301,6 +301,11 @@
   flex: 1;
   min-width: 0;
 }
+.gfx-run-phase {
+  opacity: 0.8;
+  font-style: italic;
+  white-space: nowrap;
+}
 .gfx-run-progress {
   position: relative;
   flex: 0 0 120px;

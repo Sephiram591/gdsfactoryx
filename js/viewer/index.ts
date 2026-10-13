@@ -29,6 +29,14 @@ interface AnyModel {
 
 const PLANES = ["xy", "xz", "yz"] as const;
 
+//: Human labels for the run's phases (spec D15). Placement and JAX compilation
+//: report no fraction, so naming the phase is the only feedback they can give.
+const PHASE_LABELS: Record<string, string> = {
+  placing: "placing…",
+  compiling: "compiling…",
+  stepping: "stepping…",
+};
+
 //: Human labels for the rotation styles the settings screen offers (spec R3).
 const CONTROL_LABELS: Record<ControlKind, string> = {
   trackball: "Trackball (free roll)",
@@ -83,8 +91,12 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   const to2d = button("2D", false);
   const fit = iconButton(FIT_ICON, "fit the view to the device");
   const run = iconButton(RUN_ICON, "run the simulation in the kernel (spec R14 mode 1)");
-  // the run's progress bar (spec D15): hidden until a run starts, then filled
-  // from the kernel's `progress` trait; indeterminate until the total is known
+  // the run's phase label and progress bar (spec D15): hidden until a run
+  // starts; the label names the phase, the bar fills from the kernel's
+  // `progress` trait (indeterminate until the step total is known)
+  const runPhase = document.createElement("span");
+  runPhase.className = "gfx-run-phase";
+  runPhase.hidden = true;
   const runProgress = document.createElement("div");
   runProgress.className = "gfx-run-progress";
   runProgress.hidden = true;
@@ -114,7 +126,7 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   save.className = "gfx-button gfx-save";
   save.title = "save the current viewport as a PNG";
   save.innerHTML = SAVE_ICON;
-  menubar.append(title, to3d, to2d, fit, run, runProgress, settings, exaggeration, save);
+  menubar.append(title, to3d, to2d, fit, run, runPhase, runProgress, settings, exaggeration, save);
 
   // -- section controls (2D only, spec R4) ---------------------------------
   const sectionControls = document.createElement("div");
@@ -412,8 +424,12 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
     // while a mode-1 run is in flight the setup is frozen (spec D15); the
     // explorer disables its own controls, and Run is disabled here
     run.disabled = state.running;
+    runPhase.hidden = !state.running;
     runProgress.hidden = !state.running;
-    if (!state.running) applyProgress();
+    if (!state.running) {
+      applyPhase();
+      applyProgress();
+    }
     fullInput.checked = state.show_full;
     if (document.activeElement !== fadeInput) fadeInput.value = String(state.port_fade_um);
     fadeValue.textContent = `${state.port_fade_um.toFixed(2)} µm`;
@@ -424,6 +440,13 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   const applySection = (): void => {
     const payload = model.get("section") as SectionPayload | undefined;
     if (payload && Object.keys(payload).length > 0) section.setPayload(payload);
+  };
+
+  // the run's phase (spec D15): name it left of the bar, so placement and
+  // compilation — which report no fraction — are not a bare pulsing bar
+  const applyPhase = (): void => {
+    const name = (model.get("phase") as string | undefined) ?? "";
+    runPhase.textContent = PHASE_LABELS[name] ?? "";
   };
 
   // the run's progress (spec D15): fill the bar from the kernel's `progress`
@@ -447,10 +470,12 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
 
   model.on("change:state", applyState);
   model.on("change:progress", applyProgress);
+  model.on("change:phase", applyPhase);
   model.on("change:section", applySection);
   applySection();
   applyState();
   applyProgress();
+  applyPhase();
 
   return () => {
     if (positionFrame !== 0) cancelAnimationFrame(positionFrame);

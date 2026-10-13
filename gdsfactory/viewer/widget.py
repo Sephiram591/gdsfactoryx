@@ -69,6 +69,9 @@ class Viewer(anywidget.AnyWidget):
     #: the in-flight run's progress as ``{"step": int, "total": int}`` (spec D15);
     #: ``{}`` when no run is in flight or the total is not yet known
     progress = traitlets.Dict(default_value={}).tag(sync=True)
+    #: the in-flight run's phase — ``"placing"``, ``"compiling"`` or
+    #: ``"stepping"`` (spec D15) — or ``""`` when no run is in flight
+    phase = traitlets.Unicode(default_value="").tag(sync=True)
 
     def __init__(self, stack: Any, **kwargs: Any) -> None:
         """Builds the device's geometry and prepares the widget.
@@ -167,13 +170,23 @@ class Viewer(anywidget.AnyWidget):
         self.state = self._viewer_state.to_state()
         self.run_result = {"status": "running"}
         self.progress = {}
+        self.phase = "placing"
 
         def _on_progress(step: int, total: int) -> None:
             self.progress = {"step": int(step), "total": int(total)}
 
+        def _on_phase(name: str) -> None:
+            self.phase = name
+
         def _work() -> None:
             try:
-                result = _run_sim(self.stack, self._viewer_state, key=key, progress=_on_progress)
+                result = _run_sim(
+                    self.stack,
+                    self._viewer_state,
+                    key=key,
+                    progress=_on_progress,
+                    phase=_on_phase,
+                )
                 self._run_result = result
                 self.run_result = {"status": "done", "detectors": _detector_names(result)}
             except BaseException as exc:
@@ -183,6 +196,7 @@ class Viewer(anywidget.AnyWidget):
                 self._viewer_state.running = False
                 self.state = self._viewer_state.to_state()
                 self.progress = {}
+                self.phase = ""
                 if on_done is not None:
                     on_done(self._run_result)
 

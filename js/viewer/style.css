@@ -371,6 +371,13 @@
   min-width: 0;
 }
 
+/* the run's phase label, left of its progress bar (spec D15) */
+.gfx-run-phase {
+  opacity: 0.8;
+  font-style: italic;
+  white-space: nowrap;
+}
+
 /* the run's progress bar beside the Run button (spec D15) */
 .gfx-run-progress {
   position: relative;
