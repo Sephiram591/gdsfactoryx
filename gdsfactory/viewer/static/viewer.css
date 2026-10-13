@@ -301,13 +301,6 @@
   flex: 1;
   min-width: 0;
 }
-.gfx-add {
-  gap: 4px;
-}
-.gfx-add .gfx-add-port {
-  flex: 1;
-  min-width: 0;
-}
 .gfx-run-note {
   opacity: 0.7;
   font-style: italic;

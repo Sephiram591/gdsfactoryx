@@ -75,15 +75,6 @@ interface SpecRow {
   fields: Map<string, Control>;
 }
 
-//: A section's "add" control: a port picker and an add button, hidden until the
-//: section header's "+" reveals it (spec R12).
-interface AddRow {
-  root: HTMLElement;
-  select: HTMLSelectElement;
-  button: HTMLButtonElement;
-  open: boolean;
-}
-
 const TABS = ["Layout / Ports", "Sources / Detectors", "Simulation"];
 
 //: The order the type selector lists each category's types in (spec R12).
@@ -105,8 +96,8 @@ export class Explorer {
   private readonly detectorList: HTMLElement;
   private readonly sourceEmpty: HTMLElement;
   private readonly detectorEmpty: HTMLElement;
-  private readonly sourceAdd: AddRow;
-  private readonly detectorAdd: AddRow;
+  private readonly sourceAdd: HTMLButtonElement;
+  private readonly detectorAdd: HTMLButtonElement;
   private readonly simFields = new Map<string, Control>();
   private readonly simNote: HTMLElement;
   private locked = false;
@@ -124,10 +115,10 @@ export class Explorer {
     this.sourceList.className = "gfx-spec-list";
     this.detectorList = document.createElement("div");
     this.detectorList.className = "gfx-spec-list";
-    this.sourceEmpty = emptyNote("No sources yet.");
+    this.sourceEmpty = emptyNote("None yet. Use + to add one.");
     this.detectorEmpty = emptyNote("None yet. Use +, or double-click a port in 3D.");
-    this.sourceAdd = this.buildAddRow("source");
-    this.detectorAdd = this.buildAddRow("detector");
+    this.sourceAdd = this.buildAdd("source");
+    this.detectorAdd = this.buildAdd("detector");
 
     const sim = this.buildSimForm();
     this.simNote = sim.note;
@@ -138,10 +129,8 @@ export class Explorer {
         this.section("Ports", this.meta.ports.map((port) => this.buildPortRow(port))),
       ]),
       this.panel([
-        this.section("Sources", [this.sourceAdd.root, this.sourceEmpty, this.sourceList],
-          this.sourceAdd),
-        this.section("Detectors", [this.detectorAdd.root, this.detectorEmpty, this.detectorList],
-          this.detectorAdd),
+        this.section("Sources", [this.sourceEmpty, this.sourceList], this.sourceAdd),
+        this.section("Detectors", [this.detectorEmpty, this.detectorList], this.detectorAdd),
       ]),
       this.panel([this.section("Simulation", sim.rows)]),
     ];
@@ -253,35 +242,25 @@ export class Explorer {
 
   // --------------------------------------------------------- sources/detectors
 
-  /** A port picker plus an add button, revealed by the section's "+" (spec R12). */
-  private buildAddRow(kind: "source" | "detector"): AddRow {
-    const root = document.createElement("div");
-    root.className = "gfx-row gfx-add";
-    root.hidden = true;
-    const select = document.createElement("select");
-    select.className = "gfx-select gfx-add-port";
-    select.title = `port to add a ${kind} on`;
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "gfx-button";
-    button.textContent = "Add";
-    button.addEventListener("click", () => {
-      if (this.locked || !select.value) return;
-      if (kind === "source") this.callbacks.onAddSource(select.value);
-      else this.callbacks.onAddDetector(select.value);
+  /** The "+" action that adds a default source or detector (spec R12, Q18). */
+  private buildAdd(kind: "source" | "detector"): HTMLButtonElement {
+    const plus = document.createElement("button");
+    plus.type = "button";
+    plus.className = "gfx-section-add";
+    plus.textContent = "+";
+    plus.title = `add a ${kind} with defaults`;
+    plus.addEventListener("click", () => {
+      // one click adds a row: no picker. A source defaults to the first port and
+      // a detector to the last, so the pair lands on opposite ends of the device
+      // (spec R12, Q18); the row's port field still lets you move it after.
+      if (this.locked) return;
+      const ports = this.meta.ports;
+      const port = ports.length > 1 && kind === "detector" ? ports[ports.length - 1] : ports[0];
+      if (!port) return;
+      if (kind === "source") this.callbacks.onAddSource(port.name);
+      else this.callbacks.onAddDetector(port.name);
     });
-    root.append(select, button);
-    return { root, select, button, open: false };
-  }
-
-  /** Shows or hides a section's add row (the section header's "+", spec R12). */
-  private toggleAdd(add: AddRow): void {
-    add.open = !add.open;
-    add.root.hidden = !add.open;
-    if (add.open) {
-      this.fillPortChoices(add.select);
-      add.select.focus();
-    }
+    return plus;
   }
 
   private renderSpecs(
@@ -523,23 +502,10 @@ export class Explorer {
       if (remove) (remove as HTMLButtonElement).disabled = locked;
     }
     for (const control of this.simFields.values()) control.setDisabled(locked);
-    for (const add of [this.sourceAdd, this.detectorAdd]) {
-      add.select.disabled = locked;
-      add.button.disabled = locked;
-    }
+    this.sourceAdd.disabled = locked;
+    this.detectorAdd.disabled = locked;
     this.simNote.hidden = !locked;
     if (locked) this.simNote.textContent = "The setup is locked while a run is in flight.";
-  }
-
-  /** Fills an add row's port list from the device's ports (spec R12). */
-  private fillPortChoices(select: HTMLSelectElement): void {
-    if (select.options.length > 0) return;
-    for (const port of this.meta.ports) {
-      const option = document.createElement("option");
-      option.value = port.name;
-      option.textContent = port.name;
-      select.appendChild(option);
-    }
   }
 
   // ------------------------------------------------------------------- controls
@@ -680,14 +646,9 @@ export class Explorer {
   private setTab(index: number): void {
     this.panels.forEach((panel, i) => (panel.hidden = i !== index));
     this.tabButtons.forEach((tab, i) => tab.classList.toggle("gfx-active", i === index));
-    // the port lists only need filling once, and the tab may have been hidden
-    if (index === 1) {
-      this.fillPortChoices(this.sourceAdd.select);
-      this.fillPortChoices(this.detectorAdd.select);
-    }
   }
 
-  private section(title: string, rows: HTMLElement[], add?: AddRow): HTMLElement {
+  private section(title: string, rows: HTMLElement[], add?: HTMLButtonElement): HTMLElement {
     const section = document.createElement("div");
     section.className = "gfx-section";
     const header = document.createElement("div");
@@ -695,20 +656,8 @@ export class Explorer {
     const name = document.createElement("span");
     name.textContent = title;
     header.appendChild(name);
-    // the "+" reveals the section's add row, so a new source or detector can be
-    // added from its own section rather than only the "New source" control (R12)
-    if (add) {
-      const plus = document.createElement("button");
-      plus.type = "button";
-      plus.className = "gfx-section-add";
-      plus.textContent = "+";
-      plus.title = `add a ${title.toLowerCase().replace(/s$/, "")}`;
-      plus.addEventListener("click", () => {
-        if (this.locked) return;
-        this.toggleAdd(add);
-      });
-      header.appendChild(plus);
-    }
+    // the "+" adds a source or detector straight from its own section (spec R12)
+    if (add) header.appendChild(add);
     section.appendChild(header);
     for (const row of rows) section.appendChild(row);
     return section;
