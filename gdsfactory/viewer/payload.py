@@ -118,10 +118,12 @@ def build_section_payload(viewer_state: ViewerState) -> dict[str, Any]:
         viewer_state: the state built once from a device.
 
     Returns:
-        ``{"plane", "position", "axis_u", "axis_v", "normal_axis", "bounds",
-        "rings", "background"}``: the plane and its position, the stack-axis
-        names the section's two axes and slider correspond to (for labels), the
-        section rectangle's local ``(u, v)`` bounds, and the level rings.
+        ``{"plane", "position", "axis_u", "axis_v", "normal_axis", "origin",
+        "bounds", "rings", "background"}``: the plane and its position, the
+        stack-axis names the section's two axes and slider correspond to (for
+        labels), the box center (spec C5, so the browser can label the local
+        rings in device coordinates), the section rectangle's local ``(u, v)``
+        bounds, and the level rings.
     """
     sliced = section(viewer_state.solids, viewer_state.plane, viewer_state.plane_position)
     u_bounds, v_bounds = section_bounds(viewer_state.size, viewer_state.plane)
@@ -131,23 +133,8 @@ def build_section_payload(viewer_state: ViewerState) -> dict[str, Any]:
         "axis_u": section_axis_names(viewer_state.plane)[0],
         "axis_v": section_axis_names(viewer_state.plane)[1],
         "normal_axis": section_normal_axis(viewer_state.plane),
+        "origin": [float(v) for v in viewer_state.origin],
         "bounds": [list(u_bounds), list(v_bounds)],
         "rings": {name: _rings(rings) for name, rings in sliced.rings.items()},
         "background": _rings(sliced.background),
     }
-
-
-def _section_axis_names(plane: str) -> tuple[str, str]:
-    return {"xy": ("x", "y"), "xz": ("x", "z"), "yz": ("z", "y")}[plane]
-
-
-def _section_normal_axis(plane: str) -> str:
-    return {"xy": "z", "xz": "y", "yz": "x"}[plane]
-
-
-def _section_bounds(size: tuple[float, float, float], plane: str) -> tuple[tuple[float, float], tuple[float, float]]:
-    axes = {"xy": (0, 1), "xz": (0, 2), "yz": (2, 1)}[plane]
-    return (
-        (-0.5 * size[axes[0]], 0.5 * size[axes[0]]),
-        (-0.5 * size[axes[1]], 0.5 * size[axes[1]]),
-    )

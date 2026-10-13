@@ -22,7 +22,8 @@ an asymmetric test (``tests/test_viewer_section.py``):
 - ``xz``: ``rotate([90, 0, 0])`` (``(x, y, z) -> (x, -z, y)``), slice at ``y``;
   ``(a, b) = (x, -z)``.
 - ``yz``: ``rotate([0, -90, 0])`` (``(x, y, z) -> (-z, y, x)``), slice at ``x``;
-  ``(a, b) = (-z, y)``.
+  ``(a, b) = (-z, y)``, so the section axes are ``(u, v) = (y, -z)`` with ``z``
+  vertical (spec R4).
 """
 
 from __future__ import annotations
@@ -41,7 +42,7 @@ PLANES = ("xy", "xz", "yz")
 
 #: The rotated frame's slice height (its normal) for each plane, and the
 #: ``(a, b) -> local (u, v)`` axis mapping. ``u``/``v`` are the section's own
-#: axes: xy -> (x, y), xz -> (x, z), yz -> (z, y).
+#: axes: xy -> (x, y), xz -> (x, z), yz -> (y, z) (z vertical, spec R4).
 _ROPES = {"xy": (0.0, 0.0, 0.0), "xz": (90.0, 0.0, 0.0), "yz": (0.0, -90.0, 0.0)}
 
 
@@ -79,8 +80,8 @@ def _to_section_xy(rings: list[np.ndarray], plane: str, origin: tuple[float, flo
             u, v = a - ox, b - oy
         elif plane == "xz":
             u, v = a - ox, -b - oz
-        else:  # yz
-            u, v = -a - oz, b - oy
+        else:  # yz: z vertical (v), y horizontal (u) (spec R4)
+            u, v = b - oy, -a - oz
         out.append(np.column_stack([u, v]).astype(np.float64))
     return tuple(out)
 
@@ -124,7 +125,7 @@ def section(solids: SolidSet, plane: str, position: float) -> SectionSet:
 
 def section_axis_names(plane: str) -> tuple[str, str]:
     """The stack-axis names the section's two axes ``(u, v)`` correspond to (spec R4)."""
-    return {"xy": ("x", "y"), "xz": ("x", "z"), "yz": ("z", "y")}[plane]
+    return {"xy": ("x", "y"), "xz": ("x", "z"), "yz": ("y", "z")}[plane]
 
 
 def section_normal_axis(plane: str) -> str:
@@ -135,10 +136,10 @@ def section_normal_axis(plane: str) -> str:
 def section_bounds(size: tuple[float, float, float], plane: str) -> tuple[tuple[float, float], tuple[float, float]]:
     """The section rectangle's local ``(u, v)`` bounds, centered on the origin (spec C5).
 
-    ``u``/``v`` are the section's own axes (xy -> x, y; xz -> x, z; yz -> z, y),
+    ``u``/``v`` are the section's own axes (xy -> x, y; xz -> x, z; yz -> y, z),
     each the box extent along that axis.
     """
-    axes = {"xy": (0, 1), "xz": (0, 2), "yz": (2, 1)}[plane]
+    axes = {"xy": (0, 1), "xz": (0, 2), "yz": (1, 2)}[plane]
     return (
         (-0.5 * size[axes[0]], 0.5 * size[axes[0]]),
         (-0.5 * size[axes[1]], 0.5 * size[axes[1]]),

@@ -4,12 +4,21 @@
 // section is sharp at any zoom and always agrees with the 3D view. Here the
 // rings are filled with Canvas2D's even-odd rule (holes come for free) and
 // zoom/pan are a screen transform applied on redraw, so nothing is resampled.
+import { REGION_COLOR, formatTick, niceStep, tickValues } from "./ticks";
 import type { MetaPayload, PortMeta, Ring, SectionPayload, StatePayload } from "./wire";
 
 const BG_COLOR = "#15151a";
 const EDGE_COLOR = "#000000";
 const PORT_COLOR = "#ffcc33";
 const SELECTED_COLOR = "#66ff66";
+//: tick label font size, in screen pixels
+const TICK_LABEL_PX = 11;
+const TICK_PX = 5 * (2 / 3);
+//: gap between a tick mark and its label, in screen pixels: the original 4 px
+//: relation, pulled 3x closer
+const LABEL_GAP = (4 * (2 / 3)) / 3;
+//: the axis name is drawn larger than the tick values it sits among
+const AXIS_NAME_PX = 16;
 
 //: How far a port's outline reaches either side of the plane it cuts (µm).
 const PORT_CUT_HALF = 0.5;
@@ -30,6 +39,10 @@ export class Section2D {
   private payload: SectionPayload | null = null;
   private state: StatePayload | null = null;
   private exaggeration = 1;
+  //: the box center (spec C5) of the section's two axes, for labelling local
+  //: coordinates in device (stack) coordinates, like the slider
+  private originU = 0;
+  private originV = 0;
   private view: View = { scale: 1, dx: 0, dy: 0 };
   //: set once the user zooms or pans; until then the view re-fits on every
   //: resize and payload change (the container starts hidden at zero size)
@@ -65,6 +78,15 @@ export class Section2D {
 
   setPayload(payload: SectionPayload): void {
     this.payload = payload;
+    // the section's (u, v) axes are a per-plane pair of stack axes (spec R4),
+    // so pick the box center's matching components for labelling
+    const [ox, oy, oz] = payload.origin;
+    const origins: Record<SectionPayload["plane"], [number, number]> = {
+      xy: [ox, oy],
+      xz: [ox, oz],
+      yz: [oy, oz],
+    };
+    [this.originU, this.originV] = origins[payload.plane];
     this.fit(); // refit on a new plane or position, unless the user has zoomed
     this.draw();
   }
@@ -80,6 +102,15 @@ export class Section2D {
     else this.fit();
   }
 
+  /** The factor actually applied to the v axis.
+   *
+   * The z multiplier is vertical only: it stretches v when v is z (xz, yz) and
+   * does nothing on xy, where v is y (spec R4).
+   */
+  private get vExaggeration(): number {
+    return this.payload?.axis_v === "z" ? this.exaggeration : 1;
+  }
+
   /** Frames the section rectangle in the canvas with equal aspect (spec R4). */
   fit(): void {
     const payload = this.payload;
@@ -87,7 +118,7 @@ export class Section2D {
     const { width, height } = this.size();
     const [[u0, u1], [v0, v1]] = payload.bounds;
     const uSpan = Math.max(u1 - u0, 1e-6);
-    const vSpan = Math.max((v1 - v0) * this.exaggeration, 1e-6);
+    const vSpan = Math.max((v1 - v0) * this.vExaggeration, 1e-6);
     const margin = 24;
     const scale = Math.min((width - 2 * margin) / uSpan, (height - 2 * margin) / vSpan);
     this.view = { scale, dx: 0, dy: 0 };
@@ -113,14 +144,14 @@ export class Section2D {
     const { width, height } = this.size();
     const cx = width / 2 + this.view.dx;
     const cy = height / 2 + this.view.dy;
-    return [cx + u * this.view.scale, cy - v * this.view.scale * this.exaggeration];
+    return [cx + u * this.view.scale, cy - v * this.view.scale * this.vExaggeration];
   }
 
   private unproject(px: number, py: number): [number, number] {
     const { width, height } = this.size();
     const cx = width / 2 + this.view.dx;
     const cy = height / 2 + this.view.dy;
-    return [(px - cx) / this.view.scale, (cy - py) / (this.view.scale * this.exaggeration)];
+    return [(px - cx) / this.view.scale, (cy - py) / (this.view.scale * this.vExaggeration)];
   }
 
   private path(rings: Ring[]): Path2D {
@@ -173,7 +204,8 @@ export class Section2D {
     }
 
     this.drawPorts(ctx, payload);
-    this.drawAxes(ctx, payload);
+    this.drawRegion(ctx, payload);
+    this.drawTicks(ctx, payload);
   }
 
   private drawPorts(ctx: CanvasRenderingContext2D, payload: SectionPayload): void {
@@ -196,11 +228,17 @@ export class Section2D {
     }
   }
 
-  /** A port's outline where the section plane cuts it, in (u, v), or null. */
+  /** A port's outline where the section plane cuts it, in local (u, v), or null.
+   *
+   * Port metadata is local, like the rings (spec C5), while the plane position
+   * is absolute (stack) coordinates, so the plane is brought into the local
+   * frame before the cut test; the outline is drawn in the local frame too.
+   */
   private portCut(port: PortMeta, payload: SectionPayload): [[number, number], [number, number]] | null {
     const half = PORT_CUT_HALF;
+    const [ox, oy, oz] = payload.origin;
     if (payload.plane === "xy") {
-      if (Math.abs(port.z - payload.position) > half) return null;
+      if (Math.abs(port.z - (payload.position - oz)) > half) return null;
       // the bar runs across the port, perpendicular to its orientation
       const angle = ((port.orientation ?? 0) * Math.PI) / 180;
       const w = port.width / 2;
@@ -210,34 +248,85 @@ export class Section2D {
       ];
     }
     if (payload.plane === "xz") {
-      if (Math.abs(port.y - payload.position) > half) return null;
+      if (Math.abs(port.y - (payload.position - oy)) > half) return null;
       return [
         [port.x, port.z - port.width / 2],
         [port.x, port.z + port.width / 2],
       ];
     }
-    // yz
-    if (Math.abs(port.x - payload.position) > half) return null;
+    // yz: u = y, v = z (z vertical, spec R4)
+    if (Math.abs(port.x - (payload.position - ox)) > half) return null;
     return [
-      [port.z - port.width / 2, port.y],
-      [port.z + port.width / 2, port.y],
+      [port.y, port.z - port.width / 2],
+      [port.y, port.z + port.width / 2],
     ];
   }
 
-  private drawAxes(ctx: CanvasRenderingContext2D, payload: SectionPayload): void {
+  /** Outlines the simulation region (the section rectangle, spec R4). */
+  private drawRegion(ctx: CanvasRenderingContext2D, payload: SectionPayload): void {
     const [[u0, u1], [v0, v1]] = payload.bounds;
-    ctx.strokeStyle = "rgba(180,180,200,0.35)";
+    const [x0, y0] = this.project(u0, v0);
+    const [x1, y1] = this.project(u1, v1);
+    ctx.strokeStyle = REGION_COLOR;
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+  }
+
+  /** Tick marks and labels for the two section axes (spec R4). */
+  private drawTicks(ctx: CanvasRenderingContext2D, payload: SectionPayload): void {
+    const [[u0, u1], [v0, v1]] = payload.bounds;
+    const step = niceStep(Math.max(u1 - u0, v1 - v0));
     ctx.lineWidth = 1;
+    ctx.font = `${TICK_LABEL_PX}px system-ui, sans-serif`;
+    // u ticks run along the bottom edge, v ticks up the left edge; both stay
+    // the plain outline color (spec R3)
+    ctx.strokeStyle = REGION_COLOR;
+    ctx.fillStyle = REGION_COLOR;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
     ctx.beginPath();
-    const [ax, ay] = this.project(u0, 0);
-    const [bx, by] = this.project(u1, 0);
-    ctx.moveTo(ax, ay);
-    ctx.lineTo(bx, by);
-    const [cx, cy] = this.project(0, v0);
-    const [dx, dy] = this.project(0, v1);
-    ctx.moveTo(cx, cy);
-    ctx.lineTo(dx, dy);
+    for (const au of tickValues(u0 + this.originU, u1 + this.originU, step)) {
+      const [x, y] = this.project(au - this.originU, v0);
+      ctx.moveTo(x, y);
+      ctx.lineTo(x, y + TICK_PX);
+    }
     ctx.stroke();
+    // ticks sit at nice device coordinates (local + box center, spec C5)
+    for (const au of tickValues(u0 + this.originU, u1 + this.originU, step)) {
+      const [x, y] = this.project(au - this.originU, v0);
+      ctx.fillText(formatTick(au), x, y + TICK_PX + LABEL_GAP);
+    }
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    ctx.beginPath();
+    for (const av of tickValues(v0 + this.originV, v1 + this.originV, step)) {
+      const [x, y] = this.project(u0, av - this.originV);
+      ctx.moveTo(x, y);
+      ctx.lineTo(x - TICK_PX, y);
+    }
+    ctx.stroke();
+    for (const av of tickValues(v0 + this.originV, v1 + this.originV, step)) {
+      const [x, y] = this.project(u0, av - this.originV);
+      ctx.fillText(formatTick(av), x - TICK_PX - LABEL_GAP, y);
+    }
+    // name each axis at the middle of its ticked edge, in a larger face and a
+    // little further out than the tick labels so the two never collide (a tick
+    // often sits at the midpoint too)
+    const nameGap = (TICK_PX + LABEL_GAP + AXIS_NAME_PX) * (2 / 3);
+    ctx.font = `${AXIS_NAME_PX}px system-ui, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    const [ux, uy] = this.project((u0 + u1) / 2, v0);
+    ctx.fillText(payload.axis_u, ux, uy + nameGap);
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    const [vx, vy] = this.project(u0, (v0 + v1) / 2);
+    ctx.fillText(payload.axis_v, vx - nameGap, vy);
+  }
+
+  /** The current frame as a PNG data URL (spec R4, "save image"). */
+  toPng(): string {
+    return this.canvas.toDataURL("image/png");
   }
 
   // ------------------------------------------------------------------ hover
@@ -250,7 +339,10 @@ export class Section2D {
     const [u, v] = this.unproject(event.clientX - rect.left, event.clientY - rect.top);
     const level = this.levelAt(u, v);
     const name = level ?? (this.inBackground(u, v) ? "background" : "-");
-    this.readout.textContent = `${payload.axis_u}=${u.toFixed(3)} ${payload.axis_v}=${v.toFixed(3)} µm · ${name}`;
+    // the section is in local coordinates; label it in device coordinates (spec C5)
+    this.readout.textContent =
+      `${payload.axis_u}=${(u + this.originU).toFixed(3)} ` +
+      `${payload.axis_v}=${(v + this.originV).toFixed(3)} µm · ${name}`;
   }
 
   private onClick(event: MouseEvent): void {

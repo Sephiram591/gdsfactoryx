@@ -160,18 +160,19 @@ def test_f2_xz_sidewalls_are_ten_degrees() -> None:
     """
     sliced = section(solids.analytic_solids(f2_stack()), "yz", 1.0)
     ring = sliced.rings["core"][0]
-    # u is the local z, v the local y; the upper side is the v > 0 chain
-    upper = ring[ring[:, 1] > 1e-9]
-    upper = upper[np.argsort(upper[:, 0])]  # order by z
-    bottom, top = upper[0], upper[-1]
-    half_bottom = abs(bottom[1])
-    half_top = abs(top[1])
+    # u is the local y, v the local z (z vertical, spec R4); the +y side is the
+    # u > 0 chain
+    side = ring[ring[:, 0] > 1e-9]
+    side = side[np.argsort(side[:, 1])]  # order by z, bottom to top
+    bottom, top = side[0], side[-1]
+    half_bottom = abs(bottom[0])
+    half_top = abs(top[0])
     assert half_bottom == pytest.approx(0.25, abs=1e-6)
     assert half_bottom - half_top == pytest.approx(0.22 * math.tan(math.radians(10.0)), abs=1e-6)
     # the side is straight: every vertex is collinear with the two ends
-    slope = (top[1] - bottom[1]) / (top[0] - bottom[0])
-    predicted = bottom[1] + slope * (upper[:, 0] - bottom[0])
-    np.testing.assert_allclose(upper[:, 1], predicted, atol=1e-6)
+    slope = (top[0] - bottom[0]) / (top[1] - bottom[1])
+    predicted = bottom[0] + slope * (side[:, 1] - bottom[1])
+    np.testing.assert_allclose(side[:, 0], predicted, atol=1e-6)
 
 
 # ------------------------------------------------------------ R4: tiling (Q13)
@@ -269,6 +270,9 @@ def test_section_payload_round_trips() -> None:
     assert wire["plane"] == "xz"
     assert wire["position"] == pytest.approx(0.0)
     assert (wire["axis_u"], wire["axis_v"], wire["normal_axis"]) == ("x", "z", "y")
+    # the browser labels the local rings in device coordinates (spec C5), so the
+    # payload carries the box center the rings are measured from
+    assert wire["origin"] == pytest.approx(list(viewer_state.origin))
     assert wire["bounds"] == [list(section_bounds(viewer_state.size, "xz")[0]),
                               list(section_bounds(viewer_state.size, "xz")[1])]
     for name, rings in sliced.rings.items():
@@ -318,6 +322,28 @@ def test_plane_position_is_clamped_and_validated() -> None:
         viewer_state.apply_patch({"plane": "qq"})
 
 
+def test_each_plane_remembers_its_own_position() -> None:
+    """R4: switching planes keeps each plane's last slider position."""
+    viewer_state = state.ViewerState(f1_stack())
+    assert viewer_state.plane == "xy"
+
+    # move the xy plane off center, then visit the other two planes
+    viewer_state.apply_patch({"plane_position": 1.0})
+    assert viewer_state.plane_positions["xy"] == pytest.approx(1.0)
+
+    viewer_state.apply_patch({"plane": "xz"})
+    assert viewer_state.plane_position == pytest.approx(viewer_state.origin[1])
+    viewer_state.apply_patch({"plane_position": -1.0})
+    viewer_state.apply_patch({"plane": "yz"})
+    assert viewer_state.plane_position == pytest.approx(viewer_state.origin[0])
+
+    # returning to a plane restores where it was left, not the box center
+    viewer_state.apply_patch({"plane": "xz"})
+    assert viewer_state.plane_position == pytest.approx(-1.0)
+    viewer_state.apply_patch({"plane": "xy"})
+    assert viewer_state.plane_position == pytest.approx(1.0)
+
+
 def test_state_carries_the_plane_fields() -> None:
     """R4: the wire state carries the plane, its position and the slider bounds."""
     viewer_state = state.ViewerState(f1_stack())
@@ -351,8 +377,9 @@ def test_axis_mapping_is_asymmetric() -> None:
     A wrong mapping (e.g. swapping u and v, or a sign error) is invisible on a
     symmetric fixture, so this builds a bar that is long in x (3 um), narrow in
     y (1 um) and thin in z (0.2 um): the ``xy`` section is wide in x, the ``xz``
-    section is wide in x and thin in z, and the ``yz`` section is thin in z and
-    narrow in y. Each plane's ``(u, v)`` axes are the documented pair (spec R4).
+    section is wide in x and thin in z, and the ``yz`` section is narrow in y and
+    thin in z (``z`` vertical). Each plane's ``(u, v)`` axes are the documented
+    pair (spec R4).
     """
     import fdtdx
     import gdsfactory as gf
@@ -374,7 +401,7 @@ def test_axis_mapping_is_asymmetric() -> None:
 
     for plane in PLANES:
         assert section_axis_names(plane) == {
-            "xy": ("x", "y"), "xz": ("x", "z"), "yz": ("z", "y")
+            "xy": ("x", "y"), "xz": ("x", "z"), "yz": ("y", "z")
         }[plane]
         assert section_normal_axis(plane) == {"xy": "z", "xz": "y", "yz": "x"}[plane]
 
@@ -384,9 +411,9 @@ def test_axis_mapping_is_asymmetric() -> None:
     # xz: wide in x, thin in z (v ~ [-0.1, 0.1])
     xz = _ring_bounds(section(solid_set, "xz", 0.0).rings["core"])
     assert (xz[1] - xz[0], xz[3] - xz[2]) == pytest.approx((3.0, 0.2), abs=1e-6)
-    # yz: thin in z (u ~ [-0.1, 0.1]), narrow in y
+    # yz: narrow in y (u ~ [-0.5, 0.5]), thin in z (v ~ [-0.1, 0.1])
     yz = _ring_bounds(section(solid_set, "yz", 1.0).rings["core"])
-    assert (yz[1] - yz[0], yz[3] - yz[2]) == pytest.approx((0.2, 1.0), abs=1e-6)
+    assert (yz[1] - yz[0], yz[3] - yz[2]) == pytest.approx((1.0, 0.2), abs=1e-6)
 
 
 def test_unknown_plane_raises() -> None:

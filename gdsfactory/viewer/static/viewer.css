@@ -49,6 +49,60 @@
   gap: 6px;
   margin-left: auto;
 }
+.gfx-save {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 8px;
+  margin-left: 4px;
+}
+.gfx-settings {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 8px;
+}
+.gfx-settings-panel {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  background: #1b1b1f;
+  overflow-y: auto;
+}
+.gfx-settings-panel[hidden] {
+  display: none;
+}
+.gfx-settings-heading {
+  font-weight: 600;
+  font-size: 14px;
+}
+.gfx-settings-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.gfx-select {
+  padding: 3px 6px;
+  border: 1px solid #4a4a55;
+  border-radius: 4px;
+  background: #2f2f37;
+  color: inherit;
+}
+.gfx-settings-row > span:first-child {
+  min-width: 130px;
+}
+.gfx-sensitivity {
+  width: 180px;
+}
+.gfx-settings-value {
+  min-width: 34px;
+  opacity: 0.8;
+  font-variant-numeric: tabular-nums;
+}
 .gfx-explorer {
   grid-area: explorer;
   display: flex;

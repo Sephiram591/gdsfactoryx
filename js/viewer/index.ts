@@ -8,7 +8,7 @@ import "./style.css";
 import { Explorer } from "./explorer";
 import { PortGlyphs } from "./glyphs";
 import { LevelMeshes } from "./mesh";
-import { Scene3D } from "./scene";
+import { Scene3D, CONTROL_KINDS, type ControlKind } from "./scene";
 import { Section2D } from "./section";
 import type {
   GeometryPayload,
@@ -27,6 +27,28 @@ interface AnyModel {
 
 const PLANES = ["xy", "xz", "yz"] as const;
 
+//: Human labels for the rotation styles the settings screen offers (spec R3).
+const CONTROL_LABELS: Record<ControlKind, string> = {
+  trackball: "Trackball (free roll)",
+  arcball: "Arcball (gizmo)",
+  orbit: "Orbit (turntable)",
+};
+
+//: A floppy-disk glyph for the save-image button (spec R3, R4).
+const SAVE_ICON =
+  '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+  'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+  '<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>' +
+  '<polyline points="17 21 17 13 7 13 7 21"/>' +
+  '<polyline points="7 3 7 8 15 8"/></svg>';
+
+//: A gear glyph for the settings button (spec R3).
+const GEAR_ICON =
+  '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+  'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+  '<circle cx="12" cy="12" r="3"/>' +
+  '<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
+
 function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void {
   const geometry = model.get("geometry") as GeometryPayload;
   const meta = model.get("meta") as MetaPayload;
@@ -43,15 +65,14 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   const to3d = button("3D", true);
   const to2d = button("2D", false);
   const fit = button("Fit", false);
-  const fullToggle = document.createElement("label");
-  fullToggle.className = "gfx-control";
-  fullToggle.title = "show full extent (unpainted)";
-  const fullInput = document.createElement("input");
-  fullInput.type = "checkbox";
-  fullToggle.append(fullInput, document.createTextNode(" full extent"));
+  const settings = document.createElement("button");
+  settings.type = "button";
+  settings.className = "gfx-button gfx-settings";
+  settings.title = "viewer settings";
+  settings.innerHTML = GEAR_ICON;
   const exaggeration = document.createElement("label");
   exaggeration.className = "gfx-control";
-  exaggeration.title = "vertical exaggeration (3D)";
+  exaggeration.title = "vertical exaggeration (both viewports)";
   exaggeration.textContent = "z ×";
   const exaggerationInput = document.createElement("input");
   exaggerationInput.type = "range";
@@ -60,7 +81,12 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   exaggerationInput.step = "0.5";
   exaggerationInput.value = "1";
   exaggeration.appendChild(exaggerationInput);
-  menubar.append(title, to3d, to2d, fit, fullToggle, exaggeration);
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "gfx-button gfx-save";
+  save.title = "save the current viewport as a PNG";
+  save.innerHTML = SAVE_ICON;
+  menubar.append(title, to3d, to2d, fit, settings, exaggeration, save);
 
   // -- section controls (2D only, spec R4) ---------------------------------
   const sectionControls = document.createElement("div");
@@ -88,19 +114,8 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   positionBox.className = "gfx-numeric";
   position.append(positionSlider, positionBox);
 
-  const sectionExaggeration = document.createElement("label");
-  sectionExaggeration.className = "gfx-control";
-  sectionExaggeration.title = "vertical exaggeration (2D)";
-  sectionExaggeration.textContent = "z ×";
-  const sectionExaggerationInput = document.createElement("input");
-  sectionExaggerationInput.type = "range";
-  sectionExaggerationInput.min = "1";
-  sectionExaggerationInput.max = "20";
-  sectionExaggerationInput.step = "0.5";
-  sectionExaggerationInput.value = "1";
-  sectionExaggeration.appendChild(sectionExaggerationInput);
-
-  sectionControls.append(planeToggle, position, sectionExaggeration);
+  // the z multiplier is shared with the 3D view; it lives in the menubar only
+  sectionControls.append(planeToggle, position);
 
   // -- explorer -------------------------------------------------------------
   const explorer = new Explorer(meta, {
@@ -115,10 +130,63 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   sceneRoot.className = "gfx-viewport-3d";
   viewport.appendChild(sceneRoot);
 
+  // -- settings screen (replaces the viewport, spec R3) ---------------------
+  const settingsPanel = document.createElement("div");
+  settingsPanel.className = "gfx-settings-panel";
+  settingsPanel.hidden = true;
+  const settingsHeading = document.createElement("div");
+  settingsHeading.className = "gfx-settings-heading";
+  settingsHeading.textContent = "Viewer settings";
+  const controlRow = document.createElement("label");
+  controlRow.className = "gfx-settings-row";
+  const controlLabel = document.createElement("span");
+  controlLabel.textContent = "Rotation style";
+  const controlSelect = document.createElement("select");
+  controlSelect.className = "gfx-select";
+  for (const kind of CONTROL_KINDS) {
+    const option = document.createElement("option");
+    option.value = kind;
+    option.textContent = CONTROL_LABELS[kind];
+    controlSelect.appendChild(option);
+  }
+  controlRow.append(controlLabel, controlSelect);
+
+  const sensitivityRow = document.createElement("label");
+  sensitivityRow.className = "gfx-settings-row";
+  const sensitivityLabel = document.createElement("span");
+  sensitivityLabel.textContent = "Rotation sensitivity";
+  const sensitivityInput = document.createElement("input");
+  sensitivityInput.type = "range";
+  sensitivityInput.className = "gfx-sensitivity";
+  sensitivityInput.min = "0.2";
+  sensitivityInput.max = "3";
+  sensitivityInput.step = "0.1";
+  const sensitivityValue = document.createElement("span");
+  sensitivityValue.className = "gfx-settings-value";
+  sensitivityRow.append(sensitivityLabel, sensitivityInput, sensitivityValue);
+
+  const fullRow = document.createElement("label");
+  fullRow.className = "gfx-settings-row";
+  fullRow.title = "show full extent (unpainted)";
+  const fullLabel = document.createElement("span");
+  fullLabel.textContent = "Full extent";
+  const fullInput = document.createElement("input");
+  fullInput.type = "checkbox";
+  const fullHint = document.createElement("span");
+  fullHint.className = "gfx-settings-value";
+  fullHint.textContent = "unpainted";
+  fullRow.append(fullLabel, fullInput, fullHint);
+
+  settingsPanel.append(settingsHeading, controlRow, sensitivityRow, fullRow);
+  viewport.appendChild(settingsPanel);
+
   el.append(menubar, sectionControls, explorer.root, viewport);
 
   const scene = new Scene3D(sceneRoot);
-  scene.setBounds(geometry.size);
+  scene.setBounds(geometry.size, geometry.origin);
+  controlSelect.value = scene.control; // the scene's default (spec R3)
+  sensitivityInput.value = String(scene.sensitivity);
+  sensitivityValue.textContent = `${scene.sensitivity.toFixed(1)}×`;
   const section = new Section2D(meta, (name) => sendPatch(model, {
     selection: name ? { kind: "port", name } : null,
   }));
@@ -135,20 +203,63 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   scene.content.add(glyphs.group);
 
   fit.addEventListener("click", () => {
+    closeSettings(); // switching the view or fitting returns to the viewport
     if (currentState(model)?.active_viewport === "2d") section.fit();
     else scene.fit();
   });
-  exaggerationInput.addEventListener("input", () =>
-    scene.setZExaggeration(Number(exaggerationInput.value)),
-  );
-  sectionExaggerationInput.addEventListener("input", () =>
-    section.setExaggeration(Number(sectionExaggerationInput.value)),
-  );
+
+  // -- settings screen wiring (spec R3) -------------------------------------
+  let settingsOpen = false;
+  // the 3D/2D/Fit buttons leave the settings screen and return to the viewport
+  const closeSettings = (): void => {
+    if (!settingsOpen) return;
+    settingsOpen = false;
+    applySettingsVisibility();
+  };
+  const applySettingsVisibility = (): void => {
+    settingsPanel.hidden = !settingsOpen;
+    settings.classList.toggle("gfx-active", settingsOpen);
+    // the settings screen replaces the viewport, so hide whichever viewport is
+    // active (3D renderer or 2D canvas) while it is open
+    const is2d = currentState(model)?.active_viewport === "2d";
+    sceneRoot.hidden = settingsOpen || is2d;
+    section.root.hidden = settingsOpen || !is2d;
+    sectionControls.hidden = settingsOpen || !is2d;
+    scene.setViewportVisible(!settingsOpen);
+  };
+  settings.addEventListener("click", () => {
+    settingsOpen = !settingsOpen;
+    applySettingsVisibility();
+  });
+  controlSelect.addEventListener("change", () => {
+    scene.setControl(controlSelect.value as ControlKind);
+  });
+  sensitivityInput.addEventListener("input", () => {
+    const value = Number(sensitivityInput.value);
+    scene.setSensitivity(value);
+    sensitivityValue.textContent = `${value.toFixed(1)}×`;
+  });
+  // one z multiplier drives both viewports (spec R3, R4)
+  exaggerationInput.addEventListener("input", () => {
+    const factor = Number(exaggerationInput.value);
+    scene.setZExaggeration(factor);
+    section.setExaggeration(factor);
+  });
   fullInput.addEventListener("change", () =>
     sendPatch(model, { show_full: fullInput.checked }),
   );
-  to3d.addEventListener("click", () => sendPatch(model, { active_viewport: "3d" }));
-  to2d.addEventListener("click", () => sendPatch(model, { active_viewport: "2d" }));
+  to3d.addEventListener("click", () => {
+    closeSettings();
+    sendPatch(model, { active_viewport: "3d" });
+  });
+  to2d.addEventListener("click", () => {
+    closeSettings();
+    sendPatch(model, { active_viewport: "2d" });
+  });
+  save.addEventListener("click", () => {
+    const is2d = currentState(model)?.active_viewport === "2d";
+    download(is2d ? section.toPng() : scene.toPng(), is2d ? "cross-section.png" : "view-3d.png");
+  });
 
   // The slider drags faster than the kernel can round trip (spec D10), so
   // coalesce to one patch per frame, keeping the latest value (the pattern
@@ -181,9 +292,11 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
     const is2d = state.active_viewport === "2d";
     to3d.classList.toggle("gfx-active", !is2d);
     to2d.classList.toggle("gfx-active", is2d);
-    sceneRoot.hidden = is2d;
-    section.root.hidden = !is2d;
-    sectionControls.hidden = !is2d;
+    // the settings screen replaces whichever viewport is active (spec R3)
+    sceneRoot.hidden = settingsOpen || is2d;
+    section.root.hidden = settingsOpen || !is2d;
+    sectionControls.hidden = settingsOpen || !is2d;
+    scene.setViewportVisible(!settingsOpen);
     for (const [plane, planeButton] of planeButtons) {
       planeButton.classList.toggle("gfx-active", plane === state.plane);
     }
@@ -232,6 +345,14 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
 
 function sendPatch(model: AnyModel, patch: Record<string, unknown>): void {
   model.send({ event: "set_state", patch });
+}
+
+/** Triggers a browser download of a data-URL image. */
+function download(dataUrl: string, filename: string): void {
+  const link = document.createElement("a");
+  link.href = dataUrl;
+  link.download = filename;
+  link.click();
 }
 
 function currentState(model: AnyModel): StatePayload | undefined {

@@ -86,6 +86,9 @@ export interface SectionPayload {
   axis_u: string;
   axis_v: string;
   normal_axis: string;
+  //: the box center in stack coordinates (spec C5); rings/bounds are local, so
+  //: labels and the hover readout add this to read in device coordinates
+  origin: [number, number, number];
   bounds: [[number, number], [number, number]];
   rings: Record<string, Ring[]>;
   background: Ring[];

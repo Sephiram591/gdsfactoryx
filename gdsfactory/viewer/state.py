@@ -112,21 +112,30 @@ class ViewerState:
         self.active_viewport: str = "3d"
         self.show_full: bool = False
         self.plane: str = "xy"
-        lo, hi = self.plane_bounds()
-        self.plane_position: float = 0.5 * (lo + hi)  # the box center (spec C5)
+        #: each plane remembers where its slider was, so switching planes and
+        #: back returns to the last position seen for that plane (spec R4)
+        self.plane_positions: dict[str, float] = {
+            plane: 0.5 * sum(self.plane_bounds(plane)) for plane in PLANES
+        }
 
     # ------------------------------------------------------------------ section
 
-    def plane_bounds(self) -> tuple[float, float]:
-        """The section slider's ``(min, max)`` along the active plane's normal (spec R4).
+    def plane_bounds(self, plane: str | None = None) -> tuple[float, float]:
+        """The section slider's ``(min, max)`` along ``plane``'s normal (spec R4).
 
         The range is the device box along that axis, from ``origin``/``size``
-        (both measured from the box center, spec C5).
+        (both measured from the box center, spec C5). ``plane`` defaults to the
+        active plane.
         """
-        axis = {"xy": 2, "xz": 1, "yz": 0}[self.plane]
+        axis = {"xy": 2, "xz": 1, "yz": 0}[plane or self.plane]
         half = 0.5 * self.size[axis]
         center = self.origin[axis]
         return center - half, center + half
+
+    @property
+    def plane_position(self) -> float:
+        """The active plane's remembered slider position (spec R4)."""
+        return self.plane_positions[self.plane]
 
     # ------------------------------------------------------------------ patching
 
@@ -135,9 +144,11 @@ class ViewerState:
 
         Recognised keys: ``styles`` (per-level partial ``{color, opacity,
         visible}``), ``port_visible``, ``selection``, ``active_viewport``,
-        ``show_full``, ``plane`` and ``plane_position``. Unknown names or keys
-        raise ``ValueError``; the widget handler catches it and re-syncs the
-        canonical state, so a bad patch cannot corrupt the state.
+        ``show_full``, ``plane`` and ``plane_position``. A ``plane_position``
+        patch is stored against the active plane, so each plane keeps its own
+        slider position. Unknown names or keys raise ``ValueError``; the widget
+        handler catches it and re-syncs the canonical state, so a bad patch
+        cannot corrupt the state.
 
         Args:
             patch: the partial state the browser sent.
@@ -190,15 +201,13 @@ class ViewerState:
             if patch["plane"] not in PLANES:
                 raise ValueError(f"Unknown plane {patch['plane']!r}")
             self.plane = patch["plane"]
-            lo, hi = self.plane_bounds()
-            self.plane_position = min(hi, max(lo, self.plane_position))
 
         if "plane_position" in patch:
             position = float(patch["plane_position"])
             if not math.isfinite(position):
                 raise ValueError(f"Non-finite plane position {patch['plane_position']!r}")
             lo, hi = self.plane_bounds()
-            self.plane_position = min(hi, max(lo, position))
+            self.plane_positions[self.plane] = min(hi, max(lo, position))
 
     # ------------------------------------------------------------------ wire
 

@@ -11178,6 +11178,507 @@ var BufferGeometry = class _BufferGeometry extends EventDispatcher {
     this.dispatchEvent({ type: "dispose" });
   }
 };
+var InterleavedBuffer = class {
+  /**
+   * Constructs a new interleaved buffer.
+   *
+   * @param {TypedArray} array - A typed array with a shared buffer storing attribute data.
+   * @param {number} stride - The number of typed-array elements per vertex.
+   */
+  constructor(array, stride) {
+    this.isInterleavedBuffer = true;
+    this.array = array;
+    this.stride = stride;
+    this.count = array !== void 0 ? array.length / stride : 0;
+    this.usage = StaticDrawUsage;
+    this.updateRanges = [];
+    this.version = 0;
+    this.uuid = generateUUID();
+  }
+  /**
+   * A callback function that is executed after the renderer has transferred the attribute array
+   * data to the GPU.
+   */
+  onUploadCallback() {
+  }
+  /**
+   * Flag to indicate that this attribute has changed and should be re-sent to
+   * the GPU. Set this to `true` when you modify the value of the array.
+   *
+   * @type {number}
+   * @default false
+   * @param {boolean} value
+   */
+  set needsUpdate(value) {
+    if (value === true) this.version++;
+  }
+  /**
+   * Sets the usage of this interleaved buffer.
+   *
+   * @param {(StaticDrawUsage|DynamicDrawUsage|StreamDrawUsage|StaticReadUsage|DynamicReadUsage|StreamReadUsage|StaticCopyUsage|DynamicCopyUsage|StreamCopyUsage)} value - The usage to set.
+   * @return {InterleavedBuffer} A reference to this interleaved buffer.
+   */
+  setUsage(value) {
+    this.usage = value;
+    return this;
+  }
+  /**
+   * Adds a range of data in the data array to be updated on the GPU.
+   *
+   * @param {number} start - Position at which to start update.
+   * @param {number} count - The number of components to update.
+   */
+  addUpdateRange(start, count) {
+    this.updateRanges.push({ start, count });
+  }
+  /**
+   * Clears the update ranges.
+   */
+  clearUpdateRanges() {
+    this.updateRanges.length = 0;
+  }
+  /**
+   * Copies the values of the given interleaved buffer to this instance.
+   *
+   * @param {InterleavedBuffer} source - The interleaved buffer to copy.
+   * @return {InterleavedBuffer} A reference to this instance.
+   */
+  copy(source) {
+    this.array = new source.array.constructor(source.array);
+    this.count = source.count;
+    this.stride = source.stride;
+    this.usage = source.usage;
+    return this;
+  }
+  /**
+   * Copies a vector from the given interleaved buffer to this one. The start
+   * and destination position in the attribute buffers are represented by the
+   * given indices.
+   *
+   * @param {number} index1 - The destination index into this interleaved buffer.
+   * @param {InterleavedBuffer} interleavedBuffer - The interleaved buffer to copy from.
+   * @param {number} index2 - The source index into the given interleaved buffer.
+   * @return {InterleavedBuffer} A reference to this instance.
+   */
+  copyAt(index1, interleavedBuffer, index2) {
+    index1 *= this.stride;
+    index2 *= interleavedBuffer.stride;
+    for (let i = 0, l = this.stride; i < l; i++) {
+      this.array[index1 + i] = interleavedBuffer.array[index2 + i];
+    }
+    return this;
+  }
+  /**
+   * Sets the given array data in the interleaved buffer.
+   *
+   * @param {(TypedArray|Array)} value - The array data to set.
+   * @param {number} [offset=0] - The offset in this interleaved buffer's array.
+   * @return {InterleavedBuffer} A reference to this instance.
+   */
+  set(value, offset = 0) {
+    this.array.set(value, offset);
+    return this;
+  }
+  /**
+   * Returns a new interleaved buffer with copied values from this instance.
+   *
+   * @param {Object} [data] - An object with shared array buffers that allows to retain shared structures.
+   * @return {InterleavedBuffer} A clone of this instance.
+   */
+  clone(data) {
+    if (data.arrayBuffers === void 0) {
+      data.arrayBuffers = {};
+    }
+    if (this.array.buffer._uuid === void 0) {
+      this.array.buffer._uuid = generateUUID();
+    }
+    if (data.arrayBuffers[this.array.buffer._uuid] === void 0) {
+      data.arrayBuffers[this.array.buffer._uuid] = this.array.slice(0).buffer;
+    }
+    const array = new this.array.constructor(data.arrayBuffers[this.array.buffer._uuid]);
+    const ib = new this.constructor(array, this.stride);
+    ib.setUsage(this.usage);
+    return ib;
+  }
+  /**
+   * Sets the given callback function that is executed after the Renderer has transferred
+   * the array data to the GPU. Can be used to perform clean-up operations after
+   * the upload when data are not needed anymore on the CPU side.
+   *
+   * @param {Function} callback - The `onUpload()` callback.
+   * @return {InterleavedBuffer} A reference to this instance.
+   */
+  onUpload(callback) {
+    this.onUploadCallback = callback;
+    return this;
+  }
+  /**
+   * Serializes the interleaved buffer into JSON.
+   *
+   * @param {Object} [data] - An optional value holding meta information about the serialization.
+   * @return {Object} A JSON object representing the serialized interleaved buffer.
+   */
+  toJSON(data) {
+    if (data.arrayBuffers === void 0) {
+      data.arrayBuffers = {};
+    }
+    if (this.array.buffer._uuid === void 0) {
+      this.array.buffer._uuid = generateUUID();
+    }
+    if (data.arrayBuffers[this.array.buffer._uuid] === void 0) {
+      data.arrayBuffers[this.array.buffer._uuid] = Array.from(new Uint32Array(this.array.buffer));
+    }
+    const json = {
+      uuid: this.uuid,
+      buffer: this.array.buffer._uuid,
+      type: this.array.constructor.name,
+      stride: this.stride
+    };
+    json.usage = this.usage;
+    return json;
+  }
+};
+var _vector$8 = /* @__PURE__ */ new Vector3();
+var InterleavedBufferAttribute = class _InterleavedBufferAttribute {
+  /**
+   * Constructs a new interleaved buffer attribute.
+   *
+   * @param {InterleavedBuffer} interleavedBuffer - The buffer holding the interleaved data.
+   * @param {number} itemSize - The item size.
+   * @param {number} offset - The attribute offset into the buffer.
+   * @param {boolean} [normalized=false] - Whether the data are normalized or not.
+   */
+  constructor(interleavedBuffer, itemSize, offset, normalized = false) {
+    this.isInterleavedBufferAttribute = true;
+    this.name = "";
+    this.data = interleavedBuffer;
+    this.itemSize = itemSize;
+    this.offset = offset;
+    this.normalized = normalized;
+  }
+  /**
+   * The item count of this buffer attribute.
+   *
+   * @type {number}
+   * @readonly
+   */
+  get count() {
+    return this.data.count;
+  }
+  /**
+   * The array holding the interleaved buffer attribute data.
+   *
+   * @type {TypedArray}
+   */
+  get array() {
+    return this.data.array;
+  }
+  /**
+   * Flag to indicate that this attribute has changed and should be re-sent to
+   * the GPU. Set this to `true` when you modify the value of the array.
+   *
+   * @type {number}
+   * @default false
+   * @param {boolean} value
+   */
+  set needsUpdate(value) {
+    this.data.needsUpdate = value;
+  }
+  /**
+   * Applies the given 4x4 matrix to the given attribute. Only works with
+   * item size `3`.
+   *
+   * @param {Matrix4} m - The matrix to apply.
+   * @return {InterleavedBufferAttribute} A reference to this instance.
+   */
+  applyMatrix4(m) {
+    for (let i = 0, l = this.data.count; i < l; i++) {
+      _vector$8.fromBufferAttribute(this, i);
+      _vector$8.applyMatrix4(m);
+      this.setXYZ(i, _vector$8.x, _vector$8.y, _vector$8.z);
+    }
+    return this;
+  }
+  /**
+   * Applies the given 3x3 normal matrix to the given attribute. Only works with
+   * item size `3`.
+   *
+   * @param {Matrix3} m - The normal matrix to apply.
+   * @return {InterleavedBufferAttribute} A reference to this instance.
+   */
+  applyNormalMatrix(m) {
+    for (let i = 0, l = this.count; i < l; i++) {
+      _vector$8.fromBufferAttribute(this, i);
+      _vector$8.applyNormalMatrix(m);
+      this.setXYZ(i, _vector$8.x, _vector$8.y, _vector$8.z);
+    }
+    return this;
+  }
+  /**
+   * Applies the given 4x4 matrix to the given attribute. Only works with
+   * item size `3` and with direction vectors.
+   *
+   * @param {Matrix4} m - The matrix to apply.
+   * @return {InterleavedBufferAttribute} A reference to this instance.
+   */
+  transformDirection(m) {
+    for (let i = 0, l = this.count; i < l; i++) {
+      _vector$8.fromBufferAttribute(this, i);
+      _vector$8.transformDirection(m);
+      this.setXYZ(i, _vector$8.x, _vector$8.y, _vector$8.z);
+    }
+    return this;
+  }
+  /**
+   * Returns the given component of the vector at the given index.
+   *
+   * @param {number} index - The index into the buffer attribute.
+   * @param {number} component - The component index.
+   * @return {number} The returned value.
+   */
+  getComponent(index, component) {
+    let value = this.array[index * this.data.stride + this.offset + component];
+    if (this.normalized) value = denormalize(value, this.array);
+    return value;
+  }
+  /**
+   * Sets the given value to the given component of the vector at the given index.
+   *
+   * @param {number} index - The index into the buffer attribute.
+   * @param {number} component - The component index.
+   * @param {number} value - The value to set.
+   * @return {InterleavedBufferAttribute} A reference to this instance.
+   */
+  setComponent(index, component, value) {
+    if (this.normalized) value = normalize(value, this.array);
+    this.data.array[index * this.data.stride + this.offset + component] = value;
+    return this;
+  }
+  /**
+   * Sets the x component of the vector at the given index.
+   *
+   * @param {number} index - The index into the buffer attribute.
+   * @param {number} x - The value to set.
+   * @return {InterleavedBufferAttribute} A reference to this instance.
+   */
+  setX(index, x) {
+    if (this.normalized) x = normalize(x, this.array);
+    this.data.array[index * this.data.stride + this.offset] = x;
+    return this;
+  }
+  /**
+   * Sets the y component of the vector at the given index.
+   *
+   * @param {number} index - The index into the buffer attribute.
+   * @param {number} y - The value to set.
+   * @return {InterleavedBufferAttribute} A reference to this instance.
+   */
+  setY(index, y) {
+    if (this.normalized) y = normalize(y, this.array);
+    this.data.array[index * this.data.stride + this.offset + 1] = y;
+    return this;
+  }
+  /**
+   * Sets the z component of the vector at the given index.
+   *
+   * @param {number} index - The index into the buffer attribute.
+   * @param {number} z - The value to set.
+   * @return {InterleavedBufferAttribute} A reference to this instance.
+   */
+  setZ(index, z) {
+    if (this.normalized) z = normalize(z, this.array);
+    this.data.array[index * this.data.stride + this.offset + 2] = z;
+    return this;
+  }
+  /**
+   * Sets the w component of the vector at the given index.
+   *
+   * @param {number} index - The index into the buffer attribute.
+   * @param {number} w - The value to set.
+   * @return {InterleavedBufferAttribute} A reference to this instance.
+   */
+  setW(index, w) {
+    if (this.normalized) w = normalize(w, this.array);
+    this.data.array[index * this.data.stride + this.offset + 3] = w;
+    return this;
+  }
+  /**
+   * Returns the x component of the vector at the given index.
+   *
+   * @param {number} index - The index into the buffer attribute.
+   * @return {number} The x component.
+   */
+  getX(index) {
+    let x = this.data.array[index * this.data.stride + this.offset];
+    if (this.normalized) x = denormalize(x, this.array);
+    return x;
+  }
+  /**
+   * Returns the y component of the vector at the given index.
+   *
+   * @param {number} index - The index into the buffer attribute.
+   * @return {number} The y component.
+   */
+  getY(index) {
+    let y = this.data.array[index * this.data.stride + this.offset + 1];
+    if (this.normalized) y = denormalize(y, this.array);
+    return y;
+  }
+  /**
+   * Returns the z component of the vector at the given index.
+   *
+   * @param {number} index - The index into the buffer attribute.
+   * @return {number} The z component.
+   */
+  getZ(index) {
+    let z = this.data.array[index * this.data.stride + this.offset + 2];
+    if (this.normalized) z = denormalize(z, this.array);
+    return z;
+  }
+  /**
+   * Returns the w component of the vector at the given index.
+   *
+   * @param {number} index - The index into the buffer attribute.
+   * @return {number} The w component.
+   */
+  getW(index) {
+    let w = this.data.array[index * this.data.stride + this.offset + 3];
+    if (this.normalized) w = denormalize(w, this.array);
+    return w;
+  }
+  /**
+   * Sets the x and y component of the vector at the given index.
+   *
+   * @param {number} index - The index into the buffer attribute.
+   * @param {number} x - The value for the x component to set.
+   * @param {number} y - The value for the y component to set.
+   * @return {InterleavedBufferAttribute} A reference to this instance.
+   */
+  setXY(index, x, y) {
+    index = index * this.data.stride + this.offset;
+    if (this.normalized) {
+      x = normalize(x, this.array);
+      y = normalize(y, this.array);
+    }
+    this.data.array[index + 0] = x;
+    this.data.array[index + 1] = y;
+    return this;
+  }
+  /**
+   * Sets the x, y and z component of the vector at the given index.
+   *
+   * @param {number} index - The index into the buffer attribute.
+   * @param {number} x - The value for the x component to set.
+   * @param {number} y - The value for the y component to set.
+   * @param {number} z - The value for the z component to set.
+   * @return {InterleavedBufferAttribute} A reference to this instance.
+   */
+  setXYZ(index, x, y, z) {
+    index = index * this.data.stride + this.offset;
+    if (this.normalized) {
+      x = normalize(x, this.array);
+      y = normalize(y, this.array);
+      z = normalize(z, this.array);
+    }
+    this.data.array[index + 0] = x;
+    this.data.array[index + 1] = y;
+    this.data.array[index + 2] = z;
+    return this;
+  }
+  /**
+   * Sets the x, y, z and w component of the vector at the given index.
+   *
+   * @param {number} index - The index into the buffer attribute.
+   * @param {number} x - The value for the x component to set.
+   * @param {number} y - The value for the y component to set.
+   * @param {number} z - The value for the z component to set.
+   * @param {number} w - The value for the w component to set.
+   * @return {InterleavedBufferAttribute} A reference to this instance.
+   */
+  setXYZW(index, x, y, z, w) {
+    index = index * this.data.stride + this.offset;
+    if (this.normalized) {
+      x = normalize(x, this.array);
+      y = normalize(y, this.array);
+      z = normalize(z, this.array);
+      w = normalize(w, this.array);
+    }
+    this.data.array[index + 0] = x;
+    this.data.array[index + 1] = y;
+    this.data.array[index + 2] = z;
+    this.data.array[index + 3] = w;
+    return this;
+  }
+  /**
+   * Returns a new buffer attribute with copied values from this instance.
+   *
+   * If no parameter is provided, cloning an interleaved buffer attribute will de-interleave buffer data.
+   *
+   * @param {Object} [data] - An object with interleaved buffers that allows to retain the interleaved property.
+   * @return {BufferAttribute|InterleavedBufferAttribute} A clone of this instance.
+   */
+  clone(data) {
+    if (data === void 0) {
+      log("InterleavedBufferAttribute.clone(): Cloning an interleaved buffer attribute will de-interleave buffer data.");
+      const array = [];
+      for (let i = 0; i < this.count; i++) {
+        const index = i * this.data.stride + this.offset;
+        for (let j = 0; j < this.itemSize; j++) {
+          array.push(this.data.array[index + j]);
+        }
+      }
+      return new BufferAttribute(new this.array.constructor(array), this.itemSize, this.normalized);
+    } else {
+      if (data.interleavedBuffers === void 0) {
+        data.interleavedBuffers = {};
+      }
+      if (data.interleavedBuffers[this.data.uuid] === void 0) {
+        data.interleavedBuffers[this.data.uuid] = this.data.clone(data);
+      }
+      return new _InterleavedBufferAttribute(data.interleavedBuffers[this.data.uuid], this.itemSize, this.offset, this.normalized);
+    }
+  }
+  /**
+   * Serializes the buffer attribute into JSON.
+   *
+   * If no parameter is provided, cloning an interleaved buffer attribute will de-interleave buffer data.
+   *
+   * @param {Object} [data] - An optional value holding meta information about the serialization.
+   * @return {Object} A JSON object representing the serialized buffer attribute.
+   */
+  toJSON(data) {
+    if (data === void 0) {
+      log("InterleavedBufferAttribute.toJSON(): Serializing an interleaved buffer attribute will de-interleave buffer data.");
+      const array = [];
+      for (let i = 0; i < this.count; i++) {
+        const index = i * this.data.stride + this.offset;
+        for (let j = 0; j < this.itemSize; j++) {
+          array.push(this.data.array[index + j]);
+        }
+      }
+      return {
+        itemSize: this.itemSize,
+        type: this.array.constructor.name,
+        array,
+        normalized: this.normalized
+      };
+    } else {
+      if (data.interleavedBuffers === void 0) {
+        data.interleavedBuffers = {};
+      }
+      if (data.interleavedBuffers[this.data.uuid] === void 0) {
+        data.interleavedBuffers[this.data.uuid] = this.data.toJSON(data);
+      }
+      return {
+        isInterleavedBufferAttribute: true,
+        itemSize: this.itemSize,
+        data: this.data.uuid,
+        offset: this.offset,
+        normalized: this.normalized
+      };
+    }
+  }
+};
 var _vector1 = /* @__PURE__ */ new Vector3();
 var _vector2 = /* @__PURE__ */ new Vector3();
 var _normalMatrix = /* @__PURE__ */ new Matrix3();
@@ -12018,6 +12519,175 @@ var Material = class extends EventDispatcher {
     if (value === true) this.version++;
   }
 };
+var SpriteMaterial = class extends Material {
+  /**
+   * Constructs a new sprite material.
+   *
+   * @param {Object} [parameters] - An object with one or more properties
+   * defining the material's appearance. Any property of the material
+   * (including any property from inherited materials) can be passed
+   * in here. Color values can be passed any type of value accepted
+   * by {@link Color#set}.
+   */
+  constructor(parameters) {
+    super();
+    this.isSpriteMaterial = true;
+    this.type = "SpriteMaterial";
+    this.color = new Color(16777215);
+    this.map = null;
+    this.alphaMap = null;
+    this.rotation = 0;
+    this.sizeAttenuation = true;
+    this.transparent = true;
+    this.fog = true;
+    this.setValues(parameters);
+  }
+  copy(source) {
+    super.copy(source);
+    this.color.copy(source.color);
+    this.map = source.map;
+    this.alphaMap = source.alphaMap;
+    this.rotation = source.rotation;
+    this.sizeAttenuation = source.sizeAttenuation;
+    this.fog = source.fog;
+    return this;
+  }
+};
+var _geometry;
+var _intersectPoint = /* @__PURE__ */ new Vector3();
+var _worldScale = /* @__PURE__ */ new Vector3();
+var _mvPosition = /* @__PURE__ */ new Vector3();
+var _alignedPosition = /* @__PURE__ */ new Vector2();
+var _rotatedPosition = /* @__PURE__ */ new Vector2();
+var _viewWorldMatrix = /* @__PURE__ */ new Matrix4();
+var _vA$1 = /* @__PURE__ */ new Vector3();
+var _vB$1 = /* @__PURE__ */ new Vector3();
+var _vC$1 = /* @__PURE__ */ new Vector3();
+var _uvA = /* @__PURE__ */ new Vector2();
+var _uvB = /* @__PURE__ */ new Vector2();
+var _uvC = /* @__PURE__ */ new Vector2();
+var Sprite = class extends Object3D {
+  /**
+   * Constructs a new sprite.
+   *
+   * @param {(SpriteMaterial|SpriteNodeMaterial)} [material] - The sprite material.
+   */
+  constructor(material = new SpriteMaterial()) {
+    super();
+    this.isSprite = true;
+    this.type = "Sprite";
+    if (_geometry === void 0) {
+      _geometry = new BufferGeometry();
+      const float32Array = new Float32Array([
+        -0.5,
+        -0.5,
+        0,
+        0,
+        0,
+        0.5,
+        -0.5,
+        0,
+        1,
+        0,
+        0.5,
+        0.5,
+        0,
+        1,
+        1,
+        -0.5,
+        0.5,
+        0,
+        0,
+        1
+      ]);
+      const interleavedBuffer = new InterleavedBuffer(float32Array, 5);
+      _geometry.setIndex([0, 1, 2, 0, 2, 3]);
+      _geometry.setAttribute("position", new InterleavedBufferAttribute(interleavedBuffer, 3, 0, false));
+      _geometry.setAttribute("uv", new InterleavedBufferAttribute(interleavedBuffer, 2, 3, false));
+    }
+    this.geometry = _geometry;
+    this.material = material;
+    this.center = new Vector2(0.5, 0.5);
+    this.count = 1;
+  }
+  /**
+   * Returns `true` if this sprite intersects the given frustum.
+   *
+   * @param {Frustum|FrustumArray} frustum - The frustum to test.
+   * @return {boolean} Whether this sprite intersects the given frustum or not.
+   */
+  intersectsFrustum(frustum) {
+    return frustum.intersectsSprite(this);
+  }
+  /**
+   * Computes intersection points between a casted ray and this sprite.
+   *
+   * @param {Raycaster} raycaster - The raycaster.
+   * @param {Array<Object>} intersects - The target array that holds the intersection points.
+   */
+  raycast(raycaster, intersects) {
+    if (raycaster.camera === null) {
+      error('Sprite: "Raycaster.camera" needs to be set in order to raycast against sprites.');
+    }
+    _worldScale.setFromMatrixScale(this.matrixWorld);
+    _viewWorldMatrix.copy(raycaster.camera.matrixWorld);
+    this.modelViewMatrix.multiplyMatrices(raycaster.camera.matrixWorldInverse, this.matrixWorld);
+    _mvPosition.setFromMatrixPosition(this.modelViewMatrix);
+    if (raycaster.camera.isPerspectiveCamera && this.material.sizeAttenuation === false) {
+      _worldScale.multiplyScalar(-_mvPosition.z);
+    }
+    const rotation = this.material.rotation;
+    let sin, cos;
+    if (rotation !== 0) {
+      cos = Math.cos(rotation);
+      sin = Math.sin(rotation);
+    }
+    const center = this.center;
+    transformVertex(_vA$1.set(-0.5, -0.5, 0), _mvPosition, center, _worldScale, sin, cos);
+    transformVertex(_vB$1.set(0.5, -0.5, 0), _mvPosition, center, _worldScale, sin, cos);
+    transformVertex(_vC$1.set(0.5, 0.5, 0), _mvPosition, center, _worldScale, sin, cos);
+    _uvA.set(0, 0);
+    _uvB.set(1, 0);
+    _uvC.set(1, 1);
+    let intersect2 = raycaster.ray.intersectTriangle(_vA$1, _vB$1, _vC$1, false, _intersectPoint);
+    if (intersect2 === null) {
+      transformVertex(_vB$1.set(-0.5, 0.5, 0), _mvPosition, center, _worldScale, sin, cos);
+      _uvB.set(0, 1);
+      intersect2 = raycaster.ray.intersectTriangle(_vA$1, _vC$1, _vB$1, false, _intersectPoint);
+      if (intersect2 === null) {
+        return;
+      }
+    }
+    const distance = raycaster.ray.origin.distanceTo(_intersectPoint);
+    if (distance < raycaster.near || distance > raycaster.far) return;
+    intersects.push({
+      distance,
+      point: _intersectPoint.clone(),
+      uv: Triangle.getInterpolation(_intersectPoint, _vA$1, _vB$1, _vC$1, _uvA, _uvB, _uvC, new Vector2()),
+      face: null,
+      object: this
+    });
+  }
+  copy(source, recursive) {
+    super.copy(source, recursive);
+    if (source.center !== void 0) this.center.copy(source.center);
+    this.material = source.material;
+    return this;
+  }
+};
+function transformVertex(vertexPosition, mvPosition, center, scale, sin, cos) {
+  _alignedPosition.subVectors(vertexPosition, center).addScalar(0.5).multiply(scale);
+  if (sin !== void 0) {
+    _rotatedPosition.x = cos * _alignedPosition.x - sin * _alignedPosition.y;
+    _rotatedPosition.y = sin * _alignedPosition.x + cos * _alignedPosition.y;
+  } else {
+    _rotatedPosition.copy(_alignedPosition);
+  }
+  vertexPosition.copy(mvPosition);
+  vertexPosition.x += _rotatedPosition.x;
+  vertexPosition.y += _rotatedPosition.y;
+  vertexPosition.applyMatrix4(_viewWorldMatrix);
+}
 var _vector$7 = /* @__PURE__ */ new Vector3();
 var _segCenter = /* @__PURE__ */ new Vector3();
 var _segDir = /* @__PURE__ */ new Vector3();
@@ -12737,13 +13407,13 @@ var Mesh = class extends Object3D {
   }
 };
 function checkIntersection$1(object, material, raycaster, ray, pA, pB, pC, point) {
-  let intersect;
+  let intersect2;
   if (material.side === BackSide) {
-    intersect = ray.intersectTriangle(pC, pB, pA, true, point);
+    intersect2 = ray.intersectTriangle(pC, pB, pA, true, point);
   } else {
-    intersect = ray.intersectTriangle(pA, pB, pC, material.side === FrontSide, point);
+    intersect2 = ray.intersectTriangle(pA, pB, pC, material.side === FrontSide, point);
   }
-  if (intersect === null) return null;
+  if (intersect2 === null) return null;
   _intersectionPointWorld.copy(point);
   _intersectionPointWorld.applyMatrix4(object.matrixWorld);
   const distance = raycaster.ray.origin.distanceTo(_intersectionPointWorld);
@@ -13126,32 +13796,32 @@ var Line = class extends Object3D {
       for (let i = start, l = end - 1; i < l; i += step) {
         const a = index.getX(i);
         const b = index.getX(i + 1);
-        const intersect = checkIntersection(this, raycaster, _ray$1, localThresholdSq, a, b, i);
-        if (intersect) {
-          intersects.push(intersect);
+        const intersect2 = checkIntersection(this, raycaster, _ray$1, localThresholdSq, a, b, i);
+        if (intersect2) {
+          intersects.push(intersect2);
         }
       }
       if (this.isLineLoop) {
         const a = index.getX(end - 1);
         const b = index.getX(start);
-        const intersect = checkIntersection(this, raycaster, _ray$1, localThresholdSq, a, b, end - 1);
-        if (intersect) {
-          intersects.push(intersect);
+        const intersect2 = checkIntersection(this, raycaster, _ray$1, localThresholdSq, a, b, end - 1);
+        if (intersect2) {
+          intersects.push(intersect2);
         }
       }
     } else {
       const start = Math.max(0, drawRange.start);
       const end = Math.min(positionAttribute.count, drawRange.start + drawRange.count);
       for (let i = start, l = end - 1; i < l; i += step) {
-        const intersect = checkIntersection(this, raycaster, _ray$1, localThresholdSq, i, i + 1, i);
-        if (intersect) {
-          intersects.push(intersect);
+        const intersect2 = checkIntersection(this, raycaster, _ray$1, localThresholdSq, i, i + 1, i);
+        if (intersect2) {
+          intersects.push(intersect2);
         }
       }
       if (this.isLineLoop) {
-        const intersect = checkIntersection(this, raycaster, _ray$1, localThresholdSq, end - 1, start, end - 1);
-        if (intersect) {
-          intersects.push(intersect);
+        const intersect2 = checkIntersection(this, raycaster, _ray$1, localThresholdSq, end - 1, start, end - 1);
+        if (intersect2) {
+          intersects.push(intersect2);
         }
       }
     }
@@ -13261,6 +13931,26 @@ var CubeTexture = class extends Texture {
   }
   set images(value) {
     this.image = value;
+  }
+};
+var CanvasTexture = class extends Texture {
+  /**
+   * Constructs a new texture.
+   *
+   * @param {HTMLCanvasElement} [canvas] - The HTML canvas element.
+   * @param {number} [mapping=Texture.DEFAULT_MAPPING] - The texture mapping.
+   * @param {number} [wrapS=ClampToEdgeWrapping] - The wrapS value.
+   * @param {number} [wrapT=ClampToEdgeWrapping] - The wrapT value.
+   * @param {number} [magFilter=LinearFilter] - The mag filter value.
+   * @param {number} [minFilter=LinearMipmapLinearFilter] - The min filter value.
+   * @param {number} [format=RGBAFormat] - The texture format.
+   * @param {number} [type=UnsignedByteType] - The texture type.
+   * @param {number} [anisotropy=Texture.DEFAULT_ANISOTROPY] - The anisotropy value.
+   */
+  constructor(canvas, mapping, wrapS, wrapT, magFilter, minFilter, format, type, anisotropy) {
+    super(canvas, mapping, wrapS, wrapT, magFilter, minFilter, format, type, anisotropy);
+    this.isCanvasTexture = true;
+    this.needsUpdate = true;
   }
 };
 var DepthTexture = class extends Texture {
@@ -13640,6 +14330,409 @@ var ConeGeometry = class _ConeGeometry extends CylinderGeometry {
    */
   static fromJSON(data) {
     return new _ConeGeometry(data.radius, data.height, data.radialSegments, data.heightSegments, data.openEnded, data.thetaStart, data.thetaLength);
+  }
+};
+var Curve = class {
+  /**
+   * Constructs a new curve.
+   */
+  constructor() {
+    this.type = "Curve";
+    this.arcLengthDivisions = 200;
+    this.needsUpdate = false;
+    this.cacheArcLengths = null;
+  }
+  /**
+   * This method returns a vector in 2D or 3D space (depending on the curve definition)
+   * for the given interpolation factor.
+   *
+   * @abstract
+   * @param {number} t - A interpolation factor representing a position on the curve. Must be in the range `[0,1]`.
+   * @param {(Vector2|Vector3)} [optionalTarget] - The optional target vector the result is written to.
+   * @return {(Vector2|Vector3)} The position on the curve. It can be a 2D or 3D vector depending on the curve definition.
+   */
+  getPoint() {
+    warn("Curve: .getPoint() not implemented.");
+  }
+  /**
+   * This method returns a vector in 2D or 3D space (depending on the curve definition)
+   * for the given interpolation factor. Unlike {@link Curve#getPoint}, this method honors the length
+   * of the curve which equidistant samples.
+   *
+   * @param {number} u - A interpolation factor representing a position on the curve. Must be in the range `[0,1]`.
+   * @param {(Vector2|Vector3)} [optionalTarget] - The optional target vector the result is written to.
+   * @return {(Vector2|Vector3)} The position on the curve. It can be a 2D or 3D vector depending on the curve definition.
+   */
+  getPointAt(u, optionalTarget) {
+    const t = this.getUtoTmapping(u);
+    return this.getPoint(t, optionalTarget);
+  }
+  /**
+   * This method samples the curve via {@link Curve#getPoint} and returns an array of points representing
+   * the curve shape.
+   *
+   * @param {number} [divisions=5] - The number of divisions.
+   * @return {Array<(Vector2|Vector3)>} An array holding the sampled curve values. The number of points is `divisions + 1`.
+   */
+  getPoints(divisions = 5) {
+    const points = [];
+    for (let d = 0; d <= divisions; d++) {
+      points.push(this.getPoint(d / divisions));
+    }
+    return points;
+  }
+  // Get sequence of points using getPointAt( u )
+  /**
+   * This method samples the curve via {@link Curve#getPointAt} and returns an array of points representing
+   * the curve shape. Unlike {@link Curve#getPoints}, this method returns equi-spaced points across the entire
+   * curve.
+   *
+   * @param {number} [divisions=5] - The number of divisions.
+   * @return {Array<(Vector2|Vector3)>} An array holding the sampled curve values. The number of points is `divisions + 1`.
+   */
+  getSpacedPoints(divisions = 5) {
+    const points = [];
+    for (let d = 0; d <= divisions; d++) {
+      points.push(this.getPointAt(d / divisions));
+    }
+    return points;
+  }
+  /**
+   * Returns the total arc length of the curve.
+   *
+   * @return {number} The length of the curve.
+   */
+  getLength() {
+    const lengths = this.getLengths();
+    return lengths[lengths.length - 1];
+  }
+  /**
+   * Returns an array of cumulative segment lengths of the curve.
+   *
+   * @param {number} [divisions=this.arcLengthDivisions] - The number of divisions.
+   * @return {Array<number>} An array holding the cumulative segment lengths.
+   */
+  getLengths(divisions = this.arcLengthDivisions) {
+    if (this.cacheArcLengths && this.cacheArcLengths.length === divisions + 1 && !this.needsUpdate) {
+      return this.cacheArcLengths;
+    }
+    this.needsUpdate = false;
+    const cache = [];
+    let current, last = this.getPoint(0);
+    let sum = 0;
+    cache.push(0);
+    for (let p = 1; p <= divisions; p++) {
+      current = this.getPoint(p / divisions);
+      sum += current.distanceTo(last);
+      cache.push(sum);
+      last = current;
+    }
+    this.cacheArcLengths = cache;
+    return cache;
+  }
+  /**
+   * Update the cumulative segment distance cache. The method must be called
+   * every time curve parameters are changed. If an updated curve is part of a
+   * composed curve like {@link CurvePath}, this method must be called on the
+   * composed curve, too.
+   */
+  updateArcLengths() {
+    this.needsUpdate = true;
+    this.getLengths();
+  }
+  /**
+   * Given an interpolation factor in the range `[0,1]`, this method returns an updated
+   * interpolation factor in the same range that can be ued to sample equidistant points
+   * from a curve.
+   *
+   * @param {number} u - The interpolation factor.
+   * @param {?number} distance - An optional distance on the curve.
+   * @return {number} The updated interpolation factor.
+   */
+  getUtoTmapping(u, distance = null) {
+    const arcLengths = this.getLengths();
+    let i = 0;
+    const il = arcLengths.length;
+    let targetArcLength;
+    if (distance) {
+      targetArcLength = distance;
+    } else {
+      targetArcLength = u * arcLengths[il - 1];
+    }
+    let low = 0, high = il - 1, comparison;
+    while (low <= high) {
+      i = Math.floor(low + (high - low) / 2);
+      comparison = arcLengths[i] - targetArcLength;
+      if (comparison < 0) {
+        low = i + 1;
+      } else if (comparison > 0) {
+        high = i - 1;
+      } else {
+        high = i;
+        break;
+      }
+    }
+    i = high;
+    if (arcLengths[i] === targetArcLength) {
+      return i / (il - 1);
+    }
+    const lengthBefore = arcLengths[i];
+    const lengthAfter = arcLengths[i + 1];
+    const segmentLength = lengthAfter - lengthBefore;
+    const segmentFraction = (targetArcLength - lengthBefore) / segmentLength;
+    const t = (i + segmentFraction) / (il - 1);
+    return t;
+  }
+  /**
+   * Returns a unit vector tangent for the given interpolation factor.
+   * If the derived curve does not implement its tangent derivation,
+   * two points a small delta apart will be used to find its gradient
+   * which seems to give a reasonable approximation.
+   *
+   * @param {number} t - The interpolation factor.
+   * @param {(Vector2|Vector3)} [optionalTarget] - The optional target vector the result is written to.
+   * @return {(Vector2|Vector3)} The tangent vector.
+   */
+  getTangent(t, optionalTarget) {
+    const delta = 1e-4;
+    let t1 = t - delta;
+    let t2 = t + delta;
+    if (t1 < 0) t1 = 0;
+    if (t2 > 1) t2 = 1;
+    const pt1 = this.getPoint(t1);
+    const pt2 = this.getPoint(t2);
+    const tangent = optionalTarget || (pt1.isVector2 ? new Vector2() : new Vector3());
+    tangent.copy(pt2).sub(pt1).normalize();
+    return tangent;
+  }
+  /**
+   * Same as {@link Curve#getTangent} but with equidistant samples.
+   *
+   * @param {number} u - The interpolation factor.
+   * @param {(Vector2|Vector3)} [optionalTarget] - The optional target vector the result is written to.
+   * @return {(Vector2|Vector3)} The tangent vector.
+   * @see {@link Curve#getPointAt}
+   */
+  getTangentAt(u, optionalTarget) {
+    const t = this.getUtoTmapping(u);
+    return this.getTangent(t, optionalTarget);
+  }
+  /**
+   * Generates the Frenet Frames. Requires a curve definition in 3D space. Used
+   * in geometries like {@link TubeGeometry} or {@link ExtrudeGeometry}.
+   *
+   * @param {number} segments - The number of segments.
+   * @param {boolean} [closed=false] - Whether the curve is closed or not.
+   * @return {{tangents: Array<Vector3>, normals: Array<Vector3>, binormals: Array<Vector3>}} The Frenet Frames.
+   */
+  computeFrenetFrames(segments, closed = false) {
+    const normal = new Vector3();
+    const tangents = [];
+    const normals = [];
+    const binormals = [];
+    const vec = new Vector3();
+    const mat = new Matrix4();
+    for (let i = 0; i <= segments; i++) {
+      const u = i / segments;
+      tangents[i] = this.getTangentAt(u, new Vector3());
+    }
+    normals[0] = new Vector3();
+    binormals[0] = new Vector3();
+    let min = Number.MAX_VALUE;
+    const tx = Math.abs(tangents[0].x);
+    const ty = Math.abs(tangents[0].y);
+    const tz = Math.abs(tangents[0].z);
+    if (tx <= min) {
+      min = tx;
+      normal.set(1, 0, 0);
+    }
+    if (ty <= min) {
+      min = ty;
+      normal.set(0, 1, 0);
+    }
+    if (tz <= min) {
+      normal.set(0, 0, 1);
+    }
+    vec.crossVectors(tangents[0], normal).normalize();
+    normals[0].crossVectors(tangents[0], vec);
+    binormals[0].crossVectors(tangents[0], normals[0]);
+    for (let i = 1; i <= segments; i++) {
+      normals[i] = normals[i - 1].clone();
+      binormals[i] = binormals[i - 1].clone();
+      vec.crossVectors(tangents[i - 1], tangents[i]);
+      if (vec.length() > Number.EPSILON) {
+        vec.normalize();
+        const theta = Math.acos(clamp(tangents[i - 1].dot(tangents[i]), -1, 1));
+        normals[i].applyMatrix4(mat.makeRotationAxis(vec, theta));
+      }
+      binormals[i].crossVectors(tangents[i], normals[i]);
+    }
+    if (closed === true) {
+      let theta = Math.acos(clamp(normals[0].dot(normals[segments]), -1, 1));
+      theta /= segments;
+      if (tangents[0].dot(vec.crossVectors(normals[0], normals[segments])) > 0) {
+        theta = -theta;
+      }
+      for (let i = 1; i <= segments; i++) {
+        normals[i].applyMatrix4(mat.makeRotationAxis(tangents[i], theta * i));
+        binormals[i].crossVectors(tangents[i], normals[i]);
+      }
+    }
+    return {
+      tangents,
+      normals,
+      binormals
+    };
+  }
+  /**
+   * Returns a new curve with copied values from this instance.
+   *
+   * @return {Curve} A clone of this instance.
+   */
+  clone() {
+    return new this.constructor().copy(this);
+  }
+  /**
+   * Copies the values of the given curve to this instance.
+   *
+   * @param {Curve} source - The curve to copy.
+   * @return {Curve} A reference to this curve.
+   */
+  copy(source) {
+    this.arcLengthDivisions = source.arcLengthDivisions;
+    return this;
+  }
+  /**
+   * Serializes the curve into JSON.
+   *
+   * @return {Object} A JSON object representing the serialized curve.
+   * @see {@link ObjectLoader#parse}
+   */
+  toJSON() {
+    const data = {
+      metadata: {
+        version: 4.7,
+        type: "Curve",
+        generator: "Curve.toJSON"
+      }
+    };
+    data.arcLengthDivisions = this.arcLengthDivisions;
+    data.type = this.type;
+    return data;
+  }
+  /**
+   * Deserializes the curve from the given JSON.
+   *
+   * @param {Object} json - The JSON holding the serialized curve.
+   * @return {Curve} A reference to this curve.
+   */
+  fromJSON(json) {
+    this.arcLengthDivisions = json.arcLengthDivisions;
+    return this;
+  }
+};
+var EllipseCurve = class extends Curve {
+  /**
+   * Constructs a new ellipse curve.
+   *
+   * @param {number} [aX=0] - The X center of the ellipse.
+   * @param {number} [aY=0] - The Y center of the ellipse.
+   * @param {number} [xRadius=1] - The radius of the ellipse in the x direction.
+   * @param {number} [yRadius=1] - The radius of the ellipse in the y direction.
+   * @param {number} [aStartAngle=0] - The start angle of the curve in radians starting from the positive X axis.
+   * @param {number} [aEndAngle=Math.PI*2] - The end angle of the curve in radians starting from the positive X axis.
+   * @param {boolean} [aClockwise=false] - Whether the ellipse is drawn clockwise or not.
+   * @param {number} [aRotation=0] - The rotation angle of the ellipse in radians, counterclockwise from the positive X axis.
+   */
+  constructor(aX = 0, aY = 0, xRadius = 1, yRadius = 1, aStartAngle = 0, aEndAngle = Math.PI * 2, aClockwise = false, aRotation = 0) {
+    super();
+    this.isEllipseCurve = true;
+    this.type = "EllipseCurve";
+    this.aX = aX;
+    this.aY = aY;
+    this.xRadius = xRadius;
+    this.yRadius = yRadius;
+    this.aStartAngle = aStartAngle;
+    this.aEndAngle = aEndAngle;
+    this.aClockwise = aClockwise;
+    this.aRotation = aRotation;
+  }
+  /**
+   * Returns a point on the curve.
+   *
+   * @param {number} t - A interpolation factor representing a position on the curve. Must be in the range `[0,1]`.
+   * @param {Vector2} [optionalTarget] - The optional target vector the result is written to.
+   * @return {Vector2} The position on the curve.
+   */
+  getPoint(t, optionalTarget = new Vector2()) {
+    const point = optionalTarget;
+    const twoPi = Math.PI * 2;
+    let deltaAngle = this.aEndAngle - this.aStartAngle;
+    const samePoints = Math.abs(deltaAngle) < Number.EPSILON;
+    while (deltaAngle < 0) deltaAngle += twoPi;
+    while (deltaAngle > twoPi) deltaAngle -= twoPi;
+    if (deltaAngle < Number.EPSILON) {
+      if (samePoints) {
+        deltaAngle = 0;
+      } else {
+        deltaAngle = twoPi;
+      }
+    }
+    if (this.aClockwise === true && !samePoints) {
+      if (deltaAngle === twoPi) {
+        deltaAngle = -twoPi;
+      } else {
+        deltaAngle = deltaAngle - twoPi;
+      }
+    }
+    const angle = this.aStartAngle + t * deltaAngle;
+    let x = this.aX + this.xRadius * Math.cos(angle);
+    let y = this.aY + this.yRadius * Math.sin(angle);
+    if (this.aRotation !== 0) {
+      const cos = Math.cos(this.aRotation);
+      const sin = Math.sin(this.aRotation);
+      const tx = x - this.aX;
+      const ty = y - this.aY;
+      x = tx * cos - ty * sin + this.aX;
+      y = tx * sin + ty * cos + this.aY;
+    }
+    return point.set(x, y);
+  }
+  copy(source) {
+    super.copy(source);
+    this.aX = source.aX;
+    this.aY = source.aY;
+    this.xRadius = source.xRadius;
+    this.yRadius = source.yRadius;
+    this.aStartAngle = source.aStartAngle;
+    this.aEndAngle = source.aEndAngle;
+    this.aClockwise = source.aClockwise;
+    this.aRotation = source.aRotation;
+    return this;
+  }
+  toJSON() {
+    const data = super.toJSON();
+    data.aX = this.aX;
+    data.aY = this.aY;
+    data.xRadius = this.xRadius;
+    data.yRadius = this.yRadius;
+    data.aStartAngle = this.aStartAngle;
+    data.aEndAngle = this.aEndAngle;
+    data.aClockwise = this.aClockwise;
+    data.aRotation = this.aRotation;
+    return data;
+  }
+  fromJSON(json) {
+    super.fromJSON(json);
+    this.aX = json.aX;
+    this.aY = json.aY;
+    this.xRadius = json.xRadius;
+    this.yRadius = json.yRadius;
+    this.aStartAngle = json.aStartAngle;
+    this.aEndAngle = json.aEndAngle;
+    this.aClockwise = json.aClockwise;
+    this.aRotation = json.aRotation;
+    return this;
   }
 };
 var PlaneGeometry = class _PlaneGeometry extends BufferGeometry {
@@ -16417,6 +17510,149 @@ PropertyBinding.prototype.SetterByBindingTypeAndVersioning = [
   ]
 ];
 var _controlInterpolantsResultBuffer = new Float32Array(1);
+var _matrix = /* @__PURE__ */ new Matrix4();
+var Raycaster = class {
+  /**
+   * Constructs a new raycaster.
+   *
+   * @param {Vector3} origin - The origin vector where the ray casts from.
+   * @param {Vector3} direction - The (normalized) direction vector that gives direction to the ray.
+   * @param {number} [near=0] - All results returned are further away than near. Near can't be negative.
+   * @param {number} [far=Infinity] - All results returned are closer than far. Far can't be lower than near.
+   */
+  constructor(origin, direction, near = 0, far = Infinity) {
+    this.ray = new Ray(origin, direction);
+    this.near = near;
+    this.far = far;
+    this.camera = null;
+    this.layers = new Layers();
+    this.params = {
+      Mesh: {},
+      Line: { threshold: 1 },
+      LOD: {},
+      Points: { threshold: 1 },
+      Sprite: {}
+    };
+  }
+  /**
+   * Updates the ray with a new origin and direction by copying the values from the arguments.
+   *
+   * @param {Vector3} origin - The origin vector where the ray casts from.
+   * @param {Vector3} direction - The (normalized) direction vector that gives direction to the ray.
+   */
+  set(origin, direction) {
+    this.ray.set(origin, direction);
+  }
+  /**
+   * Uses the given coordinates and camera to compute a new origin and direction for the internal ray.
+   *
+   * @param {Vector2} coords - 2D coordinates of the mouse, in normalized device coordinates (NDC).
+   * X and Y components should be between `-1` and `1`.
+   * @param {Camera} camera - The camera from which the ray should originate.
+   */
+  setFromCamera(coords, camera) {
+    if (camera.isPerspectiveCamera) {
+      this.ray.origin.setFromMatrixPosition(camera.matrixWorld);
+      this.ray.direction.set(coords.x, coords.y, 0.5).unproject(camera).sub(this.ray.origin).normalize();
+      this.camera = camera;
+    } else if (camera.isOrthographicCamera) {
+      this.ray.origin.set(coords.x, coords.y, camera.projectionMatrix.elements[14]).unproject(camera);
+      this.ray.direction.set(0, 0, -1).transformDirection(camera.matrixWorld);
+      this.camera = camera;
+    } else {
+      error("Raycaster: Unsupported camera type: " + camera.type);
+    }
+  }
+  /**
+   * Uses the given WebXR controller to compute a new origin and direction for the internal ray.
+   *
+   * @param {WebXRController} controller - The controller to copy the position and direction from.
+   * @return {Raycaster} A reference to this raycaster.
+   */
+  setFromXRController(controller) {
+    _matrix.identity().extractRotation(controller.matrixWorld);
+    this.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+    this.ray.direction.set(0, 0, -1).applyMatrix4(_matrix);
+    return this;
+  }
+  /**
+   * The intersection point of a raycaster intersection test.
+   * @typedef {Object} Raycaster~Intersection
+   * @property {number} distance - The distance from the ray's origin to the intersection point.
+   * @property {number} distanceToRay -  Some 3D objects e.g. {@link Points} provide the distance of the
+   * intersection to the nearest point on the ray. For other objects it will be `undefined`.
+   * @property {Vector3} point - The intersection point, in world coordinates.
+   * @property {Object} face - The face that has been intersected.
+   * @property {number} faceIndex - The face index.
+   * @property {Object3D} object - The 3D object that has been intersected.
+   * @property {Vector2} uv - U,V coordinates at point of intersection.
+   * @property {Vector2} uv1 - Second set of U,V coordinates at point of intersection.
+   * @property {Vector3} normal - Interpolated normal vector at point of intersection.
+   * @property {number} instanceId - The index number of the instance where the ray
+   * intersects the {@link InstancedMesh}.
+   */
+  /**
+   * Checks all intersection between the ray and the object with or without the
+   * descendants. Intersections are returned sorted by distance, closest first.
+   *
+   * `Raycaster` delegates to the `raycast()` method of the passed 3D object, when
+   * evaluating whether the ray intersects the object or not. This allows meshes to respond
+   * differently to ray casting than lines or points.
+   *
+   * Note that for meshes, faces must be pointed towards the origin of the ray in order
+   * to be detected; intersections of the ray passing through the back of a face will not
+   * be detected. To raycast against both faces of an object, you'll want to set  {@link Material#side}
+   * to `THREE.DoubleSide`.
+   *
+   * Note that a ray hitting a triangle mesh exactly along an edge shared by two faces may be
+   * reported by both faces, resulting in two coincident intersections (identical point and
+   * distance) in the returned array.
+   *
+   * @param {Object3D} object - The 3D object to check for intersection with the ray.
+   * @param {boolean} [recursive=true] - If set to `true`, it also checks all descendants.
+   * Otherwise it only checks intersection with the object.
+   * @param {Array<Raycaster~Intersection>} [intersects=[]] The target array that holds the result of the method.
+   * @return {Array<Raycaster~Intersection>} An array holding the intersection points.
+   */
+  intersectObject(object, recursive = true, intersects = []) {
+    intersect(object, this, intersects, recursive);
+    intersects.sort(ascSort);
+    return intersects;
+  }
+  /**
+   * Checks all intersection between the ray and the objects with or without
+   * the descendants. Intersections are returned sorted by distance, closest first.
+   *
+   * @param {Array<Object3D>} objects - The 3D objects to check for intersection with the ray.
+   * @param {boolean} [recursive=true] - If set to `true`, it also checks all descendants.
+   * Otherwise it only checks intersection with the object.
+   * @param {Array<Raycaster~Intersection>} [intersects=[]] The target array that holds the result of the method.
+   * @return {Array<Raycaster~Intersection>} An array holding the intersection points.
+   */
+  intersectObjects(objects, recursive = true, intersects = []) {
+    for (let i = 0, l = objects.length; i < l; i++) {
+      intersect(objects[i], this, intersects, recursive);
+    }
+    intersects.sort(ascSort);
+    return intersects;
+  }
+};
+function ascSort(a, b) {
+  return a.distance - b.distance;
+}
+function intersect(object, raycaster, intersects, recursive) {
+  let propagate = true;
+  if (object.layers.test(raycaster.layers)) {
+    const result = object.raycast(raycaster, intersects);
+    if (result === false) propagate = false;
+  }
+  if (propagate === true && recursive === true) {
+    const children = object.children;
+    for (let i = 0, l = children.length; i < l; i++) {
+      intersect(children[i], raycaster, intersects, true);
+    }
+  }
+}
 var Spherical = class {
   /**
    * Constructs a new spherical.
@@ -16575,82 +17811,41 @@ var _Matrix2 = class _Matrix2 {
 };
 _Matrix2.prototype.isMatrix2 = true;
 var Matrix2 = _Matrix2;
-var AxesHelper = class extends LineSegments {
+var GridHelper = class extends LineSegments {
   /**
-   * Constructs a new axes helper.
+   * Constructs a new grid helper.
    *
-   * @param {number} [size=1] - Size of the lines representing the axes.
+   * @param {number} [size=10] - The size of the grid.
+   * @param {number} [divisions=10] - The number of divisions across the grid.
+   * @param {number|Color|string} [color1=0x444444] - The color of the center line.
+   * @param {number|Color|string} [color2=0x888888] - The color of the lines of the grid.
    */
-  constructor(size = 1) {
-    const vertices = [
-      0,
-      0,
-      0,
-      size,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      size,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      size
-    ];
-    const colors = [
-      1,
-      0,
-      0,
-      1,
-      0.6,
-      0,
-      0,
-      1,
-      0,
-      0.6,
-      1,
-      0,
-      0,
-      0,
-      1,
-      0,
-      0.6,
-      1
-    ];
+  constructor(size = 10, divisions = 10, color1 = 4473924, color2 = 8947848) {
+    color1 = new Color(color1);
+    color2 = new Color(color2);
+    const center = divisions / 2;
+    const step = size / divisions;
+    const halfSize = size / 2;
+    const vertices = [], colors = [];
+    for (let i = 0, j = 0, k = -halfSize; i <= divisions; i++, k += step) {
+      vertices.push(-halfSize, 0, k, halfSize, 0, k);
+      vertices.push(k, 0, -halfSize, k, 0, halfSize);
+      const color = i === center ? color1 : color2;
+      color.toArray(colors, j);
+      j += 3;
+      color.toArray(colors, j);
+      j += 3;
+      color.toArray(colors, j);
+      j += 3;
+      color.toArray(colors, j);
+      j += 3;
+    }
     const geometry = new BufferGeometry();
     geometry.setAttribute("position", new Float32BufferAttribute(vertices, 3));
     geometry.setAttribute("color", new Float32BufferAttribute(colors, 3));
     const material = new LineBasicMaterial({ vertexColors: true, toneMapped: false });
     super(geometry, material);
-    this.type = "AxesHelper";
-  }
-  /**
-   * Defines the colors of the axes helper.
-   *
-   * @param {number|Color|string} xAxisColor - The color for the x axis.
-   * @param {number|Color|string} yAxisColor - The color for the y axis.
-   * @param {number|Color|string} zAxisColor - The color for the z axis.
-   * @return {AxesHelper} A reference to this axes helper.
-   */
-  setColors(xAxisColor, yAxisColor, zAxisColor) {
-    const color = new Color();
-    const array = this.geometry.attributes.color.array;
-    color.set(xAxisColor);
-    color.toArray(array, 0);
-    color.toArray(array, 3);
-    color.set(yAxisColor);
-    color.toArray(array, 6);
-    color.toArray(array, 9);
-    color.set(zAxisColor);
-    color.toArray(array, 12);
-    color.toArray(array, 15);
-    this.geometry.attributes.color.needsUpdate = true;
-    return this;
+    this.type = "GridHelper";
   }
   /**
    * Frees the GPU-related resources allocated by this instance. Call this
@@ -28461,10 +29656,1981 @@ var LevelMeshes = class {
   }
 };
 
-// node_modules/three/examples/jsm/controls/OrbitControls.js
+// node_modules/three/examples/jsm/controls/ArcballControls.js
+var STATE = {
+  IDLE: /* @__PURE__ */ Symbol(),
+  ROTATE: /* @__PURE__ */ Symbol(),
+  PAN: /* @__PURE__ */ Symbol(),
+  SCALE: /* @__PURE__ */ Symbol(),
+  FOV: /* @__PURE__ */ Symbol(),
+  FOCUS: /* @__PURE__ */ Symbol(),
+  ZROTATE: /* @__PURE__ */ Symbol(),
+  TOUCH_MULTI: /* @__PURE__ */ Symbol(),
+  ANIMATION_FOCUS: /* @__PURE__ */ Symbol(),
+  ANIMATION_ROTATE: /* @__PURE__ */ Symbol()
+};
+var INPUT = {
+  NONE: /* @__PURE__ */ Symbol(),
+  ONE_FINGER: /* @__PURE__ */ Symbol(),
+  ONE_FINGER_SWITCHED: /* @__PURE__ */ Symbol(),
+  TWO_FINGER: /* @__PURE__ */ Symbol(),
+  MULT_FINGER: /* @__PURE__ */ Symbol(),
+  CURSOR: /* @__PURE__ */ Symbol()
+};
+var _center2 = {
+  x: 0,
+  y: 0
+};
+var _transformation = {
+  camera: new Matrix4(),
+  gizmos: new Matrix4()
+};
 var _changeEvent = { type: "change" };
 var _startEvent = { type: "start" };
 var _endEvent = { type: "end" };
+var _raycaster = new Raycaster();
+var _offset2 = new Vector3();
+var _gizmoMatrixStateTemp = new Matrix4();
+var _cameraMatrixStateTemp = new Matrix4();
+var _scalePointTemp = new Vector3();
+var _EPS = 1e-6;
+var ArcballControls = class extends Controls {
+  /**
+   * Constructs a new controls instance.
+   *
+   * @param {Camera} camera - The camera to be controlled. The camera must not be a child of another object, unless that object is the scene itself.
+   * @param {?HTMLElement} [domElement=null] - The HTML element used for event listeners.
+   * @param {?Scene} [scene=null] The scene rendered by the camera. If not given, gizmos cannot be shown.
+   */
+  constructor(camera, domElement = null, scene = null) {
+    super(camera, domElement);
+    this.scene = scene;
+    this.target = new Vector3();
+    this._currentTarget = new Vector3();
+    this.radiusFactor = 0.67;
+    this.mouseActions = [];
+    this._mouseOp = null;
+    this._v2_1 = new Vector2();
+    this._v3_1 = new Vector3();
+    this._v3_2 = new Vector3();
+    this._m4_1 = new Matrix4();
+    this._m4_2 = new Matrix4();
+    this._quat = new Quaternion();
+    this._translationMatrix = new Matrix4();
+    this._rotationMatrix = new Matrix4();
+    this._scaleMatrix = new Matrix4();
+    this._rotationAxis = new Vector3();
+    this._cameraMatrixState = new Matrix4();
+    this._cameraProjectionState = new Matrix4();
+    this._fovState = 1;
+    this._upState = new Vector3();
+    this._zoomState = 1;
+    this._nearPos = 0;
+    this._farPos = 0;
+    this._gizmoMatrixState = new Matrix4();
+    this._up0 = new Vector3();
+    this._zoom0 = 1;
+    this._fov0 = 0;
+    this._initialNear = 0;
+    this._nearPos0 = 0;
+    this._initialFar = 0;
+    this._farPos0 = 0;
+    this._cameraMatrixState0 = new Matrix4();
+    this._gizmoMatrixState0 = new Matrix4();
+    this._target0 = new Vector3();
+    this._button = -1;
+    this._touchStart = [];
+    this._touchCurrent = [];
+    this._input = INPUT.NONE;
+    this._switchSensibility = 32;
+    this._startFingerDistance = 0;
+    this._currentFingerDistance = 0;
+    this._startFingerRotation = 0;
+    this._currentFingerRotation = 0;
+    this._devPxRatio = 0;
+    this._downValid = true;
+    this._nclicks = 0;
+    this._downEvents = [];
+    this._downStart = 0;
+    this._clickStart = 0;
+    this._maxDownTime = 250;
+    this._maxInterval = 300;
+    this._posThreshold = 24;
+    this._movementThreshold = 24;
+    this._currentCursorPosition = new Vector3();
+    this._startCursorPosition = new Vector3();
+    this._grid = null;
+    this._gridPosition = new Vector3();
+    this._gizmos = new Group();
+    this._curvePts = 128;
+    this._timeStart = -1;
+    this._animationId = -1;
+    this.focusAnimationTime = 500;
+    this._timePrev = 0;
+    this._timeCurrent = 0;
+    this._anglePrev = 0;
+    this._angleCurrent = 0;
+    this._cursorPosPrev = new Vector3();
+    this._cursorPosCurr = new Vector3();
+    this._wPrev = 0;
+    this._wCurr = 0;
+    this.adjustNearFar = false;
+    this.scaleFactor = 1.1;
+    this.dampingFactor = 25;
+    this.wMax = 20;
+    this.enableAnimations = true;
+    this.enableGrid = false;
+    this.cursorZoom = false;
+    this.minFov = 5;
+    this.maxFov = 90;
+    this.rotateSpeed = 1;
+    this.enablePan = true;
+    this.enableRotate = true;
+    this.enableZoom = true;
+    this.enableGizmos = true;
+    this.enableFocus = true;
+    this.minDistance = 0;
+    this.maxDistance = Infinity;
+    this.minZoom = 0;
+    this.maxZoom = Infinity;
+    this._tbRadius = 1;
+    this._state = STATE.IDLE;
+    this.setCamera(camera);
+    if (this.scene != null) {
+      this.scene.add(this._gizmos);
+    }
+    this.initializeMouseActions();
+    this._onContextMenu = onContextMenu.bind(this);
+    this._onWheel = onWheel.bind(this);
+    this._onPointerUp = onPointerUp.bind(this);
+    this._onPointerMove = onPointerMove.bind(this);
+    this._onPointerDown = onPointerDown.bind(this);
+    this._onPointerCancel = onPointerCancel.bind(this);
+    this._onWindowResize = onWindowResize.bind(this);
+    if (domElement !== null) {
+      this.connect(domElement);
+    }
+  }
+  connect(element) {
+    super.connect(element);
+    this._devPxRatio = window.devicePixelRatio;
+    this.domElement.addEventListener("contextmenu", this._onContextMenu);
+    this.domElement.addEventListener("wheel", this._onWheel, { passive: false });
+    this.domElement.addEventListener("pointerdown", this._onPointerDown);
+    this.domElement.addEventListener("pointercancel", this._onPointerCancel);
+    window.addEventListener("resize", this._onWindowResize);
+    this.domElement.style.touchAction = "none";
+  }
+  disconnect() {
+    this.domElement.removeEventListener("pointerdown", this._onPointerDown);
+    this.domElement.removeEventListener("pointercancel", this._onPointerCancel);
+    this.domElement.removeEventListener("wheel", this._onWheel);
+    this.domElement.removeEventListener("contextmenu", this._onContextMenu);
+    window.removeEventListener("pointermove", this._onPointerMove);
+    window.removeEventListener("pointerup", this._onPointerUp);
+    window.removeEventListener("resize", this._onWindowResize);
+    this.domElement.style.touchAction = "";
+  }
+  onSinglePanStart(event, operation) {
+    if (this.enabled) {
+      this.dispatchEvent(_startEvent);
+      this.setCenter(event.clientX, event.clientY);
+      switch (operation) {
+        case "PAN":
+          if (!this.enablePan) {
+            return;
+          }
+          if (this._animationId != -1) {
+            cancelAnimationFrame(this._animationId);
+            this._animationId = -1;
+            this._timeStart = -1;
+            this.activateGizmos(false);
+            this.dispatchEvent(_changeEvent);
+          }
+          this.updateTbState(STATE.PAN, true);
+          this._startCursorPosition.copy(this.unprojectOnTbPlane(this.object, _center2.x, _center2.y, this.domElement));
+          if (this.enableGrid) {
+            this.drawGrid();
+            this.dispatchEvent(_changeEvent);
+          }
+          break;
+        case "ROTATE":
+          if (!this.enableRotate) {
+            return;
+          }
+          if (this._animationId != -1) {
+            cancelAnimationFrame(this._animationId);
+            this._animationId = -1;
+            this._timeStart = -1;
+          }
+          this.updateTbState(STATE.ROTATE, true);
+          this._startCursorPosition.copy(this.unprojectOnTbSurface(this.object, _center2.x, _center2.y, this.domElement, this._tbRadius));
+          this.activateGizmos(true);
+          if (this.enableAnimations) {
+            this._timePrev = this._timeCurrent = performance.now();
+            this._angleCurrent = this._anglePrev = 0;
+            this._cursorPosPrev.copy(this._startCursorPosition);
+            this._cursorPosCurr.copy(this._cursorPosPrev);
+            this._wCurr = 0;
+            this._wPrev = this._wCurr;
+          }
+          this.dispatchEvent(_changeEvent);
+          break;
+        case "FOV":
+          if (!this.object.isPerspectiveCamera || !this.enableZoom) {
+            return;
+          }
+          if (this._animationId != -1) {
+            cancelAnimationFrame(this._animationId);
+            this._animationId = -1;
+            this._timeStart = -1;
+            this.activateGizmos(false);
+            this.dispatchEvent(_changeEvent);
+          }
+          this.updateTbState(STATE.FOV, true);
+          this._startCursorPosition.setY(this.getCursorNDC(_center2.x, _center2.y, this.domElement).y * 0.5);
+          this._currentCursorPosition.copy(this._startCursorPosition);
+          break;
+        case "ZOOM":
+          if (!this.enableZoom) {
+            return;
+          }
+          if (this._animationId != -1) {
+            cancelAnimationFrame(this._animationId);
+            this._animationId = -1;
+            this._timeStart = -1;
+            this.activateGizmos(false);
+            this.dispatchEvent(_changeEvent);
+          }
+          this.updateTbState(STATE.SCALE, true);
+          this._startCursorPosition.setY(this.getCursorNDC(_center2.x, _center2.y, this.domElement).y * 0.5);
+          this._currentCursorPosition.copy(this._startCursorPosition);
+          break;
+      }
+    }
+  }
+  onSinglePanMove(event, opState) {
+    if (this.enabled) {
+      const restart = opState != this._state;
+      this.setCenter(event.clientX, event.clientY);
+      switch (opState) {
+        case STATE.PAN:
+          if (this.enablePan) {
+            if (restart) {
+              this.dispatchEvent(_endEvent);
+              this.dispatchEvent(_startEvent);
+              this.updateTbState(opState, true);
+              this._startCursorPosition.copy(this.unprojectOnTbPlane(this.object, _center2.x, _center2.y, this.domElement));
+              if (this.enableGrid) {
+                this.drawGrid();
+              }
+              this.activateGizmos(false);
+            } else {
+              this._currentCursorPosition.copy(this.unprojectOnTbPlane(this.object, _center2.x, _center2.y, this.domElement));
+              this.applyTransformMatrix(this.pan(this._startCursorPosition, this._currentCursorPosition));
+            }
+          }
+          break;
+        case STATE.ROTATE:
+          if (this.enableRotate) {
+            if (restart) {
+              this.dispatchEvent(_endEvent);
+              this.dispatchEvent(_startEvent);
+              this.updateTbState(opState, true);
+              this._startCursorPosition.copy(this.unprojectOnTbSurface(this.object, _center2.x, _center2.y, this.domElement, this._tbRadius));
+              if (this.enableGrid) {
+                this.disposeGrid();
+              }
+              this.activateGizmos(true);
+            } else {
+              this._currentCursorPosition.copy(this.unprojectOnTbSurface(this.object, _center2.x, _center2.y, this.domElement, this._tbRadius));
+              const distance = this._startCursorPosition.distanceTo(this._currentCursorPosition);
+              const angle = this._startCursorPosition.angleTo(this._currentCursorPosition);
+              const amount = Math.max(distance / this._tbRadius, angle) * this.rotateSpeed;
+              this.applyTransformMatrix(this.rotate(this.calculateRotationAxis(this._startCursorPosition, this._currentCursorPosition), amount));
+              if (this.enableAnimations) {
+                this._timePrev = this._timeCurrent;
+                this._timeCurrent = performance.now();
+                this._anglePrev = this._angleCurrent;
+                this._angleCurrent = amount;
+                this._cursorPosPrev.copy(this._cursorPosCurr);
+                this._cursorPosCurr.copy(this._currentCursorPosition);
+                this._wPrev = this._wCurr;
+                this._wCurr = this.calculateAngularSpeed(this._anglePrev, this._angleCurrent, this._timePrev, this._timeCurrent);
+              }
+            }
+          }
+          break;
+        case STATE.SCALE:
+          if (this.enableZoom) {
+            if (restart) {
+              this.dispatchEvent(_endEvent);
+              this.dispatchEvent(_startEvent);
+              this.updateTbState(opState, true);
+              this._startCursorPosition.setY(this.getCursorNDC(_center2.x, _center2.y, this.domElement).y * 0.5);
+              this._currentCursorPosition.copy(this._startCursorPosition);
+              if (this.enableGrid) {
+                this.disposeGrid();
+              }
+              this.activateGizmos(false);
+            } else {
+              const screenNotches = 8;
+              this._currentCursorPosition.setY(this.getCursorNDC(_center2.x, _center2.y, this.domElement).y * 0.5);
+              const movement = this._currentCursorPosition.y - this._startCursorPosition.y;
+              let size = 1;
+              if (movement < 0) {
+                size = 1 / Math.pow(this.scaleFactor, -movement * screenNotches);
+              } else if (movement > 0) {
+                size = Math.pow(this.scaleFactor, movement * screenNotches);
+              }
+              this._v3_1.setFromMatrixPosition(this._gizmoMatrixState);
+              this.applyTransformMatrix(this.scale(size, this._v3_1));
+            }
+          }
+          break;
+        case STATE.FOV:
+          if (this.enableZoom && this.object.isPerspectiveCamera) {
+            if (restart) {
+              this.dispatchEvent(_endEvent);
+              this.dispatchEvent(_startEvent);
+              this.updateTbState(opState, true);
+              this._startCursorPosition.setY(this.getCursorNDC(_center2.x, _center2.y, this.domElement).y * 0.5);
+              this._currentCursorPosition.copy(this._startCursorPosition);
+              if (this.enableGrid) {
+                this.disposeGrid();
+              }
+              this.activateGizmos(false);
+            } else {
+              const screenNotches = 8;
+              this._currentCursorPosition.setY(this.getCursorNDC(_center2.x, _center2.y, this.domElement).y * 0.5);
+              const movement = this._currentCursorPosition.y - this._startCursorPosition.y;
+              let size = 1;
+              if (movement < 0) {
+                size = 1 / Math.pow(this.scaleFactor, -movement * screenNotches);
+              } else if (movement > 0) {
+                size = Math.pow(this.scaleFactor, movement * screenNotches);
+              }
+              this._v3_1.setFromMatrixPosition(this._cameraMatrixState);
+              const x = this._v3_1.distanceTo(this._gizmos.position);
+              let xNew = x / size;
+              xNew = MathUtils.clamp(xNew, this.minDistance, this.maxDistance);
+              const y = x * Math.tan(MathUtils.DEG2RAD * this._fovState * 0.5);
+              let newFov = MathUtils.RAD2DEG * (Math.atan(y / xNew) * 2);
+              newFov = MathUtils.clamp(newFov, this.minFov, this.maxFov);
+              const newDistance = y / Math.tan(MathUtils.DEG2RAD * (newFov / 2));
+              size = x / newDistance;
+              this._v3_2.setFromMatrixPosition(this._gizmoMatrixState);
+              this.setFov(newFov);
+              this.applyTransformMatrix(this.scale(size, this._v3_2, false));
+              _offset2.copy(this._gizmos.position).sub(this.object.position).normalize().multiplyScalar(newDistance / x);
+              this._m4_1.makeTranslation(_offset2.x, _offset2.y, _offset2.z);
+            }
+          }
+          break;
+      }
+      this.dispatchEvent(_changeEvent);
+    }
+  }
+  onSinglePanEnd() {
+    if (this._state == STATE.ROTATE) {
+      if (!this.enableRotate) {
+        return;
+      }
+      if (this.enableAnimations) {
+        const deltaTime = performance.now() - this._timeCurrent;
+        if (deltaTime < 120) {
+          const w = Math.abs((this._wPrev + this._wCurr) / 2);
+          const self2 = this;
+          this._animationId = window.requestAnimationFrame(function(t) {
+            self2.updateTbState(STATE.ANIMATION_ROTATE, true);
+            const rotationAxis = self2.calculateRotationAxis(self2._cursorPosPrev, self2._cursorPosCurr);
+            self2.onRotationAnim(t, rotationAxis, Math.min(w, self2.wMax));
+          });
+        } else {
+          this.updateTbState(STATE.IDLE, false);
+          this.activateGizmos(false);
+          this.dispatchEvent(_changeEvent);
+        }
+      } else {
+        this.updateTbState(STATE.IDLE, false);
+        this.activateGizmos(false);
+        this.dispatchEvent(_changeEvent);
+      }
+    } else if (this._state == STATE.PAN || this._state == STATE.IDLE) {
+      this.updateTbState(STATE.IDLE, false);
+      if (this.enableGrid) {
+        this.disposeGrid();
+      }
+      this.activateGizmos(false);
+      this.dispatchEvent(_changeEvent);
+    }
+    this.dispatchEvent(_endEvent);
+  }
+  onDoubleTap(event) {
+    if (this.enabled && this.enablePan && this.enableFocus && this.scene != null) {
+      this.dispatchEvent(_startEvent);
+      this.setCenter(event.clientX, event.clientY);
+      const hitP = this.unprojectOnObj(this.getCursorNDC(_center2.x, _center2.y, this.domElement), this.object);
+      if (hitP != null && this.enableAnimations) {
+        const self2 = this;
+        if (this._animationId != -1) {
+          window.cancelAnimationFrame(this._animationId);
+        }
+        this._timeStart = -1;
+        this._animationId = window.requestAnimationFrame(function(t) {
+          self2.updateTbState(STATE.ANIMATION_FOCUS, true);
+          self2.onFocusAnim(t, hitP, self2._cameraMatrixState, self2._gizmoMatrixState);
+        });
+      } else if (hitP != null && !this.enableAnimations) {
+        this.updateTbState(STATE.FOCUS, true);
+        this.focus(hitP, this.scaleFactor);
+        this.updateTbState(STATE.IDLE, false);
+        this.dispatchEvent(_changeEvent);
+      }
+    }
+    this.dispatchEvent(_endEvent);
+  }
+  onDoublePanStart() {
+    if (this.enabled && this.enablePan) {
+      this.dispatchEvent(_startEvent);
+      this.updateTbState(STATE.PAN, true);
+      this.setCenter((this._touchCurrent[0].clientX + this._touchCurrent[1].clientX) / 2, (this._touchCurrent[0].clientY + this._touchCurrent[1].clientY) / 2);
+      this._startCursorPosition.copy(this.unprojectOnTbPlane(this.object, _center2.x, _center2.y, this.domElement, true));
+      this._currentCursorPosition.copy(this._startCursorPosition);
+      this.activateGizmos(false);
+    }
+  }
+  onDoublePanMove() {
+    if (this.enabled && this.enablePan) {
+      this.setCenter((this._touchCurrent[0].clientX + this._touchCurrent[1].clientX) / 2, (this._touchCurrent[0].clientY + this._touchCurrent[1].clientY) / 2);
+      if (this._state != STATE.PAN) {
+        this.updateTbState(STATE.PAN, true);
+        this._startCursorPosition.copy(this._currentCursorPosition);
+      }
+      this._currentCursorPosition.copy(this.unprojectOnTbPlane(this.object, _center2.x, _center2.y, this.domElement, true));
+      this.applyTransformMatrix(this.pan(this._startCursorPosition, this._currentCursorPosition, true));
+      this.dispatchEvent(_changeEvent);
+    }
+  }
+  onDoublePanEnd() {
+    this.updateTbState(STATE.IDLE, false);
+    this.dispatchEvent(_endEvent);
+  }
+  onRotateStart() {
+    if (this.enabled && this.enableRotate) {
+      this.dispatchEvent(_startEvent);
+      this.updateTbState(STATE.ZROTATE, true);
+      this._startFingerRotation = this.getAngle(this._touchCurrent[1], this._touchCurrent[0]) + this.getAngle(this._touchStart[1], this._touchStart[0]);
+      this._currentFingerRotation = this._startFingerRotation;
+      this.object.getWorldDirection(this._rotationAxis);
+      if (!this.enablePan && !this.enableZoom) {
+        this.activateGizmos(true);
+      }
+    }
+  }
+  onRotateMove() {
+    if (this.enabled && this.enableRotate) {
+      this.setCenter((this._touchCurrent[0].clientX + this._touchCurrent[1].clientX) / 2, (this._touchCurrent[0].clientY + this._touchCurrent[1].clientY) / 2);
+      let rotationPoint;
+      if (this._state != STATE.ZROTATE) {
+        this.updateTbState(STATE.ZROTATE, true);
+        this._startFingerRotation = this._currentFingerRotation;
+      }
+      this._currentFingerRotation = this.getAngle(this._touchCurrent[1], this._touchCurrent[0]) + this.getAngle(this._touchStart[1], this._touchStart[0]);
+      if (!this.enablePan) {
+        rotationPoint = new Vector3().setFromMatrixPosition(this._gizmoMatrixState);
+      } else {
+        this._v3_2.setFromMatrixPosition(this._gizmoMatrixState);
+        rotationPoint = this.unprojectOnTbPlane(this.object, _center2.x, _center2.y, this.domElement).applyQuaternion(this.object.quaternion).multiplyScalar(1 / this.object.zoom).add(this._v3_2);
+      }
+      const amount = MathUtils.DEG2RAD * (this._startFingerRotation - this._currentFingerRotation);
+      this.applyTransformMatrix(this.zRotate(rotationPoint, amount));
+      this.dispatchEvent(_changeEvent);
+    }
+  }
+  onRotateEnd() {
+    this.updateTbState(STATE.IDLE, false);
+    this.activateGizmos(false);
+    this.dispatchEvent(_endEvent);
+  }
+  onPinchStart() {
+    if (this.enabled && this.enableZoom) {
+      this.dispatchEvent(_startEvent);
+      this.updateTbState(STATE.SCALE, true);
+      this._startFingerDistance = this.calculatePointersDistance(this._touchCurrent[0], this._touchCurrent[1]);
+      this._currentFingerDistance = this._startFingerDistance;
+      this.activateGizmos(false);
+    }
+  }
+  onPinchMove() {
+    if (this.enabled && this.enableZoom) {
+      this.setCenter((this._touchCurrent[0].clientX + this._touchCurrent[1].clientX) / 2, (this._touchCurrent[0].clientY + this._touchCurrent[1].clientY) / 2);
+      const minDistance = 12;
+      if (this._state != STATE.SCALE) {
+        this._startFingerDistance = this._currentFingerDistance;
+        this.updateTbState(STATE.SCALE, true);
+      }
+      this._currentFingerDistance = Math.max(this.calculatePointersDistance(this._touchCurrent[0], this._touchCurrent[1]), minDistance * this._devPxRatio);
+      const amount = this._currentFingerDistance / this._startFingerDistance;
+      let scalePoint;
+      if (!this.enablePan) {
+        scalePoint = this._gizmos.position;
+      } else {
+        if (this.object.isOrthographicCamera) {
+          scalePoint = this.unprojectOnTbPlane(this.object, _center2.x, _center2.y, this.domElement).applyQuaternion(this.object.quaternion).multiplyScalar(1 / this.object.zoom).add(this._gizmos.position);
+        } else if (this.object.isPerspectiveCamera) {
+          scalePoint = this.unprojectOnTbPlane(this.object, _center2.x, _center2.y, this.domElement).applyQuaternion(this.object.quaternion).add(this._gizmos.position);
+        }
+      }
+      this.applyTransformMatrix(this.scale(amount, scalePoint));
+      this.dispatchEvent(_changeEvent);
+    }
+  }
+  onPinchEnd() {
+    this.updateTbState(STATE.IDLE, false);
+    this.dispatchEvent(_endEvent);
+  }
+  onTriplePanStart() {
+    if (this.enabled && this.enableZoom) {
+      this.dispatchEvent(_startEvent);
+      this.updateTbState(STATE.SCALE, true);
+      let clientX = 0;
+      let clientY = 0;
+      const nFingers = this._touchCurrent.length;
+      for (let i = 0; i < nFingers; i++) {
+        clientX += this._touchCurrent[i].clientX;
+        clientY += this._touchCurrent[i].clientY;
+      }
+      this.setCenter(clientX / nFingers, clientY / nFingers);
+      this._startCursorPosition.setY(this.getCursorNDC(_center2.x, _center2.y, this.domElement).y * 0.5);
+      this._currentCursorPosition.copy(this._startCursorPosition);
+    }
+  }
+  onTriplePanMove() {
+    if (this.enabled && this.enableZoom) {
+      let clientX = 0;
+      let clientY = 0;
+      const nFingers = this._touchCurrent.length;
+      for (let i = 0; i < nFingers; i++) {
+        clientX += this._touchCurrent[i].clientX;
+        clientY += this._touchCurrent[i].clientY;
+      }
+      this.setCenter(clientX / nFingers, clientY / nFingers);
+      const screenNotches = 8;
+      this._currentCursorPosition.setY(this.getCursorNDC(_center2.x, _center2.y, this.domElement).y * 0.5);
+      const movement = this._currentCursorPosition.y - this._startCursorPosition.y;
+      let size = 1;
+      if (movement < 0) {
+        size = 1 / Math.pow(this.scaleFactor, -movement * screenNotches);
+      } else if (movement > 0) {
+        size = Math.pow(this.scaleFactor, movement * screenNotches);
+      }
+      this._v3_1.setFromMatrixPosition(this._cameraMatrixState);
+      const x = this._v3_1.distanceTo(this._gizmos.position);
+      let xNew = x / size;
+      xNew = MathUtils.clamp(xNew, this.minDistance, this.maxDistance);
+      const y = x * Math.tan(MathUtils.DEG2RAD * this._fovState * 0.5);
+      let newFov = MathUtils.RAD2DEG * (Math.atan(y / xNew) * 2);
+      newFov = MathUtils.clamp(newFov, this.minFov, this.maxFov);
+      const newDistance = y / Math.tan(MathUtils.DEG2RAD * (newFov / 2));
+      size = x / newDistance;
+      this._v3_2.setFromMatrixPosition(this._gizmoMatrixState);
+      this.setFov(newFov);
+      this.applyTransformMatrix(this.scale(size, this._v3_2, false));
+      _offset2.copy(this._gizmos.position).sub(this.object.position).normalize().multiplyScalar(newDistance / x);
+      this._m4_1.makeTranslation(_offset2.x, _offset2.y, _offset2.z);
+      this.dispatchEvent(_changeEvent);
+    }
+  }
+  onTriplePanEnd() {
+    this.updateTbState(STATE.IDLE, false);
+    this.dispatchEvent(_endEvent);
+  }
+  /**
+   * Set _center's x/y coordinates.
+   *
+   * @private
+   * @param {number} clientX - The x coordinate.
+   * @param {number} clientY - The y coordinate.
+   */
+  setCenter(clientX, clientY) {
+    _center2.x = clientX;
+    _center2.y = clientY;
+  }
+  /**
+   * Set default mouse actions.
+   *
+   * @private
+   */
+  initializeMouseActions() {
+    this.setMouseAction("PAN", 0, "CTRL");
+    this.setMouseAction("PAN", 2);
+    this.setMouseAction("ROTATE", 0);
+    this.setMouseAction("ZOOM", "WHEEL");
+    this.setMouseAction("ZOOM", 1);
+    this.setMouseAction("FOV", "WHEEL", "SHIFT");
+    this.setMouseAction("FOV", 1, "SHIFT");
+  }
+  /**
+   * Compare two mouse actions.
+   *
+   * @private
+   * @param {Object} action1 - The first mouse action.
+   * @param {Object} action2 - The second mouse action.
+   * @returns {boolean} `true` if action1 and action 2 are the same mouse action, `false` otherwise.
+   */
+  compareMouseAction(action1, action2) {
+    if (action1.operation == action2.operation) {
+      if (action1.mouse == action2.mouse && action1.key == action2.key) {
+        return true;
+      } else {
+        return false;
+      }
+    } else {
+      return false;
+    }
+  }
+  /**
+   * Set a new mouse action by specifying the operation to be performed and a mouse/key combination. In case of conflict, replaces the existing one.
+   *
+   * @param {'PAN'|'ROTATE'|'ZOOM'|'FOV'} operation - The operation to be performed ('PAN', 'ROTATE', 'ZOOM', 'FOV').
+   * @param {0|1|2|'WHEEL'} mouse - A mouse button (0, 1, 2) or 'WHEEL' for wheel notches.
+   * @param {?('CTRL'|'SHIFT')} [key=null] - The keyboard modifier ('CTRL', 'SHIFT') or null if key is not needed.
+   * @returns {boolean} `true` if the mouse action has been successfully added, `false` otherwise.
+   */
+  setMouseAction(operation, mouse, key = null) {
+    const operationInput = ["PAN", "ROTATE", "ZOOM", "FOV"];
+    const mouseInput = [0, 1, 2, "WHEEL"];
+    const keyInput = ["CTRL", "SHIFT", null];
+    let state;
+    if (!operationInput.includes(operation) || !mouseInput.includes(mouse) || !keyInput.includes(key)) {
+      return false;
+    }
+    if (mouse == "WHEEL") {
+      if (operation != "ZOOM" && operation != "FOV") {
+        return false;
+      }
+    }
+    switch (operation) {
+      case "PAN":
+        state = STATE.PAN;
+        break;
+      case "ROTATE":
+        state = STATE.ROTATE;
+        break;
+      case "ZOOM":
+        state = STATE.SCALE;
+        break;
+      case "FOV":
+        state = STATE.FOV;
+        break;
+    }
+    const action = {
+      operation,
+      mouse,
+      key,
+      state
+    };
+    for (let i = 0; i < this.mouseActions.length; i++) {
+      if (this.mouseActions[i].mouse == action.mouse && this.mouseActions[i].key == action.key) {
+        this.mouseActions.splice(i, 1, action);
+        return true;
+      }
+    }
+    this.mouseActions.push(action);
+    return true;
+  }
+  /**
+   * Remove a mouse action by specifying its mouse/key combination.
+   *
+   * @param {0|1|2|'WHEEL'} mouse - A mouse button (0, 1, 2) or 'WHEEL' for wheel notches.
+   * @param {?('CTRL'|'SHIFT')} key - The keyboard modifier ('CTRL', 'SHIFT') or null if key is not needed.
+   * @returns {boolean} `true` if the operation has been successfully removed, `false` otherwise.
+   */
+  unsetMouseAction(mouse, key = null) {
+    for (let i = 0; i < this.mouseActions.length; i++) {
+      if (this.mouseActions[i].mouse == mouse && this.mouseActions[i].key == key) {
+        this.mouseActions.splice(i, 1);
+        return true;
+      }
+    }
+    return false;
+  }
+  /**
+   * Return the operation associated to a mouse/keyboard combination.
+   *
+   * @private
+   * @param {0|1|2|'WHEEL'} mouse - Mouse button index (0, 1, 2) or 'WHEEL' for wheel notches.
+   * @param {?('CTRL'|'SHIFT')} key - Keyboard modifier.
+   * @returns {?('PAN'|'ROTATE'|'ZOOM'|'FOV')} The operation if it has been found, `null` otherwise.
+   */
+  getOpFromAction(mouse, key) {
+    let action;
+    for (let i = 0; i < this.mouseActions.length; i++) {
+      action = this.mouseActions[i];
+      if (action.mouse == mouse && action.key == key) {
+        return action.operation;
+      }
+    }
+    if (key != null) {
+      for (let i = 0; i < this.mouseActions.length; i++) {
+        action = this.mouseActions[i];
+        if (action.mouse == mouse && action.key == null) {
+          return action.operation;
+        }
+      }
+    }
+    return null;
+  }
+  /**
+   * Get the operation associated to mouse and key combination and returns the corresponding FSA state.
+   *
+   * @private
+   * @param {0|1|2} mouse - Mouse button index (0, 1, 2)
+   * @param {?('CTRL'|'SHIFT')} key - Keyboard modifier
+   * @returns {?STATE} The FSA state obtained from the operation associated to mouse/keyboard combination.
+   */
+  getOpStateFromAction(mouse, key) {
+    let action;
+    for (let i = 0; i < this.mouseActions.length; i++) {
+      action = this.mouseActions[i];
+      if (action.mouse == mouse && action.key == key) {
+        return action.state;
+      }
+    }
+    if (key != null) {
+      for (let i = 0; i < this.mouseActions.length; i++) {
+        action = this.mouseActions[i];
+        if (action.mouse == mouse && action.key == null) {
+          return action.state;
+        }
+      }
+    }
+    return null;
+  }
+  /**
+   * Calculate the angle between two pointers.
+   *
+   * @private
+   * @param {PointerEvent} p1 - The first pointer event.
+   * @param {PointerEvent} p2 - The second pointer event.
+   * @returns {number} The angle between two pointers in degrees.
+   */
+  getAngle(p1, p2) {
+    return Math.atan2(p2.clientY - p1.clientY, p2.clientX - p1.clientX) * 180 / Math.PI;
+  }
+  /**
+   * Updates a PointerEvent inside current pointerevents array.
+   *
+   * @private
+   * @param {PointerEvent} event - The pointer event.
+   */
+  updateTouchEvent(event) {
+    for (let i = 0; i < this._touchCurrent.length; i++) {
+      if (this._touchCurrent[i].pointerId == event.pointerId) {
+        this._touchCurrent.splice(i, 1, event);
+        break;
+      }
+    }
+  }
+  /**
+   * Applies a transformation matrix, to the camera and gizmos.
+   *
+   * @private
+   * @param {Object} transformation - Object containing matrices to apply to camera and gizmos.
+   */
+  applyTransformMatrix(transformation) {
+    if (transformation.camera != null) {
+      this._m4_1.copy(this._cameraMatrixState).premultiply(transformation.camera);
+      this._m4_1.decompose(this.object.position, this.object.quaternion, this.object.scale);
+      this.object.updateMatrix();
+      if (this._state == STATE.ROTATE || this._state == STATE.ZROTATE || this._state == STATE.ANIMATION_ROTATE) {
+        this.object.up.copy(this._upState).applyQuaternion(this.object.quaternion);
+      }
+    }
+    if (transformation.gizmos != null) {
+      this._m4_1.copy(this._gizmoMatrixState).premultiply(transformation.gizmos);
+      this._m4_1.decompose(this._gizmos.position, this._gizmos.quaternion, this._gizmos.scale);
+      this._gizmos.updateMatrix();
+    }
+    if (this._state == STATE.SCALE || this._state == STATE.FOCUS || this._state == STATE.ANIMATION_FOCUS) {
+      this._tbRadius = this.calculateTbRadius(this.object);
+      if (this.adjustNearFar) {
+        const cameraDistance = this.object.position.distanceTo(this._gizmos.position);
+        const bb = new Box3();
+        bb.setFromObject(this._gizmos);
+        const sphere = new Sphere();
+        bb.getBoundingSphere(sphere);
+        const adjustedNearPosition = Math.max(this._nearPos0, sphere.radius + sphere.center.length());
+        const regularNearPosition = cameraDistance - this._initialNear;
+        const minNearPos = Math.min(adjustedNearPosition, regularNearPosition);
+        this.object.near = cameraDistance - minNearPos;
+        const adjustedFarPosition = Math.min(this._farPos0, -sphere.radius + sphere.center.length());
+        const regularFarPosition = cameraDistance - this._initialFar;
+        const minFarPos = Math.min(adjustedFarPosition, regularFarPosition);
+        this.object.far = cameraDistance - minFarPos;
+        this.object.updateProjectionMatrix();
+      } else {
+        let update = false;
+        if (this.object.near != this._initialNear) {
+          this.object.near = this._initialNear;
+          update = true;
+        }
+        if (this.object.far != this._initialFar) {
+          this.object.far = this._initialFar;
+          update = true;
+        }
+        if (update) {
+          this.object.updateProjectionMatrix();
+        }
+      }
+    }
+  }
+  /**
+   * Calculates the angular speed.
+   *
+   * @private
+   * @param {number} p0 - Position at t0.
+   * @param {number} p1 - Position at t1.
+   * @param {number} t0 - Initial time in milliseconds.
+   * @param {number} t1 - Ending time in milliseconds.
+   * @returns {number} The angular speed.
+   */
+  calculateAngularSpeed(p0, p1, t0, t1) {
+    const s = p1 - p0;
+    const t = (t1 - t0) / 1e3;
+    if (t == 0) {
+      return 0;
+    }
+    return s / t;
+  }
+  /**
+   * Calculates the distance between two pointers.
+   *
+   * @private
+   * @param {PointerEvent} p0 - The first pointer.
+   * @param {PointerEvent} p1 - The second pointer.
+   * @returns {number} The distance between the two pointers.
+   */
+  calculatePointersDistance(p0, p1) {
+    return Math.sqrt(Math.pow(p1.clientX - p0.clientX, 2) + Math.pow(p1.clientY - p0.clientY, 2));
+  }
+  /**
+   * Calculates the rotation axis as the vector perpendicular between two vectors.
+   *
+   * @private
+   * @param {Vector3} vec1 - The first vector.
+   * @param {Vector3} vec2 - The second vector.
+   * @returns {Vector3} The normalized rotation axis.
+   */
+  calculateRotationAxis(vec1, vec2) {
+    this._rotationMatrix.extractRotation(this._cameraMatrixState);
+    this._quat.setFromRotationMatrix(this._rotationMatrix);
+    this._rotationAxis.crossVectors(vec1, vec2).applyQuaternion(this._quat);
+    return this._rotationAxis.normalize().clone();
+  }
+  /**
+   * Calculates the trackball radius so that gizmo's diameter will be 2/3 of the minimum side of the camera frustum.
+   *
+   * @private
+   * @param {Camera} camera - The camera.
+   * @returns {number} The trackball radius.
+   */
+  calculateTbRadius(camera) {
+    const distance = camera.position.distanceTo(this._gizmos.position);
+    if (camera.type == "PerspectiveCamera") {
+      const halfFovV = MathUtils.DEG2RAD * camera.fov * 0.5;
+      const halfFovH = Math.atan(camera.aspect * Math.tan(halfFovV));
+      return Math.tan(Math.min(halfFovV, halfFovH)) * distance * this.radiusFactor;
+    } else if (camera.type == "OrthographicCamera") {
+      return Math.min(camera.top, camera.right) * this.radiusFactor;
+    }
+  }
+  /**
+   * Focus operation consist of positioning the point of interest in front of the camera and a slightly zoom in.
+   *
+   * @private
+   * @param {Vector3} point - The point of interest.
+   * @param {number} size - Scale factor.
+   * @param {number} [amount=1] - Amount of operation to be completed (used for focus animations, default is complete full operation).
+   */
+  focus(point, size, amount = 1) {
+    _offset2.copy(point).sub(this._gizmos.position).multiplyScalar(amount);
+    this._translationMatrix.makeTranslation(_offset2.x, _offset2.y, _offset2.z);
+    _gizmoMatrixStateTemp.copy(this._gizmoMatrixState);
+    this._gizmoMatrixState.premultiply(this._translationMatrix);
+    this._gizmoMatrixState.decompose(this._gizmos.position, this._gizmos.quaternion, this._gizmos.scale);
+    _cameraMatrixStateTemp.copy(this._cameraMatrixState);
+    this._cameraMatrixState.premultiply(this._translationMatrix);
+    this._cameraMatrixState.decompose(this.object.position, this.object.quaternion, this.object.scale);
+    if (this.enableZoom) {
+      this.applyTransformMatrix(this.scale(size, this._gizmos.position));
+    }
+    this._gizmoMatrixState.copy(_gizmoMatrixStateTemp);
+    this._cameraMatrixState.copy(_cameraMatrixStateTemp);
+  }
+  /**
+   * Creates a grid if necessary and adds it to the scene.
+   *
+   * @private
+   */
+  drawGrid() {
+    if (this.scene != null) {
+      const color = 8947848;
+      const multiplier = 3;
+      let size, divisions, maxLength, tick;
+      if (this.object.isOrthographicCamera) {
+        const width = this.object.right - this.object.left;
+        const height = this.object.bottom - this.object.top;
+        maxLength = Math.max(width, height);
+        tick = maxLength / 20;
+        size = maxLength / this.object.zoom * multiplier;
+        divisions = size / tick * this.object.zoom;
+      } else if (this.object.isPerspectiveCamera) {
+        const distance = this.object.position.distanceTo(this._gizmos.position);
+        const halfFovV = MathUtils.DEG2RAD * this.object.fov * 0.5;
+        const halfFovH = Math.atan(this.object.aspect * Math.tan(halfFovV));
+        maxLength = Math.tan(Math.max(halfFovV, halfFovH)) * distance * 2;
+        tick = maxLength / 20;
+        size = maxLength * multiplier;
+        divisions = size / tick;
+      }
+      if (this._grid == null) {
+        this._grid = new GridHelper(size, divisions, color, color);
+        this._grid.position.copy(this._gizmos.position);
+        this._gridPosition.copy(this._grid.position);
+        this._grid.quaternion.copy(this.object.quaternion);
+        this._grid.rotateX(Math.PI * 0.5);
+        this.scene.add(this._grid);
+      }
+    }
+  }
+  dispose() {
+    if (this._animationId != -1) {
+      window.cancelAnimationFrame(this._animationId);
+    }
+    this.disconnect();
+    if (this.scene !== null) this.scene.remove(this._gizmos);
+    this.disposeGrid();
+  }
+  /**
+   * Removes the grid from the scene.
+   */
+  disposeGrid() {
+    if (this._grid != null && this.scene != null) {
+      this.scene.remove(this._grid);
+      this._grid = null;
+    }
+  }
+  /**
+   * Computes the easing out cubic function for ease out effect in animation.
+   *
+   * @private
+   * @param {number} t - The absolute progress of the animation in the bound of `0` (beginning of the) and `1` (ending of animation).
+   * @returns {number} Result of easing out cubic at time `t`.
+   */
+  easeOutCubic(t) {
+    return 1 - Math.pow(1 - t, 3);
+  }
+  /**
+   * Makes rotation gizmos more or less visible.
+   *
+   * @param {boolean} isActive - If set to `true`, gizmos are more visible.
+   */
+  activateGizmos(isActive) {
+    const gizmoX = this._gizmos.children[0];
+    const gizmoY = this._gizmos.children[1];
+    const gizmoZ = this._gizmos.children[2];
+    if (isActive) {
+      gizmoX.material.setValues({ opacity: 1 });
+      gizmoY.material.setValues({ opacity: 1 });
+      gizmoZ.material.setValues({ opacity: 1 });
+    } else {
+      gizmoX.material.setValues({ opacity: 0.6 });
+      gizmoY.material.setValues({ opacity: 0.6 });
+      gizmoZ.material.setValues({ opacity: 0.6 });
+    }
+  }
+  /**
+   * Calculates the cursor position in NDC.
+   *
+   * @private
+   * @param {number} cursorX - Cursor horizontal coordinate within the canvas.
+   * @param {number} cursorY - Cursor vertical coordinate within the canvas.
+   * @param {HTMLElement} canvas - The canvas where the renderer draws its output.
+   * @returns {Vector2} Cursor normalized position inside the canvas.
+   */
+  getCursorNDC(cursorX, cursorY, canvas) {
+    const canvasRect = canvas.getBoundingClientRect();
+    this._v2_1.setX((cursorX - canvasRect.left) / canvasRect.width * 2 - 1);
+    this._v2_1.setY((canvasRect.bottom - cursorY) / canvasRect.height * 2 - 1);
+    return this._v2_1.clone();
+  }
+  /**
+   * Calculates the cursor position inside the canvas x/y coordinates with the origin being in the center of the canvas.
+   *
+   * @private
+   * @param {number} cursorX - Cursor horizontal coordinate within the canvas.
+   * @param {number} cursorY - Cursor vertical coordinate within the canvas.
+   * @param {HTMLElement} canvas - The canvas where the renderer draws its output.
+   * @returns {Vector2} Cursor position inside the canvas.
+   */
+  getCursorPosition(cursorX, cursorY, canvas) {
+    this._v2_1.copy(this.getCursorNDC(cursorX, cursorY, canvas));
+    this._v2_1.x *= (this.object.right - this.object.left) * 0.5;
+    this._v2_1.y *= (this.object.top - this.object.bottom) * 0.5;
+    return this._v2_1.clone();
+  }
+  /**
+   * Sets the camera to be controlled.  Must be called in order to set a new camera to be controlled.
+   *
+   * @param {Camera} camera - The camera to be controlled.
+   */
+  setCamera(camera) {
+    camera.lookAt(this.target);
+    camera.updateMatrix();
+    if (camera.type == "PerspectiveCamera") {
+      this._fov0 = camera.fov;
+      this._fovState = camera.fov;
+    }
+    this._cameraMatrixState0.copy(camera.matrix);
+    this._cameraMatrixState.copy(this._cameraMatrixState0);
+    this._cameraProjectionState.copy(camera.projectionMatrix);
+    this._zoom0 = camera.zoom;
+    this._zoomState = this._zoom0;
+    this._initialNear = camera.near;
+    this._nearPos0 = camera.position.distanceTo(this.target) - camera.near;
+    this._nearPos = this._initialNear;
+    this._initialFar = camera.far;
+    this._farPos0 = camera.position.distanceTo(this.target) - camera.far;
+    this._farPos = this._initialFar;
+    this._up0.copy(camera.up);
+    this._upState.copy(camera.up);
+    this.object = camera;
+    this.object.updateProjectionMatrix();
+    this._tbRadius = this.calculateTbRadius(camera);
+    this.makeGizmos(this.target, this._tbRadius);
+  }
+  /**
+   * Sets gizmos visibility.
+   *
+   * @param {boolean} value - Value of gizmos visibility.
+   */
+  setGizmosVisible(value) {
+    this._gizmos.visible = value;
+    this.dispatchEvent(_changeEvent);
+  }
+  /**
+   * Sets gizmos radius factor and redraws gizmos.
+   *
+   * @param {number} value - Value of radius factor.
+   */
+  setTbRadius(value) {
+    this.radiusFactor = value;
+    this._tbRadius = this.calculateTbRadius(this.object);
+    const curve = new EllipseCurve(0, 0, this._tbRadius, this._tbRadius);
+    const points = curve.getPoints(this._curvePts);
+    const curveGeometry = new BufferGeometry().setFromPoints(points);
+    for (const gizmo in this._gizmos.children) {
+      this._gizmos.children[gizmo].geometry = curveGeometry;
+    }
+    this.dispatchEvent(_changeEvent);
+  }
+  /**
+   * Creates the rotation gizmos matching trackball center and radius.
+   *
+   * @private
+   * @param {Vector3} tbCenter - The trackball center.
+   * @param {number} tbRadius - The trackball radius.
+   */
+  makeGizmos(tbCenter, tbRadius) {
+    const curve = new EllipseCurve(0, 0, tbRadius, tbRadius);
+    const points = curve.getPoints(this._curvePts);
+    const curveGeometry = new BufferGeometry().setFromPoints(points);
+    const curveMaterialX = new LineBasicMaterial({ color: 16744576, fog: false, transparent: true, opacity: 0.6 });
+    const curveMaterialY = new LineBasicMaterial({ color: 8454016, fog: false, transparent: true, opacity: 0.6 });
+    const curveMaterialZ = new LineBasicMaterial({ color: 8421631, fog: false, transparent: true, opacity: 0.6 });
+    const gizmoX = new Line(curveGeometry, curveMaterialX);
+    const gizmoY = new Line(curveGeometry, curveMaterialY);
+    const gizmoZ = new Line(curveGeometry, curveMaterialZ);
+    const rotation = Math.PI * 0.5;
+    gizmoX.rotation.y = rotation;
+    gizmoY.rotation.x = rotation;
+    this._gizmoMatrixState0.identity().setPosition(tbCenter);
+    this._gizmoMatrixState.copy(this._gizmoMatrixState0);
+    if (this.object.zoom !== 1) {
+      const size = 1 / this.object.zoom;
+      this._scaleMatrix.makeScale(size, size, size);
+      this._translationMatrix.makeTranslation(-tbCenter.x, -tbCenter.y, -tbCenter.z);
+      this._gizmoMatrixState.premultiply(this._translationMatrix).premultiply(this._scaleMatrix);
+      this._translationMatrix.makeTranslation(tbCenter.x, tbCenter.y, tbCenter.z);
+      this._gizmoMatrixState.premultiply(this._translationMatrix);
+    }
+    this._gizmoMatrixState.decompose(this._gizmos.position, this._gizmos.quaternion, this._gizmos.scale);
+    this._gizmos.traverse(function(object) {
+      if (object.isLine) {
+        object.geometry.dispose();
+        object.material.dispose();
+      }
+    });
+    this._gizmos.clear();
+    this._gizmos.add(gizmoX);
+    this._gizmos.add(gizmoY);
+    this._gizmos.add(gizmoZ);
+  }
+  /**
+   * Performs animation for focus operation.
+   *
+   * @private
+   * @param {number} time - Instant in which this function is called as performance.now().
+   * @param {Vector3} point - Point of interest for focus operation.
+   * @param {Matrix4} cameraMatrix - Camera matrix.
+   * @param {Matrix4} gizmoMatrix - Gizmos matrix.
+   */
+  onFocusAnim(time, point, cameraMatrix, gizmoMatrix) {
+    if (this._timeStart == -1) {
+      this._timeStart = time;
+    }
+    if (this._state == STATE.ANIMATION_FOCUS) {
+      const deltaTime = time - this._timeStart;
+      const animTime = deltaTime / this.focusAnimationTime;
+      this._gizmoMatrixState.copy(gizmoMatrix);
+      if (animTime >= 1) {
+        this._gizmoMatrixState.decompose(this._gizmos.position, this._gizmos.quaternion, this._gizmos.scale);
+        this.focus(point, this.scaleFactor);
+        this._timeStart = -1;
+        this.updateTbState(STATE.IDLE, false);
+        this.activateGizmos(false);
+        this.dispatchEvent(_changeEvent);
+      } else {
+        const amount = this.easeOutCubic(animTime);
+        const size = 1 - amount + this.scaleFactor * amount;
+        this._gizmoMatrixState.decompose(this._gizmos.position, this._gizmos.quaternion, this._gizmos.scale);
+        this.focus(point, size, amount);
+        this.dispatchEvent(_changeEvent);
+        const self2 = this;
+        this._animationId = window.requestAnimationFrame(function(t) {
+          self2.onFocusAnim(t, point, cameraMatrix, gizmoMatrix.clone());
+        });
+      }
+    } else {
+      this._animationId = -1;
+      this._timeStart = -1;
+    }
+  }
+  /**
+   * Performs animation for rotation operation.
+   *
+   * @private
+   * @param {number} time - Instant in which this function is called as performance.now().
+   * @param {Vector3} rotationAxis - Rotation axis.
+   * @param {number} w0 - Initial angular velocity.
+   */
+  onRotationAnim(time, rotationAxis, w0) {
+    if (this._timeStart == -1) {
+      this._anglePrev = 0;
+      this._angleCurrent = 0;
+      this._timeStart = time;
+    }
+    if (this._state == STATE.ANIMATION_ROTATE) {
+      const deltaTime = (time - this._timeStart) / 1e3;
+      const w = w0 + -this.dampingFactor * deltaTime;
+      if (w > 0) {
+        this._angleCurrent = 0.5 * -this.dampingFactor * Math.pow(deltaTime, 2) + w0 * deltaTime + 0;
+        this.applyTransformMatrix(this.rotate(rotationAxis, this._angleCurrent));
+        this.dispatchEvent(_changeEvent);
+        const self2 = this;
+        this._animationId = window.requestAnimationFrame(function(t) {
+          self2.onRotationAnim(t, rotationAxis, w0);
+        });
+      } else {
+        this._animationId = -1;
+        this._timeStart = -1;
+        this.updateTbState(STATE.IDLE, false);
+        this.activateGizmos(false);
+        this.dispatchEvent(_changeEvent);
+      }
+    } else {
+      this._animationId = -1;
+      this._timeStart = -1;
+      if (this._state != STATE.ROTATE) {
+        this.activateGizmos(false);
+        this.dispatchEvent(_changeEvent);
+      }
+    }
+  }
+  /**
+   * Performs pan operation moving camera between two points.
+   *
+   * @private
+   * @param {Vector3} p0 - Initial point.
+   * @param {Vector3} p1 - Ending point.
+   * @param {boolean} [adjust=false] - If movement should be adjusted considering camera distance (Perspective only).
+   * @returns {Object}
+   */
+  pan(p0, p1, adjust = false) {
+    const movement = p0.clone().sub(p1);
+    if (this.object.isOrthographicCamera) {
+      movement.multiplyScalar(1 / this.object.zoom);
+    } else if (this.object.isPerspectiveCamera && adjust) {
+      this._v3_1.setFromMatrixPosition(this._cameraMatrixState0);
+      this._v3_2.setFromMatrixPosition(this._gizmoMatrixState0);
+      const distanceFactor = this._v3_1.distanceTo(this._v3_2) / this.object.position.distanceTo(this._gizmos.position);
+      movement.multiplyScalar(1 / distanceFactor);
+    }
+    this._v3_1.set(movement.x, movement.y, 0).applyQuaternion(this.object.quaternion);
+    this._m4_1.makeTranslation(this._v3_1.x, this._v3_1.y, this._v3_1.z);
+    this.setTransformationMatrices(this._m4_1, this._m4_1);
+    return _transformation;
+  }
+  /**
+   * Resets the controls.
+   */
+  reset() {
+    this.target.copy(this._target0);
+    this.object.zoom = this._zoom0;
+    if (this.object.isPerspectiveCamera) {
+      this.object.fov = this._fov0;
+    }
+    this.object.near = this._nearPos;
+    this.object.far = this._farPos;
+    this._cameraMatrixState.copy(this._cameraMatrixState0);
+    this._cameraMatrixState.decompose(this.object.position, this.object.quaternion, this.object.scale);
+    this.object.up.copy(this._up0);
+    this.object.updateMatrix();
+    this.object.updateProjectionMatrix();
+    this._gizmoMatrixState.copy(this._gizmoMatrixState0);
+    this._gizmoMatrixState0.decompose(this._gizmos.position, this._gizmos.quaternion, this._gizmos.scale);
+    this._gizmos.updateMatrix();
+    this._tbRadius = this.calculateTbRadius(this.object);
+    this.makeGizmos(this._gizmos.position, this._tbRadius);
+    this.object.lookAt(this._gizmos.position);
+    this.updateTbState(STATE.IDLE, false);
+    this.dispatchEvent(_changeEvent);
+  }
+  /**
+   * Rotates the camera around an axis passing by trackball's center.
+   *
+   * @private
+   * @param {Vector3} axis - Rotation axis.
+   * @param {number} angle - Angle in radians.
+   * @returns {Object} Object with 'camera' field containing transformation matrix resulting from the operation to be applied to the camera.
+   */
+  rotate(axis, angle) {
+    const point = this._gizmos.position;
+    this._translationMatrix.makeTranslation(-point.x, -point.y, -point.z);
+    this._rotationMatrix.makeRotationAxis(axis, -angle);
+    this._m4_1.makeTranslation(point.x, point.y, point.z);
+    this._m4_1.multiply(this._rotationMatrix);
+    this._m4_1.multiply(this._translationMatrix);
+    this.setTransformationMatrices(this._m4_1);
+    return _transformation;
+  }
+  /**
+   * Copy the current state to clipboard (as a readable JSON text).
+   */
+  copyState() {
+    let state;
+    if (this.object.isOrthographicCamera) {
+      state = JSON.stringify({
+        arcballState: {
+          cameraFar: this.object.far,
+          cameraMatrix: this.object.matrix,
+          cameraNear: this.object.near,
+          cameraUp: this.object.up,
+          cameraZoom: this.object.zoom,
+          gizmoMatrix: this._gizmos.matrix,
+          target: this.target
+        }
+      });
+    } else if (this.object.isPerspectiveCamera) {
+      state = JSON.stringify({
+        arcballState: {
+          cameraFar: this.object.far,
+          cameraFov: this.object.fov,
+          cameraMatrix: this.object.matrix,
+          cameraNear: this.object.near,
+          cameraUp: this.object.up,
+          cameraZoom: this.object.zoom,
+          gizmoMatrix: this._gizmos.matrix,
+          target: this.target
+        }
+      });
+    }
+    navigator.clipboard.writeText(state);
+  }
+  /**
+   * Set the controls state from the clipboard, assumes that the clipboard stores a JSON
+   * text as saved from `copyState()`.
+   */
+  pasteState() {
+    const self2 = this;
+    navigator.clipboard.readText().then(function resolved(value) {
+      self2.setStateFromJSON(value);
+    });
+  }
+  /**
+   * Saves the current state of the control. This can later be recover with `reset()`.
+   */
+  saveState() {
+    this.object.updateMatrix();
+    this._gizmos.updateMatrix();
+    this._target0.copy(this.target);
+    this._cameraMatrixState0.copy(this.object.matrix);
+    this._gizmoMatrixState0.copy(this._gizmos.matrix);
+    this._nearPos = this.object.near;
+    this._farPos = this.object.far;
+    this._zoom0 = this.object.zoom;
+    this._up0.copy(this.object.up);
+    if (this.object.isPerspectiveCamera) {
+      this._fov0 = this.object.fov;
+    }
+  }
+  /**
+   * Performs uniform scale operation around a given point.
+   *
+   * @private
+   * @param {number} size - Scale factor.
+   * @param {Vector3} point - Point around which scale.
+   * @param {boolean} scaleGizmos - If gizmos should be scaled (Perspective only).
+   * @returns {Object} Object with 'camera' and 'gizmo' fields containing transformation matrices resulting from the operation to be applied to the camera and gizmos.
+   */
+  scale(size, point, scaleGizmos = true) {
+    _scalePointTemp.copy(point);
+    let sizeInverse = 1 / size;
+    if (this.object.isOrthographicCamera) {
+      this.object.zoom = this._zoomState;
+      this.object.zoom *= size;
+      if (this.object.zoom > this.maxZoom) {
+        this.object.zoom = this.maxZoom;
+        sizeInverse = this._zoomState / this.maxZoom;
+      } else if (this.object.zoom < this.minZoom) {
+        this.object.zoom = this.minZoom;
+        sizeInverse = this._zoomState / this.minZoom;
+      }
+      this.object.updateProjectionMatrix();
+      this._v3_1.setFromMatrixPosition(this._gizmoMatrixState);
+      this._scaleMatrix.makeScale(sizeInverse, sizeInverse, sizeInverse);
+      this._translationMatrix.makeTranslation(-this._v3_1.x, -this._v3_1.y, -this._v3_1.z);
+      this._m4_2.makeTranslation(this._v3_1.x, this._v3_1.y, this._v3_1.z).multiply(this._scaleMatrix);
+      this._m4_2.multiply(this._translationMatrix);
+      _scalePointTemp.sub(this._v3_1);
+      const amount = _scalePointTemp.clone().multiplyScalar(sizeInverse);
+      _scalePointTemp.sub(amount);
+      this._m4_1.makeTranslation(_scalePointTemp.x, _scalePointTemp.y, _scalePointTemp.z);
+      this._m4_2.premultiply(this._m4_1);
+      this.setTransformationMatrices(this._m4_1, this._m4_2);
+      return _transformation;
+    } else if (this.object.isPerspectiveCamera) {
+      this._v3_1.setFromMatrixPosition(this._cameraMatrixState);
+      this._v3_2.setFromMatrixPosition(this._gizmoMatrixState);
+      let distance = this._v3_1.distanceTo(_scalePointTemp);
+      let amount = distance - distance * sizeInverse;
+      const newDistance = distance - amount;
+      if (newDistance < this.minDistance) {
+        sizeInverse = this.minDistance / distance;
+        amount = distance - distance * sizeInverse;
+      } else if (newDistance > this.maxDistance) {
+        sizeInverse = this.maxDistance / distance;
+        amount = distance - distance * sizeInverse;
+      }
+      _offset2.copy(_scalePointTemp).sub(this._v3_1).normalize().multiplyScalar(amount);
+      this._m4_1.makeTranslation(_offset2.x, _offset2.y, _offset2.z);
+      if (scaleGizmos) {
+        const pos = this._v3_2;
+        distance = pos.distanceTo(_scalePointTemp);
+        amount = distance - distance * sizeInverse;
+        _offset2.copy(_scalePointTemp).sub(this._v3_2).normalize().multiplyScalar(amount);
+        this._translationMatrix.makeTranslation(pos.x, pos.y, pos.z);
+        this._scaleMatrix.makeScale(sizeInverse, sizeInverse, sizeInverse);
+        this._m4_2.makeTranslation(_offset2.x, _offset2.y, _offset2.z).multiply(this._translationMatrix);
+        this._m4_2.multiply(this._scaleMatrix);
+        this._translationMatrix.makeTranslation(-pos.x, -pos.y, -pos.z);
+        this._m4_2.multiply(this._translationMatrix);
+        this.setTransformationMatrices(this._m4_1, this._m4_2);
+      } else {
+        this.setTransformationMatrices(this._m4_1);
+      }
+      return _transformation;
+    }
+  }
+  /**
+   * Sets camera fov.
+   *
+   * @private
+   * @param {number} value - The FOV to be set.
+   */
+  setFov(value) {
+    if (this.object.isPerspectiveCamera) {
+      this.object.fov = MathUtils.clamp(value, this.minFov, this.maxFov);
+      this.object.updateProjectionMatrix();
+    }
+  }
+  /**
+   * Sets values in transformation object.
+   *
+   * @private
+   * @param {?Matrix4} [camera=null] - Transformation to be applied to the camera.
+   * @param {?Matrix4} [gizmos=null] - Transformation to be applied to gizmos.
+   */
+  setTransformationMatrices(camera = null, gizmos = null) {
+    if (camera != null) {
+      if (_transformation.camera != null) {
+        _transformation.camera.copy(camera);
+      } else {
+        _transformation.camera = camera.clone();
+      }
+    } else {
+      _transformation.camera = null;
+    }
+    if (gizmos != null) {
+      if (_transformation.gizmos != null) {
+        _transformation.gizmos.copy(gizmos);
+      } else {
+        _transformation.gizmos = gizmos.clone();
+      }
+    } else {
+      _transformation.gizmos = null;
+    }
+  }
+  /**
+   * Rotates camera around its direction axis passing by a given point by a given angle.
+   *
+   * @private
+   * @param {Vector3} point - The point where the rotation axis is passing through.
+   * @param {number} angle - Angle in radians.
+   * @returns {Object} The computed transformation matrix.
+   */
+  zRotate(point, angle) {
+    this._rotationMatrix.makeRotationAxis(this._rotationAxis, angle);
+    this._translationMatrix.makeTranslation(-point.x, -point.y, -point.z);
+    this._m4_1.makeTranslation(point.x, point.y, point.z);
+    this._m4_1.multiply(this._rotationMatrix);
+    this._m4_1.multiply(this._translationMatrix);
+    this._v3_1.setFromMatrixPosition(this._gizmoMatrixState).sub(point);
+    this._v3_2.copy(this._v3_1).applyAxisAngle(this._rotationAxis, angle);
+    this._v3_2.sub(this._v3_1);
+    this._m4_2.makeTranslation(this._v3_2.x, this._v3_2.y, this._v3_2.z);
+    this.setTransformationMatrices(this._m4_1, this._m4_2);
+    return _transformation;
+  }
+  /**
+   * Returns the raycaster that is used for user interaction. This object is shared between all
+   * instances of `ArcballControls`.
+   *
+   * @returns {Raycaster} The internal raycaster.
+   */
+  getRaycaster() {
+    return _raycaster;
+  }
+  /**
+   * Unprojects the cursor on the 3D object surface.
+   *
+   * @private
+   * @param {Vector2} cursor - Cursor coordinates in NDC.
+   * @param {Camera} camera - Virtual camera.
+   * @returns {?Vector3} The point of intersection with the model, if exist, null otherwise.
+   */
+  unprojectOnObj(cursor, camera) {
+    const raycaster = this.getRaycaster();
+    raycaster.near = camera.near;
+    raycaster.far = camera.far;
+    raycaster.setFromCamera(cursor, camera);
+    const intersect2 = raycaster.intersectObjects(this.scene.children, true);
+    for (let i = 0; i < intersect2.length; i++) {
+      if (intersect2[i].object.uuid != this._gizmos.uuid && intersect2[i].face != null) {
+        return intersect2[i].point.clone();
+      }
+    }
+    return null;
+  }
+  /**
+   * Unproject the cursor on the trackball surface.
+   *
+   * @private
+   * @param {Camera} camera - The virtual camera.
+   * @param {number} cursorX - Cursor horizontal coordinate on screen.
+   * @param {number} cursorY - Cursor vertical coordinate on screen.
+   * @param {HTMLElement} canvas - The canvas where the renderer draws its output.
+   * @param {number} tbRadius - The trackball radius.
+   * @returns {Vector3} The unprojected point on the trackball surface.
+   */
+  unprojectOnTbSurface(camera, cursorX, cursorY, canvas, tbRadius) {
+    if (camera.type == "OrthographicCamera") {
+      this._v2_1.copy(this.getCursorPosition(cursorX, cursorY, canvas));
+      this._v3_1.set(this._v2_1.x, this._v2_1.y, 0);
+      const x2 = Math.pow(this._v2_1.x, 2);
+      const y2 = Math.pow(this._v2_1.y, 2);
+      const r2 = Math.pow(this._tbRadius, 2);
+      if (x2 + y2 <= r2 * 0.5) {
+        this._v3_1.setZ(Math.sqrt(r2 - (x2 + y2)));
+      } else {
+        this._v3_1.setZ(r2 * 0.5 / Math.sqrt(x2 + y2));
+      }
+      return this._v3_1;
+    } else if (camera.type == "PerspectiveCamera") {
+      this._v2_1.copy(this.getCursorNDC(cursorX, cursorY, canvas));
+      this._v3_1.set(this._v2_1.x, this._v2_1.y, -1);
+      this._v3_1.applyMatrix4(camera.projectionMatrixInverse);
+      const rayDir = this._v3_1.clone().normalize();
+      const cameraGizmoDistance = camera.position.distanceTo(this._gizmos.position);
+      const radius2 = Math.pow(tbRadius, 2);
+      const h = this._v3_1.z;
+      const l = Math.sqrt(Math.pow(this._v3_1.x, 2) + Math.pow(this._v3_1.y, 2));
+      if (l == 0) {
+        rayDir.set(this._v3_1.x, this._v3_1.y, tbRadius);
+        return rayDir;
+      }
+      const m = h / l;
+      const q = cameraGizmoDistance;
+      let a = Math.pow(m, 2) + 1;
+      let b = 2 * m * q;
+      let c = Math.pow(q, 2) - radius2;
+      let delta = Math.pow(b, 2) - 4 * a * c;
+      if (delta >= 0) {
+        this._v2_1.setX((-b - Math.sqrt(delta)) / (2 * a));
+        this._v2_1.setY(m * this._v2_1.x + q);
+        const angle = MathUtils.RAD2DEG * this._v2_1.angle();
+        if (angle >= 45) {
+          const rayLength2 = Math.sqrt(Math.pow(this._v2_1.x, 2) + Math.pow(cameraGizmoDistance - this._v2_1.y, 2));
+          rayDir.multiplyScalar(rayLength2);
+          rayDir.z += cameraGizmoDistance;
+          return rayDir;
+        }
+      }
+      a = m;
+      b = q;
+      c = -radius2 * 0.5;
+      delta = Math.pow(b, 2) - 4 * a * c;
+      this._v2_1.setX((-b - Math.sqrt(delta)) / (2 * a));
+      this._v2_1.setY(m * this._v2_1.x + q);
+      const rayLength = Math.sqrt(Math.pow(this._v2_1.x, 2) + Math.pow(cameraGizmoDistance - this._v2_1.y, 2));
+      rayDir.multiplyScalar(rayLength);
+      rayDir.z += cameraGizmoDistance;
+      return rayDir;
+    }
+  }
+  /**
+   * Unprojects the cursor on the plane passing through the center of the trackball orthogonal to the camera.
+   *
+   * @private
+   * @param {Camera} camera - The virtual camera.
+   * @param {number} cursorX - Cursor horizontal coordinate on screen.
+   * @param {number} cursorY - Cursor vertical coordinate on screen.
+   * @param {HTMLElement} canvas - The canvas where the renderer draws its output.
+   * @param {boolean} [initialDistance=false] - If initial distance between camera and gizmos should be used for calculations instead of current (Perspective only).
+   * @returns {Vector3} The unprojected point on the trackball plane.
+   */
+  unprojectOnTbPlane(camera, cursorX, cursorY, canvas, initialDistance = false) {
+    if (camera.type == "OrthographicCamera") {
+      this._v2_1.copy(this.getCursorPosition(cursorX, cursorY, canvas));
+      this._v3_1.set(this._v2_1.x, this._v2_1.y, 0);
+      return this._v3_1.clone();
+    } else if (camera.type == "PerspectiveCamera") {
+      this._v2_1.copy(this.getCursorNDC(cursorX, cursorY, canvas));
+      this._v3_1.set(this._v2_1.x, this._v2_1.y, -1);
+      this._v3_1.applyMatrix4(camera.projectionMatrixInverse);
+      const rayDir = this._v3_1.clone().normalize();
+      const h = this._v3_1.z;
+      const l = Math.sqrt(Math.pow(this._v3_1.x, 2) + Math.pow(this._v3_1.y, 2));
+      let cameraGizmoDistance;
+      if (initialDistance) {
+        cameraGizmoDistance = this._v3_1.setFromMatrixPosition(this._cameraMatrixState0).distanceTo(this._v3_2.setFromMatrixPosition(this._gizmoMatrixState0));
+      } else {
+        cameraGizmoDistance = camera.position.distanceTo(this._gizmos.position);
+      }
+      if (l == 0) {
+        rayDir.set(0, 0, 0);
+        return rayDir;
+      }
+      const m = h / l;
+      const q = cameraGizmoDistance;
+      const x = -q / m;
+      const rayLength = Math.sqrt(Math.pow(q, 2) + Math.pow(x, 2));
+      rayDir.multiplyScalar(rayLength);
+      rayDir.z = 0;
+      return rayDir;
+    }
+  }
+  /**
+   * Updates camera and gizmos state.
+   *
+   * @private
+   */
+  updateMatrixState() {
+    this._cameraMatrixState.copy(this.object.matrix);
+    this._gizmoMatrixState.copy(this._gizmos.matrix);
+    if (this.object.isOrthographicCamera) {
+      this._cameraProjectionState.copy(this.object.projectionMatrix);
+      this.object.updateProjectionMatrix();
+      this._zoomState = this.object.zoom;
+    } else if (this.object.isPerspectiveCamera) {
+      this._fovState = this.object.fov;
+    }
+  }
+  /**
+   * Updates the trackball FSA.
+   *
+   * @private
+   * @param {STATE} newState - New state of the FSA.
+   * @param {boolean} updateMatrices - If matrices state should be updated.
+   */
+  updateTbState(newState, updateMatrices) {
+    this._state = newState;
+    if (updateMatrices) {
+      this.updateMatrixState();
+    }
+  }
+  update() {
+    if (this.target.equals(this._currentTarget) === false) {
+      this._gizmos.position.copy(this.target);
+      this._tbRadius = this.calculateTbRadius(this.object);
+      this.makeGizmos(this.target, this._tbRadius);
+      this._currentTarget.copy(this.target);
+    }
+    if (this.object.isOrthographicCamera) {
+      if (this.object.zoom > this.maxZoom || this.object.zoom < this.minZoom) {
+        const newZoom = MathUtils.clamp(this.object.zoom, this.minZoom, this.maxZoom);
+        this.applyTransformMatrix(this.scale(newZoom / this.object.zoom, this._gizmos.position, true));
+      }
+    } else if (this.object.isPerspectiveCamera) {
+      const distance = this.object.position.distanceTo(this._gizmos.position);
+      if (distance > this.maxDistance + _EPS || distance < this.minDistance - _EPS) {
+        const newDistance = MathUtils.clamp(distance, this.minDistance, this.maxDistance);
+        this.applyTransformMatrix(this.scale(newDistance / distance, this._gizmos.position));
+        this.updateMatrixState();
+      }
+      if (this.object.fov < this.minFov || this.object.fov > this.maxFov) {
+        this.object.fov = MathUtils.clamp(this.object.fov, this.minFov, this.maxFov);
+        this.object.updateProjectionMatrix();
+      }
+      const oldRadius = this._tbRadius;
+      this._tbRadius = this.calculateTbRadius(this.object);
+      if (oldRadius < this._tbRadius - _EPS || oldRadius > this._tbRadius + _EPS) {
+        const scale = (this._gizmos.scale.x + this._gizmos.scale.y + this._gizmos.scale.z) / 3;
+        const newRadius = this._tbRadius / scale;
+        const curve = new EllipseCurve(0, 0, newRadius, newRadius);
+        const points = curve.getPoints(this._curvePts);
+        const curveGeometry = new BufferGeometry().setFromPoints(points);
+        for (const gizmo in this._gizmos.children) {
+          this._gizmos.children[gizmo].geometry = curveGeometry;
+        }
+      }
+    }
+    this.object.lookAt(this._gizmos.position);
+  }
+  setStateFromJSON(json) {
+    const state = JSON.parse(json);
+    if (state.arcballState != void 0) {
+      this.target.fromArray(state.arcballState.target);
+      this._cameraMatrixState.fromArray(state.arcballState.cameraMatrix.elements);
+      this._cameraMatrixState.decompose(this.object.position, this.object.quaternion, this.object.scale);
+      this.object.up.copy(state.arcballState.cameraUp);
+      this.object.near = state.arcballState.cameraNear;
+      this.object.far = state.arcballState.cameraFar;
+      this.object.zoom = state.arcballState.cameraZoom;
+      if (this.object.isPerspectiveCamera) {
+        this.object.fov = state.arcballState.cameraFov;
+      }
+      this._gizmoMatrixState.fromArray(state.arcballState.gizmoMatrix.elements);
+      this._gizmoMatrixState.decompose(this._gizmos.position, this._gizmos.quaternion, this._gizmos.scale);
+      this.object.updateMatrix();
+      this.object.updateProjectionMatrix();
+      this._gizmos.updateMatrix();
+      this._tbRadius = this.calculateTbRadius(this.object);
+      const gizmoTmp = new Matrix4().copy(this._gizmoMatrixState0);
+      this.makeGizmos(this._gizmos.position, this._tbRadius);
+      this._gizmoMatrixState0.copy(gizmoTmp);
+      this.object.lookAt(this._gizmos.position);
+      this.updateTbState(STATE.IDLE, false);
+      this.dispatchEvent(_changeEvent);
+    }
+  }
+};
+function onWindowResize() {
+  const scale = (this._gizmos.scale.x + this._gizmos.scale.y + this._gizmos.scale.z) / 3;
+  this._tbRadius = this.calculateTbRadius(this.object);
+  const newRadius = this._tbRadius / scale;
+  const curve = new EllipseCurve(0, 0, newRadius, newRadius);
+  const points = curve.getPoints(this._curvePts);
+  const curveGeometry = new BufferGeometry().setFromPoints(points);
+  for (const gizmo in this._gizmos.children) {
+    this._gizmos.children[gizmo].geometry = curveGeometry;
+  }
+  this.dispatchEvent(_changeEvent);
+}
+function onContextMenu(event) {
+  if (!this.enabled) {
+    return;
+  }
+  for (let i = 0; i < this.mouseActions.length; i++) {
+    if (this.mouseActions[i].mouse == 2) {
+      event.preventDefault();
+      break;
+    }
+  }
+}
+function onPointerCancel() {
+  this._touchStart.splice(0, this._touchStart.length);
+  this._touchCurrent.splice(0, this._touchCurrent.length);
+  this._input = INPUT.NONE;
+}
+function onPointerDown(event) {
+  if (event.button == 0 && event.isPrimary) {
+    this._downValid = true;
+    this._downEvents.push(event);
+    this._downStart = performance.now();
+  } else {
+    this._downValid = false;
+  }
+  if (event.pointerType == "touch" && this._input != INPUT.CURSOR) {
+    this._touchStart.push(event);
+    this._touchCurrent.push(event);
+    switch (this._input) {
+      case INPUT.NONE:
+        this._input = INPUT.ONE_FINGER;
+        this.onSinglePanStart(event, "ROTATE");
+        window.addEventListener("pointermove", this._onPointerMove);
+        window.addEventListener("pointerup", this._onPointerUp);
+        break;
+      case INPUT.ONE_FINGER:
+      case INPUT.ONE_FINGER_SWITCHED:
+        this._input = INPUT.TWO_FINGER;
+        this.onRotateStart();
+        this.onPinchStart();
+        this.onDoublePanStart();
+        break;
+      case INPUT.TWO_FINGER:
+        this._input = INPUT.MULT_FINGER;
+        this.onTriplePanStart(event);
+        break;
+    }
+  } else if (event.pointerType != "touch" && this._input == INPUT.NONE) {
+    let modifier = null;
+    if (event.ctrlKey || event.metaKey) {
+      modifier = "CTRL";
+    } else if (event.shiftKey) {
+      modifier = "SHIFT";
+    }
+    this._mouseOp = this.getOpFromAction(event.button, modifier);
+    if (this._mouseOp != null) {
+      window.addEventListener("pointermove", this._onPointerMove);
+      window.addEventListener("pointerup", this._onPointerUp);
+      this._input = INPUT.CURSOR;
+      this._button = event.button;
+      this.onSinglePanStart(event, this._mouseOp);
+    }
+  }
+}
+function onPointerMove(event) {
+  if (event.pointerType == "touch" && this._input != INPUT.CURSOR) {
+    switch (this._input) {
+      case INPUT.ONE_FINGER:
+        this.updateTouchEvent(event);
+        this.onSinglePanMove(event, STATE.ROTATE);
+        break;
+      case INPUT.ONE_FINGER_SWITCHED:
+        const movement = this.calculatePointersDistance(this._touchCurrent[0], event) * this._devPxRatio;
+        if (movement >= this._switchSensibility) {
+          this._input = INPUT.ONE_FINGER;
+          this.updateTouchEvent(event);
+          this.onSinglePanStart(event, "ROTATE");
+          break;
+        }
+        break;
+      case INPUT.TWO_FINGER:
+        this.updateTouchEvent(event);
+        this.onRotateMove();
+        this.onPinchMove();
+        this.onDoublePanMove();
+        break;
+      case INPUT.MULT_FINGER:
+        this.updateTouchEvent(event);
+        this.onTriplePanMove(event);
+        break;
+    }
+  } else if (event.pointerType != "touch" && this._input == INPUT.CURSOR) {
+    let modifier = null;
+    if (event.ctrlKey || event.metaKey) {
+      modifier = "CTRL";
+    } else if (event.shiftKey) {
+      modifier = "SHIFT";
+    }
+    const mouseOpState = this.getOpStateFromAction(this._button, modifier);
+    if (mouseOpState != null) {
+      this.onSinglePanMove(event, mouseOpState);
+    }
+  }
+  if (this._downValid) {
+    const movement = this.calculatePointersDistance(this._downEvents[this._downEvents.length - 1], event) * this._devPxRatio;
+    if (movement > this._movementThreshold) {
+      this._downValid = false;
+    }
+  }
+}
+function onPointerUp(event) {
+  if (event.pointerType == "touch" && this._input != INPUT.CURSOR) {
+    const nTouch = this._touchCurrent.length;
+    for (let i = 0; i < nTouch; i++) {
+      if (this._touchCurrent[i].pointerId == event.pointerId) {
+        this._touchCurrent.splice(i, 1);
+        this._touchStart.splice(i, 1);
+        break;
+      }
+    }
+    switch (this._input) {
+      case INPUT.ONE_FINGER:
+      case INPUT.ONE_FINGER_SWITCHED:
+        window.removeEventListener("pointermove", this._onPointerMove);
+        window.removeEventListener("pointerup", this._onPointerUp);
+        this._input = INPUT.NONE;
+        this.onSinglePanEnd();
+        break;
+      case INPUT.TWO_FINGER:
+        this.onDoublePanEnd(event);
+        this.onPinchEnd(event);
+        this.onRotateEnd(event);
+        this._input = INPUT.ONE_FINGER_SWITCHED;
+        break;
+      case INPUT.MULT_FINGER:
+        if (this._touchCurrent.length == 0) {
+          window.removeEventListener("pointermove", this._onPointerMove);
+          window.removeEventListener("pointerup", this._onPointerUp);
+          this._input = INPUT.NONE;
+          this.onTriplePanEnd();
+        }
+        break;
+    }
+  } else if (event.pointerType != "touch" && this._input == INPUT.CURSOR) {
+    window.removeEventListener("pointermove", this._onPointerMove);
+    window.removeEventListener("pointerup", this._onPointerUp);
+    this._input = INPUT.NONE;
+    this.onSinglePanEnd();
+    this._button = -1;
+  }
+  if (event.isPrimary) {
+    if (this._downValid) {
+      const downTime = event.timeStamp - this._downEvents[this._downEvents.length - 1].timeStamp;
+      if (downTime <= this._maxDownTime) {
+        if (this._nclicks == 0) {
+          this._nclicks = 1;
+          this._clickStart = performance.now();
+        } else {
+          const clickInterval = event.timeStamp - this._clickStart;
+          const movement = this.calculatePointersDistance(this._downEvents[1], this._downEvents[0]) * this._devPxRatio;
+          if (clickInterval <= this._maxInterval && movement <= this._posThreshold) {
+            this._nclicks = 0;
+            this._downEvents.splice(0, this._downEvents.length);
+            this.onDoubleTap(event);
+          } else {
+            this._nclicks = 1;
+            this._downEvents.shift();
+            this._clickStart = performance.now();
+          }
+        }
+      } else {
+        this._downValid = false;
+        this._nclicks = 0;
+        this._downEvents.splice(0, this._downEvents.length);
+      }
+    } else {
+      this._nclicks = 0;
+      this._downEvents.splice(0, this._downEvents.length);
+    }
+  }
+}
+function onWheel(event) {
+  if (this.enabled && this.enableZoom) {
+    let modifier = null;
+    if (event.ctrlKey || event.metaKey) {
+      modifier = "CTRL";
+    } else if (event.shiftKey) {
+      modifier = "SHIFT";
+    }
+    const mouseOp = this.getOpFromAction("WHEEL", modifier);
+    if (mouseOp != null) {
+      event.preventDefault();
+      this.dispatchEvent(_startEvent);
+      const notchDeltaY = 125;
+      let sgn = event.deltaY / notchDeltaY;
+      let size = 1;
+      if (sgn > 0) {
+        size = 1 / this.scaleFactor;
+      } else if (sgn < 0) {
+        size = this.scaleFactor;
+      }
+      switch (mouseOp) {
+        case "ZOOM":
+          this.updateTbState(STATE.SCALE, true);
+          if (sgn > 0) {
+            size = 1 / Math.pow(this.scaleFactor, sgn);
+          } else if (sgn < 0) {
+            size = Math.pow(this.scaleFactor, -sgn);
+          }
+          if (this.cursorZoom && this.enablePan) {
+            let scalePoint;
+            if (this.object.isOrthographicCamera) {
+              scalePoint = this.unprojectOnTbPlane(this.object, event.clientX, event.clientY, this.domElement).applyQuaternion(this.object.quaternion).multiplyScalar(1 / this.object.zoom).add(this._gizmos.position);
+            } else if (this.object.isPerspectiveCamera) {
+              scalePoint = this.unprojectOnTbPlane(this.object, event.clientX, event.clientY, this.domElement).applyQuaternion(this.object.quaternion).add(this._gizmos.position);
+            }
+            this.applyTransformMatrix(this.scale(size, scalePoint));
+          } else {
+            this.applyTransformMatrix(this.scale(size, this._gizmos.position));
+          }
+          if (this._grid != null) {
+            this.disposeGrid();
+            this.drawGrid();
+          }
+          this.updateTbState(STATE.IDLE, false);
+          this.dispatchEvent(_changeEvent);
+          this.dispatchEvent(_endEvent);
+          break;
+        case "FOV":
+          if (this.object.isPerspectiveCamera) {
+            this.updateTbState(STATE.FOV, true);
+            if (event.deltaX != 0) {
+              sgn = event.deltaX / notchDeltaY;
+              size = 1;
+              if (sgn > 0) {
+                size = 1 / Math.pow(this.scaleFactor, sgn);
+              } else if (sgn < 0) {
+                size = Math.pow(this.scaleFactor, -sgn);
+              }
+            }
+            this._v3_1.setFromMatrixPosition(this._cameraMatrixState);
+            const x = this._v3_1.distanceTo(this._gizmos.position);
+            let xNew = x / size;
+            xNew = MathUtils.clamp(xNew, this.minDistance, this.maxDistance);
+            const y = x * Math.tan(MathUtils.DEG2RAD * this.object.fov * 0.5);
+            let newFov = MathUtils.RAD2DEG * (Math.atan(y / xNew) * 2);
+            if (newFov > this.maxFov) {
+              newFov = this.maxFov;
+            } else if (newFov < this.minFov) {
+              newFov = this.minFov;
+            }
+            const newDistance = y / Math.tan(MathUtils.DEG2RAD * (newFov / 2));
+            size = x / newDistance;
+            this.setFov(newFov);
+            this.applyTransformMatrix(this.scale(size, this._gizmos.position, false));
+          }
+          if (this._grid != null) {
+            this.disposeGrid();
+            this.drawGrid();
+          }
+          this.updateTbState(STATE.IDLE, false);
+          this.dispatchEvent(_changeEvent);
+          this.dispatchEvent(_endEvent);
+          break;
+      }
+    }
+  }
+}
+
+// node_modules/three/examples/jsm/controls/OrbitControls.js
+var _changeEvent2 = { type: "change" };
+var _startEvent2 = { type: "start" };
+var _endEvent2 = { type: "end" };
 var _ray = new Ray();
 var _plane = new Plane();
 var _TILT_LIMIT = Math.cos(70 * MathUtils.DEG2RAD);
@@ -28480,7 +31646,7 @@ var _STATE = {
   TOUCH_DOLLY_PAN: 5,
   TOUCH_DOLLY_ROTATE: 6
 };
-var _EPS = 1e-6;
+var _EPS2 = 1e-6;
 var OrbitControls = class extends Controls {
   /**
    * Constructs a new controls instance.
@@ -28549,10 +31715,10 @@ var OrbitControls = class extends Controls {
     this._pointers = [];
     this._pointerPositions = {};
     this._controlActive = false;
-    this._onPointerMove = onPointerMove.bind(this);
-    this._onPointerDown = onPointerDown.bind(this);
-    this._onPointerUp = onPointerUp.bind(this);
-    this._onContextMenu = onContextMenu.bind(this);
+    this._onPointerMove = onPointerMove2.bind(this);
+    this._onPointerDown = onPointerDown2.bind(this);
+    this._onPointerUp = onPointerUp2.bind(this);
+    this._onContextMenu = onContextMenu2.bind(this);
     this._onMouseWheel = onMouseWheel.bind(this);
     this._onKeyDown = onKeyDown.bind(this);
     this._onTouchStart = onTouchStart.bind(this);
@@ -28674,7 +31840,7 @@ var OrbitControls = class extends Controls {
     this.object.position.copy(this.position0);
     this.object.zoom = this.zoom0;
     this.object.updateProjectionMatrix();
-    this.dispatchEvent(_changeEvent);
+    this.dispatchEvent(_changeEvent2);
     this.update();
     this.state = _STATE.NONE;
   }
@@ -28831,8 +31997,8 @@ var OrbitControls = class extends Controls {
     }
     this._scale = 1;
     this._performCursorZoom = false;
-    if (zoomChanged || this._lastPosition.distanceToSquared(this.object.position) > _EPS || 8 * (1 - this._lastQuaternion.dot(this.object.quaternion)) > _EPS || this._lastTargetPosition.distanceToSquared(this.target) > _EPS) {
-      this.dispatchEvent(_changeEvent);
+    if (zoomChanged || this._lastPosition.distanceToSquared(this.object.position) > _EPS2 || 8 * (1 - this._lastQuaternion.dot(this.object.quaternion)) > _EPS2 || this._lastTargetPosition.distanceToSquared(this.target) > _EPS2) {
+      this.dispatchEvent(_changeEvent2);
       this._lastPosition.copy(this.object.position);
       this._lastQuaternion.copy(this.object.quaternion);
       this._lastTargetPosition.copy(this.target);
@@ -29166,7 +32332,7 @@ var OrbitControls = class extends Controls {
     return newEvent;
   }
 };
-function onPointerDown(event) {
+function onPointerDown2(event) {
   if (this.enabled === false) return;
   if (this._pointers.length === 0) {
     this.domElement.setPointerCapture(event.pointerId);
@@ -29184,7 +32350,7 @@ function onPointerDown(event) {
     this.domElement.style.cursor = "grabbing";
   }
 }
-function onPointerMove(event) {
+function onPointerMove2(event) {
   if (this.enabled === false) return;
   if (event.pointerType === "touch") {
     this._onTouchMove(event);
@@ -29192,14 +32358,14 @@ function onPointerMove(event) {
     this._onMouseMove(event);
   }
 }
-function onPointerUp(event) {
+function onPointerUp2(event) {
   this._removePointer(event);
   switch (this._pointers.length) {
     case 0:
       this.domElement.releasePointerCapture(event.pointerId);
       this.domElement.ownerDocument.removeEventListener("pointermove", this._onPointerMove);
       this.domElement.ownerDocument.removeEventListener("pointerup", this._onPointerUp);
-      this.dispatchEvent(_endEvent);
+      this.dispatchEvent(_endEvent2);
       this.state = _STATE.NONE;
       if (this._cursorStyle === "grab") {
         this.domElement.style.cursor = "grab";
@@ -29259,7 +32425,7 @@ function onMouseDown(event) {
       this.state = _STATE.NONE;
   }
   if (this.state !== _STATE.NONE) {
-    this.dispatchEvent(_startEvent);
+    this.dispatchEvent(_startEvent2);
   }
 }
 function onMouseMove(event) {
@@ -29281,9 +32447,9 @@ function onMouseMove(event) {
 function onMouseWheel(event) {
   if (this.enabled === false || this.enableZoom === false || this.state !== _STATE.NONE) return;
   event.preventDefault();
-  this.dispatchEvent(_startEvent);
+  this.dispatchEvent(_startEvent2);
   this._handleMouseWheel(this._customWheelEvent(event));
-  this.dispatchEvent(_endEvent);
+  this.dispatchEvent(_endEvent2);
 }
 function onKeyDown(event) {
   if (this.enabled === false) return;
@@ -29328,7 +32494,7 @@ function onTouchStart(event) {
       this.state = _STATE.NONE;
   }
   if (this.state !== _STATE.NONE) {
-    this.dispatchEvent(_startEvent);
+    this.dispatchEvent(_startEvent2);
   }
 }
 function onTouchMove(event) {
@@ -29358,7 +32524,7 @@ function onTouchMove(event) {
       this.state = _STATE.NONE;
   }
 }
-function onContextMenu(event) {
+function onContextMenu2(event) {
   if (this.enabled === false) return;
   event.preventDefault();
 }
@@ -29377,16 +32543,706 @@ function interceptControlUp(event) {
   }
 }
 
+// node_modules/three/examples/jsm/controls/TrackballControls.js
+var _changeEvent3 = { type: "change" };
+var _startEvent3 = { type: "start" };
+var _endEvent3 = { type: "end" };
+var _EPS3 = 1e-6;
+var _STATE2 = { NONE: -1, ROTATE: 0, ZOOM: 1, PAN: 2, TOUCH_ROTATE: 3, TOUCH_ZOOM_PAN: 4 };
+var _v2 = new Vector2();
+var _mouseChange = new Vector2();
+var _objectUp = new Vector3();
+var _pan = new Vector3();
+var _axis = new Vector3();
+var _quaternion = new Quaternion();
+var _eyeDirection = new Vector3();
+var _objectUpDirection = new Vector3();
+var _objectSidewaysDirection = new Vector3();
+var _moveDirection = new Vector3();
+var TrackballControls = class extends Controls {
+  /**
+   * Constructs a new controls instance.
+   *
+   * @param {Object3D} object - The object that is managed by the controls.
+   * @param {?HTMLElement} domElement - The HTML element used for event listeners.
+   */
+  constructor(object, domElement = null) {
+    super(object, domElement);
+    this.screen = { left: 0, top: 0, width: 0, height: 0 };
+    this.rotateSpeed = 1;
+    this.zoomSpeed = 1.2;
+    this.panSpeed = 0.3;
+    this.rollSpeed = 1;
+    this.noRotate = false;
+    this.noZoom = false;
+    this.noPan = false;
+    this.multiTouchRoll = false;
+    this.staticMoving = false;
+    this.dynamicDampingFactor = 0.2;
+    this.minDistance = 0;
+    this.maxDistance = Infinity;
+    this.minZoom = 0;
+    this.maxZoom = Infinity;
+    this.keys = [
+      "KeyA",
+      "KeyS",
+      "KeyD"
+      /*D*/
+    ];
+    this.mouseButtons = { LEFT: MOUSE.ROTATE, MIDDLE: MOUSE.DOLLY, RIGHT: MOUSE.PAN };
+    this.target = new Vector3();
+    this.state = _STATE2.NONE;
+    this.keyState = _STATE2.NONE;
+    this._lastPosition = new Vector3();
+    this._lastUp = new Vector3();
+    this._lastZoom = 1;
+    this._touchZoomDistanceStart = 0;
+    this._touchZoomDistanceEnd = 0;
+    this._touchRollAngle = 0;
+    this._touchRollPointerIds = "";
+    this._lastAngle = 0;
+    this._lastRollAngle = 0;
+    this._eye = new Vector3();
+    this._movePrev = new Vector2();
+    this._moveCurr = new Vector2();
+    this._lastAxis = new Vector3();
+    this._zoomStart = new Vector2();
+    this._zoomEnd = new Vector2();
+    this._panStart = new Vector2();
+    this._panEnd = new Vector2();
+    this._pointers = [];
+    this._pointerPositions = {};
+    this._onPointerMove = onPointerMove3.bind(this);
+    this._onPointerDown = onPointerDown3.bind(this);
+    this._onPointerUp = onPointerUp3.bind(this);
+    this._onPointerCancel = onPointerCancel2.bind(this);
+    this._onContextMenu = onContextMenu3.bind(this);
+    this._onMouseWheel = onMouseWheel2.bind(this);
+    this._onKeyDown = onKeyDown2.bind(this);
+    this._onKeyUp = onKeyUp.bind(this);
+    this._onTouchStart = onTouchStart2.bind(this);
+    this._onTouchMove = onTouchMove2.bind(this);
+    this._onTouchEnd = onTouchEnd.bind(this);
+    this._onMouseDown = onMouseDown2.bind(this);
+    this._onMouseMove = onMouseMove2.bind(this);
+    this._onMouseUp = onMouseUp.bind(this);
+    this._target0 = this.target.clone();
+    this._position0 = this.object.position.clone();
+    this._up0 = this.object.up.clone();
+    this._zoom0 = this.object.zoom;
+    if (domElement !== null) {
+      this.connect(domElement);
+      this.handleResize();
+    }
+    this.update();
+  }
+  connect(element) {
+    super.connect(element);
+    window.addEventListener("keydown", this._onKeyDown);
+    window.addEventListener("keyup", this._onKeyUp);
+    this.domElement.addEventListener("pointerdown", this._onPointerDown);
+    this.domElement.addEventListener("pointercancel", this._onPointerCancel);
+    this.domElement.addEventListener("wheel", this._onMouseWheel, { passive: false });
+    this.domElement.addEventListener("contextmenu", this._onContextMenu);
+    this.domElement.style.touchAction = "none";
+  }
+  disconnect() {
+    window.removeEventListener("keydown", this._onKeyDown);
+    window.removeEventListener("keyup", this._onKeyUp);
+    this.domElement.removeEventListener("pointerdown", this._onPointerDown);
+    this.domElement.ownerDocument.removeEventListener("pointermove", this._onPointerMove);
+    this.domElement.ownerDocument.removeEventListener("pointerup", this._onPointerUp);
+    this.domElement.removeEventListener("pointercancel", this._onPointerCancel);
+    this.domElement.removeEventListener("wheel", this._onMouseWheel);
+    this.domElement.removeEventListener("contextmenu", this._onContextMenu);
+    this.domElement.style.touchAction = "";
+  }
+  dispose() {
+    this.disconnect();
+  }
+  /**
+   * Must be called if the application window is resized.
+   */
+  handleResize() {
+    const box = this.domElement.getBoundingClientRect();
+    const d = this.domElement.ownerDocument.documentElement;
+    this.screen.left = box.left + window.pageXOffset - d.clientLeft;
+    this.screen.top = box.top + window.pageYOffset - d.clientTop;
+    this.screen.width = box.width;
+    this.screen.height = box.height;
+  }
+  update() {
+    this._eye.subVectors(this.object.position, this.target);
+    if (!this.noRotate) {
+      this._rotateCamera();
+      if (this.multiTouchRoll === true) {
+        this._rollCamera();
+      }
+    }
+    if (!this.noZoom) {
+      this._zoomCamera();
+    }
+    if (!this.noPan) {
+      this._panCamera();
+    }
+    this.object.position.addVectors(this.target, this._eye);
+    if (this.object.isPerspectiveCamera) {
+      this._checkDistances();
+      this.object.lookAt(this.target);
+      const positionChanged = this._lastPosition.distanceToSquared(this.object.position) > _EPS3;
+      const rollChanged = this._lastUp.distanceToSquared(this.object.up) > _EPS3;
+      if (positionChanged || rollChanged) {
+        this.dispatchEvent(_changeEvent3);
+        this._lastPosition.copy(this.object.position);
+        this._lastUp.copy(this.object.up);
+      }
+    } else if (this.object.isOrthographicCamera) {
+      this.object.lookAt(this.target);
+      const positionChanged = this._lastPosition.distanceToSquared(this.object.position) > _EPS3;
+      const rollChanged = this._lastUp.distanceToSquared(this.object.up) > _EPS3;
+      const zoomChanged = this._lastZoom !== this.object.zoom;
+      if (positionChanged || rollChanged || zoomChanged) {
+        this.dispatchEvent(_changeEvent3);
+        this._lastPosition.copy(this.object.position);
+        this._lastUp.copy(this.object.up);
+        this._lastZoom = this.object.zoom;
+      }
+    } else {
+      console.warn("THREE.TrackballControls: Unsupported camera type.");
+    }
+  }
+  /**
+   * Resets the controls to its initial state.
+   */
+  reset() {
+    this.state = _STATE2.NONE;
+    this.keyState = _STATE2.NONE;
+    this.target.copy(this._target0);
+    this.object.position.copy(this._position0);
+    this.object.up.copy(this._up0);
+    this.object.zoom = this._zoom0;
+    this.object.updateProjectionMatrix();
+    this._eye.subVectors(this.object.position, this.target);
+    this.object.lookAt(this.target);
+    this.dispatchEvent(_changeEvent3);
+    this._lastPosition.copy(this.object.position);
+    this._lastUp.copy(this.object.up);
+    this._lastZoom = this.object.zoom;
+  }
+  _panCamera() {
+    _mouseChange.copy(this._panEnd).sub(this._panStart);
+    if (_mouseChange.lengthSq()) {
+      if (this.object.isOrthographicCamera) {
+        const scale_x = (this.object.right - this.object.left) / this.object.zoom / this.domElement.clientWidth;
+        const scale_y = (this.object.top - this.object.bottom) / this.object.zoom / this.domElement.clientWidth;
+        _mouseChange.x *= scale_x;
+        _mouseChange.y *= scale_y;
+      }
+      _mouseChange.multiplyScalar(this._eye.length() * this.panSpeed);
+      _pan.copy(this._eye).cross(this.object.up).setLength(_mouseChange.x);
+      _pan.add(_objectUp.copy(this.object.up).setLength(_mouseChange.y));
+      this.object.position.add(_pan);
+      this.target.add(_pan);
+      if (this.staticMoving) {
+        this._panStart.copy(this._panEnd);
+      } else {
+        this._panStart.add(_mouseChange.subVectors(this._panEnd, this._panStart).multiplyScalar(this.dynamicDampingFactor));
+      }
+    }
+  }
+  _rotateCamera() {
+    _moveDirection.set(this._moveCurr.x - this._movePrev.x, this._moveCurr.y - this._movePrev.y, 0);
+    let angle = _moveDirection.length();
+    if (angle) {
+      this._eye.copy(this.object.position).sub(this.target);
+      _eyeDirection.copy(this._eye).normalize();
+      _objectUpDirection.copy(this.object.up).normalize();
+      _objectSidewaysDirection.crossVectors(_objectUpDirection, _eyeDirection).normalize();
+      _objectUpDirection.setLength(this._moveCurr.y - this._movePrev.y);
+      _objectSidewaysDirection.setLength(this._moveCurr.x - this._movePrev.x);
+      _moveDirection.copy(_objectUpDirection.add(_objectSidewaysDirection));
+      _axis.crossVectors(_moveDirection, this._eye).normalize();
+      angle *= this.rotateSpeed;
+      _quaternion.setFromAxisAngle(_axis, angle);
+      this._eye.applyQuaternion(_quaternion);
+      this.object.up.applyQuaternion(_quaternion);
+      this._lastAxis.copy(_axis);
+      this._lastAngle = angle;
+    } else if (!this.staticMoving && this._lastAngle) {
+      this._lastAngle *= Math.sqrt(1 - this.dynamicDampingFactor);
+      this._eye.copy(this.object.position).sub(this.target);
+      _quaternion.setFromAxisAngle(this._lastAxis, this._lastAngle);
+      this._eye.applyQuaternion(_quaternion);
+      this.object.up.applyQuaternion(_quaternion);
+    }
+    this._movePrev.copy(this._moveCurr);
+  }
+  _rollCamera() {
+    const angle = this._getTouchRollAngle();
+    if (angle) {
+      this._lastRollAngle = angle * this.rollSpeed;
+    } else if (!this.staticMoving && this._lastRollAngle) {
+      this._lastRollAngle *= Math.sqrt(1 - this.dynamicDampingFactor);
+    } else {
+      return;
+    }
+    _eyeDirection.copy(this._eye).normalize();
+    _quaternion.setFromAxisAngle(_eyeDirection, this._lastRollAngle);
+    this.object.up.applyQuaternion(_quaternion);
+  }
+  _getTouchRollAngle() {
+    const first = this._pointers[0];
+    const second = this._pointers[1];
+    if (second === void 0 || first.pointerType !== "touch" || second.pointerType !== "touch") {
+      this._touchRollPointerIds = "";
+      return 0;
+    }
+    const pointerIds = `${first.pointerId},${second.pointerId}`;
+    const positionFirst = this._pointerPositions[first.pointerId];
+    const positionSecond = this._pointerPositions[second.pointerId];
+    const rollAngle = Math.atan2(positionSecond.y - positionFirst.y, positionSecond.x - positionFirst.x);
+    if (pointerIds !== this._touchRollPointerIds) {
+      this._touchRollPointerIds = pointerIds;
+      this._touchRollAngle = rollAngle;
+      return 0;
+    }
+    let angle = rollAngle - this._touchRollAngle;
+    this._touchRollAngle = rollAngle;
+    if (angle > Math.PI) {
+      angle -= 2 * Math.PI;
+    } else if (angle < -Math.PI) {
+      angle += 2 * Math.PI;
+    }
+    return angle;
+  }
+  _zoomCamera() {
+    let factor;
+    if (this.state === _STATE2.TOUCH_ZOOM_PAN) {
+      factor = this._touchZoomDistanceStart / this._touchZoomDistanceEnd;
+      this._touchZoomDistanceStart = this._touchZoomDistanceEnd;
+      if (this.object.isPerspectiveCamera) {
+        this._eye.multiplyScalar(factor);
+      } else if (this.object.isOrthographicCamera) {
+        this.object.zoom = MathUtils.clamp(this.object.zoom / factor, this.minZoom, this.maxZoom);
+        if (this._lastZoom !== this.object.zoom) {
+          this.object.updateProjectionMatrix();
+        }
+      } else {
+        console.warn("THREE.TrackballControls: Unsupported camera type");
+      }
+    } else {
+      factor = 1 + (this._zoomEnd.y - this._zoomStart.y) * this.zoomSpeed;
+      if (factor !== 1 && factor > 0) {
+        if (this.object.isPerspectiveCamera) {
+          this._eye.multiplyScalar(factor);
+        } else if (this.object.isOrthographicCamera) {
+          this.object.zoom = MathUtils.clamp(this.object.zoom / factor, this.minZoom, this.maxZoom);
+          if (this._lastZoom !== this.object.zoom) {
+            this.object.updateProjectionMatrix();
+          }
+        } else {
+          console.warn("THREE.TrackballControls: Unsupported camera type");
+        }
+      }
+      if (this.staticMoving) {
+        this._zoomStart.copy(this._zoomEnd);
+      } else {
+        this._zoomStart.y += (this._zoomEnd.y - this._zoomStart.y) * this.dynamicDampingFactor;
+      }
+    }
+  }
+  _getMouseOnScreen(pageX, pageY) {
+    _v2.set(
+      (pageX - this.screen.left) / this.screen.width,
+      (pageY - this.screen.top) / this.screen.height
+    );
+    return _v2;
+  }
+  _getMouseOnCircle(pageX, pageY) {
+    _v2.set(
+      (pageX - this.screen.width * 0.5 - this.screen.left) / (this.screen.width * 0.5),
+      (this.screen.height + 2 * (this.screen.top - pageY)) / this.screen.width
+      // screen.width intentional
+    );
+    return _v2;
+  }
+  _addPointer(event) {
+    this._pointers.push(event);
+  }
+  _removePointer(event) {
+    delete this._pointerPositions[event.pointerId];
+    for (let i = 0; i < this._pointers.length; i++) {
+      if (this._pointers[i].pointerId == event.pointerId) {
+        this._pointers.splice(i, 1);
+        return;
+      }
+    }
+  }
+  _trackPointer(event) {
+    let position = this._pointerPositions[event.pointerId];
+    if (position === void 0) {
+      position = new Vector2();
+      this._pointerPositions[event.pointerId] = position;
+    }
+    position.set(event.pageX, event.pageY);
+  }
+  _getSecondPointerPosition(event) {
+    const pointer = event.pointerId === this._pointers[0].pointerId ? this._pointers[1] : this._pointers[0];
+    return this._pointerPositions[pointer.pointerId];
+  }
+  _checkDistances() {
+    if (!this.noZoom || !this.noPan) {
+      if (this._eye.lengthSq() > this.maxDistance * this.maxDistance) {
+        this.object.position.addVectors(this.target, this._eye.setLength(this.maxDistance));
+        this._zoomStart.copy(this._zoomEnd);
+      }
+      if (this._eye.lengthSq() < this.minDistance * this.minDistance) {
+        this.object.position.addVectors(this.target, this._eye.setLength(this.minDistance));
+        this._zoomStart.copy(this._zoomEnd);
+      }
+    }
+  }
+};
+function onPointerDown3(event) {
+  if (this.enabled === false) return;
+  if (this._pointers.length === 0) {
+    this.domElement.setPointerCapture(event.pointerId);
+    this.domElement.ownerDocument.addEventListener("pointermove", this._onPointerMove);
+    this.domElement.ownerDocument.addEventListener("pointerup", this._onPointerUp);
+  }
+  this._addPointer(event);
+  if (event.pointerType === "touch") {
+    this._onTouchStart(event);
+  } else {
+    this._onMouseDown(event);
+  }
+}
+function onPointerMove3(event) {
+  if (this.enabled === false) return;
+  if (event.pointerType === "touch") {
+    this._onTouchMove(event);
+  } else {
+    this._onMouseMove(event);
+  }
+}
+function onPointerUp3(event) {
+  if (this.enabled === false) return;
+  if (event.pointerType === "touch") {
+    this._onTouchEnd(event);
+  } else {
+    this._onMouseUp();
+  }
+  this._removePointer(event);
+  if (this._pointers.length === 0) {
+    this.domElement.releasePointerCapture(event.pointerId);
+    this.domElement.ownerDocument.removeEventListener("pointermove", this._onPointerMove);
+    this.domElement.ownerDocument.removeEventListener("pointerup", this._onPointerUp);
+  }
+}
+function onPointerCancel2(event) {
+  this._removePointer(event);
+}
+function onKeyUp() {
+  if (this.enabled === false) return;
+  this.keyState = _STATE2.NONE;
+  window.addEventListener("keydown", this._onKeyDown);
+}
+function onKeyDown2(event) {
+  if (this.enabled === false) return;
+  window.removeEventListener("keydown", this._onKeyDown);
+  if (this.keyState !== _STATE2.NONE) {
+    return;
+  } else if (event.code === this.keys[_STATE2.ROTATE] && !this.noRotate) {
+    this.keyState = _STATE2.ROTATE;
+  } else if (event.code === this.keys[_STATE2.ZOOM] && !this.noZoom) {
+    this.keyState = _STATE2.ZOOM;
+  } else if (event.code === this.keys[_STATE2.PAN] && !this.noPan) {
+    this.keyState = _STATE2.PAN;
+  }
+}
+function onMouseDown2(event) {
+  let mouseAction;
+  switch (event.button) {
+    case 0:
+      mouseAction = this.mouseButtons.LEFT;
+      break;
+    case 1:
+      mouseAction = this.mouseButtons.MIDDLE;
+      break;
+    case 2:
+      mouseAction = this.mouseButtons.RIGHT;
+      break;
+    default:
+      mouseAction = -1;
+  }
+  switch (mouseAction) {
+    case MOUSE.DOLLY:
+      this.state = _STATE2.ZOOM;
+      break;
+    case MOUSE.ROTATE:
+      this.state = _STATE2.ROTATE;
+      break;
+    case MOUSE.PAN:
+      this.state = _STATE2.PAN;
+      break;
+    default:
+      this.state = _STATE2.NONE;
+  }
+  const state = this.keyState !== _STATE2.NONE ? this.keyState : this.state;
+  if (state === _STATE2.ROTATE && !this.noRotate) {
+    this._moveCurr.copy(this._getMouseOnCircle(event.pageX, event.pageY));
+    this._movePrev.copy(this._moveCurr);
+  } else if (state === _STATE2.ZOOM && !this.noZoom) {
+    this._zoomStart.copy(this._getMouseOnScreen(event.pageX, event.pageY));
+    this._zoomEnd.copy(this._zoomStart);
+  } else if (state === _STATE2.PAN && !this.noPan) {
+    this._panStart.copy(this._getMouseOnScreen(event.pageX, event.pageY));
+    this._panEnd.copy(this._panStart);
+  }
+  this.dispatchEvent(_startEvent3);
+}
+function onMouseMove2(event) {
+  const state = this.keyState !== _STATE2.NONE ? this.keyState : this.state;
+  if (state === _STATE2.ROTATE && !this.noRotate) {
+    this._moveCurr.copy(this._getMouseOnCircle(event.pageX, event.pageY));
+  } else if (state === _STATE2.ZOOM && !this.noZoom) {
+    this._zoomEnd.copy(this._getMouseOnScreen(event.pageX, event.pageY));
+  } else if (state === _STATE2.PAN && !this.noPan) {
+    this._panEnd.copy(this._getMouseOnScreen(event.pageX, event.pageY));
+  }
+}
+function onMouseUp() {
+  this.state = _STATE2.NONE;
+  this.dispatchEvent(_endEvent3);
+}
+function onMouseWheel2(event) {
+  if (this.enabled === false) return;
+  if (this.noZoom === true) return;
+  event.preventDefault();
+  switch (event.deltaMode) {
+    case 2:
+      this._zoomStart.y -= event.deltaY * 0.025;
+      break;
+    case 1:
+      this._zoomStart.y -= event.deltaY * 0.01;
+      break;
+    default:
+      this._zoomStart.y -= event.deltaY * 25e-5;
+      break;
+  }
+  this.dispatchEvent(_startEvent3);
+  this.dispatchEvent(_endEvent3);
+}
+function onContextMenu3(event) {
+  if (this.enabled === false) return;
+  event.preventDefault();
+}
+function onTouchStart2(event) {
+  this._trackPointer(event);
+  switch (this._pointers.length) {
+    case 1:
+      this.state = _STATE2.TOUCH_ROTATE;
+      this._moveCurr.copy(this._getMouseOnCircle(this._pointers[0].pageX, this._pointers[0].pageY));
+      this._movePrev.copy(this._moveCurr);
+      break;
+    default:
+      this.state = _STATE2.TOUCH_ZOOM_PAN;
+      const dx = this._pointers[0].pageX - this._pointers[1].pageX;
+      const dy = this._pointers[0].pageY - this._pointers[1].pageY;
+      this._touchZoomDistanceEnd = this._touchZoomDistanceStart = Math.sqrt(dx * dx + dy * dy);
+      const x = (this._pointers[0].pageX + this._pointers[1].pageX) / 2;
+      const y = (this._pointers[0].pageY + this._pointers[1].pageY) / 2;
+      this._panStart.copy(this._getMouseOnScreen(x, y));
+      this._panEnd.copy(this._panStart);
+      break;
+  }
+  this.dispatchEvent(_startEvent3);
+}
+function onTouchMove2(event) {
+  this._trackPointer(event);
+  switch (this._pointers.length) {
+    case 1:
+      this._moveCurr.copy(this._getMouseOnCircle(event.pageX, event.pageY));
+      break;
+    default:
+      const position = this._getSecondPointerPosition(event);
+      const dx = event.pageX - position.x;
+      const dy = event.pageY - position.y;
+      this._touchZoomDistanceEnd = Math.sqrt(dx * dx + dy * dy);
+      const x = (event.pageX + position.x) / 2;
+      const y = (event.pageY + position.y) / 2;
+      this._panEnd.copy(this._getMouseOnScreen(x, y));
+      break;
+  }
+}
+function onTouchEnd(event) {
+  switch (this._pointers.length) {
+    case 0:
+      this.state = _STATE2.NONE;
+      break;
+    case 1:
+      this.state = _STATE2.TOUCH_ROTATE;
+      this._moveCurr.copy(this._getMouseOnCircle(event.pageX, event.pageY));
+      this._movePrev.copy(this._moveCurr);
+      break;
+    case 2:
+      this.state = _STATE2.TOUCH_ZOOM_PAN;
+      for (let i = 0; i < this._pointers.length; i++) {
+        if (this._pointers[i].pointerId !== event.pointerId) {
+          const position = this._pointerPositions[this._pointers[i].pointerId];
+          this._moveCurr.copy(this._getMouseOnCircle(position.x, position.y));
+          this._movePrev.copy(this._moveCurr);
+          break;
+        }
+      }
+      break;
+  }
+  this.dispatchEvent(_endEvent3);
+}
+
+// viewer/ticks.ts
+var REGION_COLOR = "#e2e2ec";
+function niceStep(span) {
+  if (!(span > 0)) return 1;
+  const raw = span / 8;
+  const power = Math.pow(10, Math.floor(Math.log10(raw)));
+  const normalized = raw / power;
+  const step = normalized < 1.5 ? 1 : normalized < 3.5 ? 2 : normalized < 7.5 ? 5 : 10;
+  return step * power;
+}
+function tickValues(lo, hi, step) {
+  const values = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) {
+    values.push(Math.abs(v) < 1e-9 ? 0 : v);
+  }
+  return values;
+}
+function formatTick(value) {
+  return Number(value.toFixed(3)).toString();
+}
+
 // viewer/scene.ts
+var CONTROL_KINDS = ["trackball", "arcball", "orbit"];
+var VIEW_DIRECTION = new Vector3(0, -1, 1).normalize();
+var OrbitControl = class {
+  constructor(camera, dom) {
+    this.inner = new OrbitControls(camera, dom);
+    this.inner.enableDamping = true;
+  }
+  get rotateSpeed() {
+    return this.inner.rotateSpeed;
+  }
+  set rotateSpeed(value) {
+    this.inner.rotateSpeed = value;
+  }
+  get enabled() {
+    return this.inner.enabled;
+  }
+  set enabled(value) {
+    this.inner.enabled = value;
+  }
+  get target() {
+    return this.inner.target;
+  }
+  update() {
+    this.inner.update();
+  }
+  refreshLayout() {
+  }
+  dispose() {
+    this.inner.dispose();
+  }
+};
+var TrackballControl = class {
+  constructor(camera, dom) {
+    this.inner = new TrackballControls(camera, dom);
+    this.inner.staticMoving = true;
+  }
+  get rotateSpeed() {
+    return this.inner.rotateSpeed;
+  }
+  set rotateSpeed(value) {
+    this.inner.rotateSpeed = value;
+  }
+  get enabled() {
+    return this.inner.enabled;
+  }
+  set enabled(value) {
+    this.inner.enabled = value;
+  }
+  get target() {
+    return this.inner.target;
+  }
+  update() {
+    this.inner.update();
+  }
+  refreshLayout() {
+    this.inner.handleResize();
+  }
+  dispose() {
+    this.inner.dispose();
+  }
+};
+var ArcballControl = class {
+  constructor(camera, dom, scene) {
+    this.inner = new ArcballControls(camera, dom, scene);
+    this.inner.setGizmosVisible(false);
+  }
+  get rotateSpeed() {
+    return this.inner.rotateSpeed;
+  }
+  set rotateSpeed(value) {
+    this.inner.rotateSpeed = value;
+  }
+  get enabled() {
+    return this.inner.enabled;
+  }
+  set enabled(value) {
+    this.inner.enabled = value;
+  }
+  get target() {
+    return this.inner.target;
+  }
+  update() {
+    this.inner.update();
+  }
+  refreshLayout() {
+  }
+  dispose() {
+    this.inner.dispose();
+  }
+};
 var Scene3D = class {
   constructor(container) {
     this.container = container;
     this.scene = new Scene();
     //: everything whose z is exaggerated lives under here
     this.content = new Group();
+    this.controlKind = "trackball";
+    //: whether the renderer is on screen; a control built while the settings
+    //: screen is up must not come back enabled
+    this.viewportVisible = true;
+    //: drag rotation sensitivity (spec R3, settings screen); 1 is the control's
+    //: own default, so a rebuilt control keeps whatever the user chose
+    this.rotateSpeed = 1;
     this.target = new Vector3(0, 0, 0);
     this.radius = 1;
     this.zExaggeration = 1;
+    //: the simulation region outline (the device box, spec R3); drawn in the
+    //: content group so the vertical exaggeration scales it with the solids. Each
+    //: edge is a separate line in its axis's color, so the box edges read as the
+    //: axes they measure
+    this.region = new Group();
+    //: axis tick lines + labels; drawn in the content group so they follow the
+    //: box when the vertical exaggeration changes. A sprite's size comes from the
+    //: world-space lengths of its own x/y axes, so the z-only scale moves the
+    //: labels without stretching them
+    this.ticks = new Group();
+    //: sprite label size in um, set from the box span
+    this.labelScale = 0.1;
+    //: the box center (spec C5); the wire is local, so ticks are labelled with
+    //: `local + origin` to read in device (stack) coordinates, like the slider
+    this.origin = [0, 0, 0];
     this.renderLoop = () => {
       this.controls.update();
       this.renderer.render(this.scene, this.camera);
@@ -29395,47 +33251,190 @@ var Scene3D = class {
     this.scene.background = new Color(1776415);
     this.scene.add(new HemisphereLight(16777215, 4473941, 2));
     const key = new DirectionalLight(16777215, 2.5);
-    key.position.set(3, 5, 4);
+    key.position.set(3, -4, 5);
     this.scene.add(key);
     const fill = new DirectionalLight(16777215, 1);
-    fill.position.set(-4, -2, -3);
+    fill.position.set(-4, 3, -3);
     this.scene.add(fill);
     const width = Math.max(container.clientWidth, 1);
     const height = Math.max(container.clientHeight, 1);
     this.camera = new PerspectiveCamera(45, width / height, 0.01, 1e5);
-    this.camera.position.set(3, 2, 3);
+    this.camera.position.set(0, -2, 2);
     this.renderer = new WebGLRenderer({ antialias: true });
     this.renderer.setPixelRatio(window.devicePixelRatio);
     this.renderer.setSize(width, height);
     container.appendChild(this.renderer.domElement);
-    this.controls = new OrbitControls(this.camera, this.renderer.domElement);
-    this.controls.enableDamping = true;
+    this.controls = this.makeControls(this.controlKind);
     this.scene.add(this.content);
-    this.axes = new AxesHelper(1);
-    for (const material of asArray(this.axes.material)) material.depthTest = false;
-    this.axes.renderOrder = 10;
-    this.scene.add(this.axes);
-    this.scaleBar = new Group();
-    this.scene.add(this.scaleBar);
+    this.content.add(this.region);
+    this.content.add(this.ticks);
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(container);
     this.renderLoop();
   }
-  /** Frames the given box (µm, local origin) and sets up the triad + scale bar. */
-  setBounds(size) {
+  /** Frames the given box (µm, local origin) and sets up the region + scale bar. */
+  setBounds(size, origin = [0, 0, 0]) {
+    this.origin = origin;
     this.target.set(0, 0, 0);
     this.radius = 0.5 * Math.hypot(size[0], size[1], size[2]);
     const span = Math.max(size[0], size[1], size[2]);
-    this.axes.scale.setScalar(0.25 * span);
-    this.axes.position.set(-size[0] / 2, -size[1] / 2, -size[2] / 2);
-    this.buildScaleBar(span, size);
+    this.labelScale = 0.08 * span;
+    this.buildRegion(size);
     this.fit();
   }
-  /** Frames the whole scene (spec R3, "fit to view"). */
+  /** Builds the requested rotation control over the renderer's canvas. */
+  makeControls(kind) {
+    const dom = this.renderer.domElement;
+    if (kind === "trackball") return new TrackballControl(this.camera, dom);
+    if (kind === "arcball") return new ArcballControl(this.camera, dom, this.scene);
+    return new OrbitControl(this.camera, dom);
+  }
+  /** The active rotation style (spec R3, settings screen). */
+  get control() {
+    return this.controlKind;
+  }
+  /** Switches the rotation style, keeping the current camera pose (spec R3). */
+  setControl(kind) {
+    if (kind === this.controlKind) return;
+    const previous = this.controls;
+    this.controls = this.makeControls(kind);
+    this.controlKind = kind;
+    previous.dispose();
+    this.controls.target.copy(this.target);
+    this.controls.enabled = this.viewportVisible;
+    this.controls.rotateSpeed = this.rotateSpeed;
+    this.controls.refreshLayout();
+    this.controls.update();
+  }
+  /** Hides the renderer while the settings screen replaces the viewport (spec R3). */
+  setViewportVisible(visible) {
+    this.viewportVisible = visible;
+    this.renderer.domElement.style.visibility = visible ? "" : "hidden";
+    this.controls.enabled = visible;
+    if (visible) this.controls.refreshLayout();
+  }
+  /** Drag rotation sensitivity (spec R3, settings screen). */
+  get sensitivity() {
+    return this.rotateSpeed;
+  }
+  setSensitivity(factor) {
+    this.rotateSpeed = factor;
+    this.controls.rotateSpeed = factor;
+  }
+  /** Outlines the simulation region box and ticks each of its axes (spec R3). */
+  buildRegion(size) {
+    const [sx, sy, sz] = size.map((s) => s / 2);
+    const corners = [
+      new Vector3(-sx, -sy, -sz),
+      new Vector3(sx, -sy, -sz),
+      new Vector3(sx, sy, -sz),
+      new Vector3(-sx, sy, -sz),
+      new Vector3(-sx, -sy, sz),
+      new Vector3(sx, -sy, sz),
+      new Vector3(sx, sy, sz),
+      new Vector3(-sx, sy, sz)
+    ];
+    const edges = [
+      [0, 1],
+      [1, 2],
+      [2, 3],
+      [3, 0],
+      [4, 5],
+      [5, 6],
+      [6, 7],
+      [7, 4],
+      [0, 4],
+      [1, 5],
+      [2, 6],
+      [3, 7]
+    ];
+    for (const child of [...this.region.children]) {
+      this.region.remove(child);
+      child.geometry.dispose();
+      child.material.dispose();
+    }
+    const points = [];
+    for (const [a, b] of edges) points.push(corners[a], corners[b]);
+    const outline = new LineSegments(
+      new BufferGeometry().setFromPoints(points),
+      new LineBasicMaterial({ color: REGION_COLOR, depthTest: false })
+    );
+    outline.renderOrder = 9;
+    this.region.add(outline);
+    this.buildTicks(size);
+  }
+  /** Tick marks and labels along the box's x, y and z edges (spec R3). */
+  buildTicks(size) {
+    this.ticks.clear();
+    const half = size.map((s) => s / 2);
+    const step = niceStep(Math.max(...size));
+    const tick = 0.04 * Math.max(...size) * (2 / 3);
+    const corner = (sx, sy) => new Vector3(sx * half[0], sy * half[1], -half[2]);
+    const axes = [
+      { along: 0, name: "x", base: corner(-1, -1), dir: new Vector3(0, -1, 0) },
+      { along: 1, name: "y", base: corner(-1, -1), dir: new Vector3(-1, 0, 0) },
+      { along: 2, name: "z", base: corner(1, -1), dir: new Vector3(1, 0, 0) }
+    ];
+    for (const { along, name, base, dir } of axes) {
+      const color = REGION_COLOR;
+      const points = [];
+      const o = this.origin[along];
+      for (const value of tickValues(-half[along] + o, half[along] + o, step)) {
+        const at = base.clone();
+        at.setComponent(along, value - o);
+        const out = at.clone().addScaledVector(dir, tick);
+        points.push(at, out);
+        this.addLabel(
+          formatTick(value),
+          out,
+          dir,
+          color,
+          2 / 3 * this.labelScale / 3,
+          this.labelScale
+        );
+      }
+      const middle = base.clone();
+      middle.setComponent(along, 0);
+      this.addLabel(name, middle, dir, color, this.labelScale * 1.5 * (2 / 3), this.labelScale * 1.5);
+      const lines = new LineSegments(
+        new BufferGeometry().setFromPoints(points),
+        new LineBasicMaterial({ color, depthTest: false })
+      );
+      lines.renderOrder = 10;
+      this.ticks.add(lines);
+    }
+  }
+  /** A canvas-texture sprite label, nudged `gap` clear of the mark it names. */
+  addLabel(text, at, dir, color, gap, size) {
+    const canvas = document.createElement("canvas");
+    canvas.width = 128;
+    canvas.height = 64;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.fillStyle = color;
+    ctx.font = "32px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(text, 64, 32);
+    const texture = new CanvasTexture(canvas);
+    texture.colorSpace = SRGBColorSpace;
+    const sprite = new Sprite(
+      new SpriteMaterial({ map: texture, depthTest: false, transparent: true })
+    );
+    sprite.position.copy(at).addScaledVector(dir, gap);
+    sprite.scale.set(size, size * 0.5, 1);
+    this.ticks.add(sprite);
+  }
+  /** Frames the whole scene (spec R3, "fit to view").
+   *
+   * The default view puts x horizontal and looks from -y, +z (the camera is
+   * above and in front of the device). With the default up (0, 1, 0), the
+   * camera's right axis is exactly +x, so x runs across the screen.
+   */
   fit() {
     const distance = this.radius / Math.sin(this.camera.fov * Math.PI / 360);
-    const direction = new Vector3(1, 0.8, 1).normalize();
-    this.camera.position.copy(this.target).addScaledVector(direction, distance);
+    this.camera.up.set(0, 1, 0);
+    this.camera.position.copy(this.target).addScaledVector(VIEW_DIRECTION, distance);
     this.camera.near = Math.max(distance / 1e3, 1e-3);
     this.camera.far = distance * 100;
     this.camera.updateProjectionMatrix();
@@ -29450,22 +33449,10 @@ var Scene3D = class {
   get exaggeration() {
     return this.zExaggeration;
   }
-  buildScaleBar(span, size) {
-    this.scaleBar.clear();
-    const length = niceLength(span / 4);
-    const y = -size[1] / 2;
-    const z = -size[2] / 2;
-    const x0 = -size[0] / 2;
-    const geometry = new BufferGeometry().setFromPoints([
-      new Vector3(x0, y, z),
-      new Vector3(x0 + length, y, z)
-    ]);
-    const line = new Line(
-      geometry,
-      new LineBasicMaterial({ color: 14540253, depthTest: false })
-    );
-    line.renderOrder = 10;
-    this.scaleBar.add(line);
+  /** The current frame as a PNG data URL (spec R3, "save image"). */
+  toPng() {
+    this.renderer.render(this.scene, this.camera);
+    return this.renderer.domElement.toDataURL("image/png");
   }
   resize() {
     const width = Math.max(this.container.clientWidth, 1);
@@ -29473,29 +33460,29 @@ var Scene3D = class {
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height);
+    this.controls.refreshLayout();
   }
   dispose() {
     this.resizeObserver.disconnect();
     this.controls.dispose();
+    for (const child of this.region.children) {
+      const line = child;
+      line.geometry.dispose();
+      line.material.dispose();
+    }
     this.renderer.dispose();
   }
 };
-function asArray(value) {
-  return Array.isArray(value) ? value : [value];
-}
-function niceLength(value) {
-  if (value <= 0) return 1;
-  const power = Math.pow(10, Math.floor(Math.log10(value)));
-  const normalized = value / power;
-  const step = normalized < 1.5 ? 1 : normalized < 3.5 ? 2 : normalized < 7.5 ? 5 : 10;
-  return step * power;
-}
 
 // viewer/section.ts
 var BG_COLOR = "#15151a";
 var EDGE_COLOR = "#000000";
 var PORT_COLOR = "#ffcc33";
 var SELECTED_COLOR2 = "#66ff66";
+var TICK_LABEL_PX = 11;
+var TICK_PX = 5 * (2 / 3);
+var LABEL_GAP = 4 * (2 / 3) / 3;
+var AXIS_NAME_PX = 16;
 var PORT_CUT_HALF = 0.5;
 var Section2D = class {
   constructor(meta, onPortSelect) {
@@ -29504,6 +33491,10 @@ var Section2D = class {
     this.payload = null;
     this.state = null;
     this.exaggeration = 1;
+    //: the box center (spec C5) of the section's two axes, for labelling local
+    //: coordinates in device (stack) coordinates, like the slider
+    this.originU = 0;
+    this.originV = 0;
     this.view = { scale: 1, dx: 0, dy: 0 };
     //: set once the user zooms or pans; until then the view re-fits on every
     //: resize and payload change (the container starts hidden at zero size)
@@ -29531,6 +33522,13 @@ var Section2D = class {
   }
   setPayload(payload) {
     this.payload = payload;
+    const [ox, oy, oz] = payload.origin;
+    const origins = {
+      xy: [ox, oy],
+      xz: [ox, oz],
+      yz: [oy, oz]
+    };
+    [this.originU, this.originV] = origins[payload.plane];
     this.fit();
     this.draw();
   }
@@ -29543,6 +33541,14 @@ var Section2D = class {
     if (this.userAdjusted) this.draw();
     else this.fit();
   }
+  /** The factor actually applied to the v axis.
+   *
+   * The z multiplier is vertical only: it stretches v when v is z (xz, yz) and
+   * does nothing on xy, where v is y (spec R4).
+   */
+  get vExaggeration() {
+    return this.payload?.axis_v === "z" ? this.exaggeration : 1;
+  }
   /** Frames the section rectangle in the canvas with equal aspect (spec R4). */
   fit() {
     const payload = this.payload;
@@ -29550,7 +33556,7 @@ var Section2D = class {
     const { width, height } = this.size();
     const [[u0, u1], [v0, v1]] = payload.bounds;
     const uSpan = Math.max(u1 - u0, 1e-6);
-    const vSpan = Math.max((v1 - v0) * this.exaggeration, 1e-6);
+    const vSpan = Math.max((v1 - v0) * this.vExaggeration, 1e-6);
     const margin = 24;
     const scale = Math.min((width - 2 * margin) / uSpan, (height - 2 * margin) / vSpan);
     this.view = { scale, dx: 0, dy: 0 };
@@ -29572,13 +33578,13 @@ var Section2D = class {
     const { width, height } = this.size();
     const cx = width / 2 + this.view.dx;
     const cy = height / 2 + this.view.dy;
-    return [cx + u * this.view.scale, cy - v * this.view.scale * this.exaggeration];
+    return [cx + u * this.view.scale, cy - v * this.view.scale * this.vExaggeration];
   }
   unproject(px, py) {
     const { width, height } = this.size();
     const cx = width / 2 + this.view.dx;
     const cy = height / 2 + this.view.dy;
-    return [(px - cx) / this.view.scale, (cy - py) / (this.view.scale * this.exaggeration)];
+    return [(px - cx) / this.view.scale, (cy - py) / (this.view.scale * this.vExaggeration)];
   }
   path(rings) {
     const path = new Path2D();
@@ -29625,7 +33631,8 @@ var Section2D = class {
       ctx.stroke(path);
     }
     this.drawPorts(ctx, payload);
-    this.drawAxes(ctx, payload);
+    this.drawRegion(ctx, payload);
+    this.drawTicks(ctx, payload);
   }
   drawPorts(ctx, payload) {
     const state = this.state;
@@ -29646,11 +33653,17 @@ var Section2D = class {
       ctx.stroke();
     }
   }
-  /** A port's outline where the section plane cuts it, in (u, v), or null. */
+  /** A port's outline where the section plane cuts it, in local (u, v), or null.
+   *
+   * Port metadata is local, like the rings (spec C5), while the plane position
+   * is absolute (stack) coordinates, so the plane is brought into the local
+   * frame before the cut test; the outline is drawn in the local frame too.
+   */
   portCut(port, payload) {
     const half = PORT_CUT_HALF;
+    const [ox, oy, oz] = payload.origin;
     if (payload.plane === "xy") {
-      if (Math.abs(port.z - payload.position) > half) return null;
+      if (Math.abs(port.z - (payload.position - oz)) > half) return null;
       const angle = (port.orientation ?? 0) * Math.PI / 180;
       const w = port.width / 2;
       return [
@@ -29659,32 +33672,75 @@ var Section2D = class {
       ];
     }
     if (payload.plane === "xz") {
-      if (Math.abs(port.y - payload.position) > half) return null;
+      if (Math.abs(port.y - (payload.position - oy)) > half) return null;
       return [
         [port.x, port.z - port.width / 2],
         [port.x, port.z + port.width / 2]
       ];
     }
-    if (Math.abs(port.x - payload.position) > half) return null;
+    if (Math.abs(port.x - (payload.position - ox)) > half) return null;
     return [
-      [port.z - port.width / 2, port.y],
-      [port.z + port.width / 2, port.y]
+      [port.y, port.z - port.width / 2],
+      [port.y, port.z + port.width / 2]
     ];
   }
-  drawAxes(ctx, payload) {
+  /** Outlines the simulation region (the section rectangle, spec R4). */
+  drawRegion(ctx, payload) {
     const [[u0, u1], [v0, v1]] = payload.bounds;
-    ctx.strokeStyle = "rgba(180,180,200,0.35)";
+    const [x0, y0] = this.project(u0, v0);
+    const [x1, y1] = this.project(u1, v1);
+    ctx.strokeStyle = REGION_COLOR;
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+  }
+  /** Tick marks and labels for the two section axes (spec R4). */
+  drawTicks(ctx, payload) {
+    const [[u0, u1], [v0, v1]] = payload.bounds;
+    const step = niceStep(Math.max(u1 - u0, v1 - v0));
     ctx.lineWidth = 1;
+    ctx.font = `${TICK_LABEL_PX}px system-ui, sans-serif`;
+    ctx.strokeStyle = REGION_COLOR;
+    ctx.fillStyle = REGION_COLOR;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
     ctx.beginPath();
-    const [ax, ay] = this.project(u0, 0);
-    const [bx, by] = this.project(u1, 0);
-    ctx.moveTo(ax, ay);
-    ctx.lineTo(bx, by);
-    const [cx, cy] = this.project(0, v0);
-    const [dx, dy] = this.project(0, v1);
-    ctx.moveTo(cx, cy);
-    ctx.lineTo(dx, dy);
+    for (const au of tickValues(u0 + this.originU, u1 + this.originU, step)) {
+      const [x, y] = this.project(au - this.originU, v0);
+      ctx.moveTo(x, y);
+      ctx.lineTo(x, y + TICK_PX);
+    }
     ctx.stroke();
+    for (const au of tickValues(u0 + this.originU, u1 + this.originU, step)) {
+      const [x, y] = this.project(au - this.originU, v0);
+      ctx.fillText(formatTick(au), x, y + TICK_PX + LABEL_GAP);
+    }
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    ctx.beginPath();
+    for (const av of tickValues(v0 + this.originV, v1 + this.originV, step)) {
+      const [x, y] = this.project(u0, av - this.originV);
+      ctx.moveTo(x, y);
+      ctx.lineTo(x - TICK_PX, y);
+    }
+    ctx.stroke();
+    for (const av of tickValues(v0 + this.originV, v1 + this.originV, step)) {
+      const [x, y] = this.project(u0, av - this.originV);
+      ctx.fillText(formatTick(av), x - TICK_PX - LABEL_GAP, y);
+    }
+    const nameGap = (TICK_PX + LABEL_GAP + AXIS_NAME_PX) * (2 / 3);
+    ctx.font = `${AXIS_NAME_PX}px system-ui, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    const [ux, uy] = this.project((u0 + u1) / 2, v0);
+    ctx.fillText(payload.axis_u, ux, uy + nameGap);
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    const [vx, vy] = this.project(u0, (v0 + v1) / 2);
+    ctx.fillText(payload.axis_v, vx - nameGap, vy);
+  }
+  /** The current frame as a PNG data URL (spec R4, "save image"). */
+  toPng() {
+    return this.canvas.toDataURL("image/png");
   }
   // ------------------------------------------------------------------ hover
   onMove(event) {
@@ -29695,7 +33751,7 @@ var Section2D = class {
     const [u, v] = this.unproject(event.clientX - rect.left, event.clientY - rect.top);
     const level = this.levelAt(u, v);
     const name = level ?? (this.inBackground(u, v) ? "background" : "-");
-    this.readout.textContent = `${payload.axis_u}=${u.toFixed(3)} ${payload.axis_v}=${v.toFixed(3)} \xB5m \xB7 ${name}`;
+    this.readout.textContent = `${payload.axis_u}=${(u + this.originU).toFixed(3)} ${payload.axis_v}=${(v + this.originV).toFixed(3)} \xB5m \xB7 ${name}`;
   }
   onClick(event) {
     const payload = this.payload;
@@ -29788,6 +33844,13 @@ var Section2D = class {
 
 // viewer/index.ts
 var PLANES = ["xy", "xz", "yz"];
+var CONTROL_LABELS = {
+  trackball: "Trackball (free roll)",
+  arcball: "Arcball (gizmo)",
+  orbit: "Orbit (turntable)"
+};
+var SAVE_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>';
+var GEAR_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
 function render({ model, el }) {
   const geometry = model.get("geometry");
   const meta = model.get("meta");
@@ -29801,15 +33864,14 @@ function render({ model, el }) {
   const to3d = button("3D", true);
   const to2d = button("2D", false);
   const fit = button("Fit", false);
-  const fullToggle = document.createElement("label");
-  fullToggle.className = "gfx-control";
-  fullToggle.title = "show full extent (unpainted)";
-  const fullInput = document.createElement("input");
-  fullInput.type = "checkbox";
-  fullToggle.append(fullInput, document.createTextNode(" full extent"));
+  const settings = document.createElement("button");
+  settings.type = "button";
+  settings.className = "gfx-button gfx-settings";
+  settings.title = "viewer settings";
+  settings.innerHTML = GEAR_ICON;
   const exaggeration = document.createElement("label");
   exaggeration.className = "gfx-control";
-  exaggeration.title = "vertical exaggeration (3D)";
+  exaggeration.title = "vertical exaggeration (both viewports)";
   exaggeration.textContent = "z \xD7";
   const exaggerationInput = document.createElement("input");
   exaggerationInput.type = "range";
@@ -29818,7 +33880,12 @@ function render({ model, el }) {
   exaggerationInput.step = "0.5";
   exaggerationInput.value = "1";
   exaggeration.appendChild(exaggerationInput);
-  menubar.append(title2, to3d, to2d, fit, fullToggle, exaggeration);
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "gfx-button gfx-save";
+  save.title = "save the current viewport as a PNG";
+  save.innerHTML = SAVE_ICON;
+  menubar.append(title2, to3d, to2d, fit, settings, exaggeration, save);
   const sectionControls = document.createElement("div");
   sectionControls.className = "gfx-section-controls";
   sectionControls.hidden = true;
@@ -29841,18 +33908,7 @@ function render({ model, el }) {
   positionBox.step = "0.01";
   positionBox.className = "gfx-numeric";
   position.append(positionSlider, positionBox);
-  const sectionExaggeration = document.createElement("label");
-  sectionExaggeration.className = "gfx-control";
-  sectionExaggeration.title = "vertical exaggeration (2D)";
-  sectionExaggeration.textContent = "z \xD7";
-  const sectionExaggerationInput = document.createElement("input");
-  sectionExaggerationInput.type = "range";
-  sectionExaggerationInput.min = "1";
-  sectionExaggerationInput.max = "20";
-  sectionExaggerationInput.step = "0.5";
-  sectionExaggerationInput.value = "1";
-  sectionExaggeration.appendChild(sectionExaggerationInput);
-  sectionControls.append(planeToggle, position, sectionExaggeration);
+  sectionControls.append(planeToggle, position);
   const explorer = new Explorer(meta, {
     onPatch: (patch) => sendPatch(model, patch),
     onSelect: (selection) => sendPatch(model, { selection })
@@ -29862,9 +33918,57 @@ function render({ model, el }) {
   const sceneRoot = document.createElement("div");
   sceneRoot.className = "gfx-viewport-3d";
   viewport.appendChild(sceneRoot);
+  const settingsPanel = document.createElement("div");
+  settingsPanel.className = "gfx-settings-panel";
+  settingsPanel.hidden = true;
+  const settingsHeading = document.createElement("div");
+  settingsHeading.className = "gfx-settings-heading";
+  settingsHeading.textContent = "Viewer settings";
+  const controlRow = document.createElement("label");
+  controlRow.className = "gfx-settings-row";
+  const controlLabel = document.createElement("span");
+  controlLabel.textContent = "Rotation style";
+  const controlSelect = document.createElement("select");
+  controlSelect.className = "gfx-select";
+  for (const kind of CONTROL_KINDS) {
+    const option = document.createElement("option");
+    option.value = kind;
+    option.textContent = CONTROL_LABELS[kind];
+    controlSelect.appendChild(option);
+  }
+  controlRow.append(controlLabel, controlSelect);
+  const sensitivityRow = document.createElement("label");
+  sensitivityRow.className = "gfx-settings-row";
+  const sensitivityLabel = document.createElement("span");
+  sensitivityLabel.textContent = "Rotation sensitivity";
+  const sensitivityInput = document.createElement("input");
+  sensitivityInput.type = "range";
+  sensitivityInput.className = "gfx-sensitivity";
+  sensitivityInput.min = "0.2";
+  sensitivityInput.max = "3";
+  sensitivityInput.step = "0.1";
+  const sensitivityValue = document.createElement("span");
+  sensitivityValue.className = "gfx-settings-value";
+  sensitivityRow.append(sensitivityLabel, sensitivityInput, sensitivityValue);
+  const fullRow = document.createElement("label");
+  fullRow.className = "gfx-settings-row";
+  fullRow.title = "show full extent (unpainted)";
+  const fullLabel = document.createElement("span");
+  fullLabel.textContent = "Full extent";
+  const fullInput = document.createElement("input");
+  fullInput.type = "checkbox";
+  const fullHint = document.createElement("span");
+  fullHint.className = "gfx-settings-value";
+  fullHint.textContent = "unpainted";
+  fullRow.append(fullLabel, fullInput, fullHint);
+  settingsPanel.append(settingsHeading, controlRow, sensitivityRow, fullRow);
+  viewport.appendChild(settingsPanel);
   el.append(menubar, sectionControls, explorer.root, viewport);
   const scene = new Scene3D(sceneRoot);
-  scene.setBounds(geometry.size);
+  scene.setBounds(geometry.size, geometry.origin);
+  controlSelect.value = scene.control;
+  sensitivityInput.value = String(scene.sensitivity);
+  sensitivityValue.textContent = `${scene.sensitivity.toFixed(1)}\xD7`;
   const section = new Section2D(meta, (name) => sendPatch(model, {
     selection: name ? { kind: "port", name } : null
   }));
@@ -29879,23 +33983,58 @@ function render({ model, el }) {
   const glyphs = new PortGlyphs(meta.ports);
   scene.content.add(glyphs.group);
   fit.addEventListener("click", () => {
+    closeSettings();
     if (currentState(model)?.active_viewport === "2d") section.fit();
     else scene.fit();
   });
-  exaggerationInput.addEventListener(
-    "input",
-    () => scene.setZExaggeration(Number(exaggerationInput.value))
-  );
-  sectionExaggerationInput.addEventListener(
-    "input",
-    () => section.setExaggeration(Number(sectionExaggerationInput.value))
-  );
+  let settingsOpen = false;
+  const closeSettings = () => {
+    if (!settingsOpen) return;
+    settingsOpen = false;
+    applySettingsVisibility();
+  };
+  const applySettingsVisibility = () => {
+    settingsPanel.hidden = !settingsOpen;
+    settings.classList.toggle("gfx-active", settingsOpen);
+    const is2d = currentState(model)?.active_viewport === "2d";
+    sceneRoot.hidden = settingsOpen || is2d;
+    section.root.hidden = settingsOpen || !is2d;
+    sectionControls.hidden = settingsOpen || !is2d;
+    scene.setViewportVisible(!settingsOpen);
+  };
+  settings.addEventListener("click", () => {
+    settingsOpen = !settingsOpen;
+    applySettingsVisibility();
+  });
+  controlSelect.addEventListener("change", () => {
+    scene.setControl(controlSelect.value);
+  });
+  sensitivityInput.addEventListener("input", () => {
+    const value = Number(sensitivityInput.value);
+    scene.setSensitivity(value);
+    sensitivityValue.textContent = `${value.toFixed(1)}\xD7`;
+  });
+  exaggerationInput.addEventListener("input", () => {
+    const factor = Number(exaggerationInput.value);
+    scene.setZExaggeration(factor);
+    section.setExaggeration(factor);
+  });
   fullInput.addEventListener(
     "change",
     () => sendPatch(model, { show_full: fullInput.checked })
   );
-  to3d.addEventListener("click", () => sendPatch(model, { active_viewport: "3d" }));
-  to2d.addEventListener("click", () => sendPatch(model, { active_viewport: "2d" }));
+  to3d.addEventListener("click", () => {
+    closeSettings();
+    sendPatch(model, { active_viewport: "3d" });
+  });
+  to2d.addEventListener("click", () => {
+    closeSettings();
+    sendPatch(model, { active_viewport: "2d" });
+  });
+  save.addEventListener("click", () => {
+    const is2d = currentState(model)?.active_viewport === "2d";
+    download(is2d ? section.toPng() : scene.toPng(), is2d ? "cross-section.png" : "view-3d.png");
+  });
   let pendingPosition = null;
   let positionFrame = 0;
   const flushPosition = () => {
@@ -29922,9 +34061,10 @@ function render({ model, el }) {
     const is2d = state.active_viewport === "2d";
     to3d.classList.toggle("gfx-active", !is2d);
     to2d.classList.toggle("gfx-active", is2d);
-    sceneRoot.hidden = is2d;
-    section.root.hidden = !is2d;
-    sectionControls.hidden = !is2d;
+    sceneRoot.hidden = settingsOpen || is2d;
+    section.root.hidden = settingsOpen || !is2d;
+    sectionControls.hidden = settingsOpen || !is2d;
+    scene.setViewportVisible(!settingsOpen);
     for (const [plane, planeButton] of planeButtons) {
       planeButton.classList.toggle("gfx-active", plane === state.plane);
     }
@@ -29968,6 +34108,12 @@ function render({ model, el }) {
 }
 function sendPatch(model, patch) {
   model.send({ event: "set_state", patch });
+}
+function download(dataUrl, filename) {
+  const link = document.createElement("a");
+  link.href = dataUrl;
+  link.download = filename;
+  link.click();
 }
 function currentState(model) {
   return model.get("state");
