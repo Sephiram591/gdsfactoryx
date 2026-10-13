@@ -70,6 +70,7 @@ def _port_meta(port: Any) -> dict[str, Any]:
         "z": float(port.z),
         "orientation": None if port.orientation is None else float(port.orientation),
         "width": float(port.width),
+        "height": float(port.height),
         "layer": int(port.layer),
     }
 

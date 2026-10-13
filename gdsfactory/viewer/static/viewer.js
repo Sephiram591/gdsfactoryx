@@ -34091,7 +34091,10 @@ var TICK_LABEL_PX = 11;
 var TICK_PX = 5 * (2 / 3);
 var LABEL_GAP = 4 * (2 / 3) / 3;
 var AXIS_NAME_PX = 16;
-var PORT_CUT_HALF = 0.5;
+var PORT_FADE_UM = 0.5;
+var PORT_FADE_CUTOFF = 3;
+var PORT_FILL_ALPHA = 0.25;
+var GLYPH_CUT_HALF = 0.5;
 var Section2D = class {
   constructor(meta, onPortSelect) {
     this.meta = meta;
@@ -34289,7 +34292,7 @@ var Section2D = class {
    * or are parallel (then shown only where they coincide).
    */
   glyphCut(glyph, payload) {
-    const half = PORT_CUT_HALF;
+    const half = GLYPH_CUT_HALF;
     const [ox, oy, oz] = payload.origin;
     const origin = [ox, oy, oz];
     const center = glyph.center;
@@ -34321,51 +34324,101 @@ var Section2D = class {
   drawPorts(ctx, payload) {
     const state = this.state;
     if (!state) return;
+    const fade = state.port_fade_um > 0 ? state.port_fade_um : PORT_FADE_UM;
     for (const port of this.meta.ports) {
       if (!(state.port_visible[port.name] ?? true)) continue;
-      const cut = this.portCut(port, payload);
-      if (!cut) continue;
+      const distance = this.portDistance(port, payload);
+      const alpha = Math.exp(-0.5 * (distance / fade) ** 2);
+      if (alpha < 0.01) continue;
+      const outline = this.portOutline(port, payload);
+      if (!outline) continue;
       const selected = state.selection?.kind === "port" && state.selection.name === port.name;
-      ctx.strokeStyle = selected ? SELECTED_COLOR2 : PORT_COLOR;
+      const color = selected ? SELECTED_COLOR2 : PORT_COLOR;
+      ctx.globalAlpha = alpha;
+      ctx.strokeStyle = color;
       ctx.lineWidth = 2;
-      const [a, b] = cut;
-      const [x0, y0] = this.project(a[0], a[1]);
-      const [x1, y1] = this.project(b[0], b[1]);
-      ctx.beginPath();
-      ctx.moveTo(x0, y0);
-      ctx.lineTo(x1, y1);
-      ctx.stroke();
+      const path = new Path2D();
+      const [x0, y0] = this.project(outline[0][0], outline[0][1]);
+      path.moveTo(x0, y0);
+      for (let i = 1; i < outline.length; i++) {
+        const [x, y] = this.project(outline[i][0], outline[i][1]);
+        path.lineTo(x, y);
+      }
+      path.closePath();
+      if (outline.length === 4) {
+        ctx.fillStyle = color;
+        ctx.globalAlpha = alpha * PORT_FILL_ALPHA;
+        ctx.fill(path);
+        ctx.globalAlpha = alpha;
+      }
+      ctx.stroke(path);
+      ctx.globalAlpha = 1;
     }
   }
-  /** A port's outline where the section plane cuts it, in local (u, v), or null.
+  /** The distance from the section plane to a port's plane, along its normal (µm).
    *
    * Port metadata is local, like the rings (spec C5), while the plane position
    * is absolute (stack) coordinates, so the plane is brought into the local
-   * frame before the cut test; the outline is drawn in the local frame too.
+   * frame before the distance is measured.
    */
-  portCut(port, payload) {
-    const half = PORT_CUT_HALF;
+  portDistance(port, payload) {
     const [ox, oy, oz] = payload.origin;
+    if (payload.plane === "xy") return port.z - (payload.position - oz);
+    if (payload.plane === "xz") return port.y - (payload.position - oy);
+    return port.x - (payload.position - ox);
+  }
+  /** A port's outline in local (u, v), or null when the plane misses it.
+   *
+   * A port is a flat face: it spans its width, perpendicular to its orientation
+   * (spec R3), and it lies in the plane of its own orientation axis. Where the
+   * section plane cuts across that face (the port's orientation is not the
+   * plane's normal) the outline is the width bar, as before. Where the plane's
+   * normal *is* the port's orientation the plane lies in the port's own plane,
+   * so the cut is the whole face and the outline is a box: the width across the
+   * port and the layer's thickness along the orientation (spec R4).
+   */
+  portOutline(port, payload) {
+    const half = PORT_FADE_CUTOFF * (this.state?.port_fade_um ?? PORT_FADE_UM);
+    const [ox, oy, oz] = payload.origin;
+    const angle = (port.orientation ?? 0) * Math.PI / 180;
+    const nx = Math.cos(angle);
+    const ny = Math.sin(angle);
+    const hw = port.width / 2;
+    const hh = port.height / 2;
     if (payload.plane === "xy") {
       if (Math.abs(port.z - (payload.position - oz)) > half) return null;
-      const angle = (port.orientation ?? 0) * Math.PI / 180;
-      const w = port.width / 2;
       return [
-        [port.x - w * Math.sin(angle), port.y + w * Math.cos(angle)],
-        [port.x + w * Math.sin(angle), port.y - w * Math.cos(angle)]
+        [port.x - hw * ny, port.y + hw * nx],
+        [port.x + hw * ny, port.y - hw * nx]
       ];
     }
     if (payload.plane === "xz") {
       if (Math.abs(port.y - (payload.position - oy)) > half) return null;
+      if (Math.abs(ny) > 1e-9) {
+        return [
+          [port.x - hw * ny, port.z - hh],
+          [port.x + hw * ny, port.z - hh],
+          [port.x + hw * ny, port.z + hh],
+          [port.x - hw * ny, port.z + hh]
+        ];
+      }
       return [
-        [port.x, port.z - port.width / 2],
-        [port.x, port.z + port.width / 2]
+        [port.x, port.z - hw],
+        [port.x, port.z + hw]
       ];
     }
     if (Math.abs(port.x - (payload.position - ox)) > half) return null;
+    if (Math.abs(nx) > 1e-9) {
+      return [
+        [port.y - hw * nx, port.z - hh],
+        [port.y + hw * nx, port.z - hh],
+        [port.y + hw * nx, port.z + hh],
+        [port.y - hw * nx, port.z + hh]
+      ];
+    }
     return [
-      [port.y, port.z - port.width / 2],
-      [port.y, port.z + port.width / 2]
+      [port.y, port.z - hw],
+      [port.y, port.z + hw]
     ];
   }
   /** Outlines the simulation region (the section rectangle, spec R4). */
@@ -34444,11 +34497,16 @@ var Section2D = class {
     const rect = this.canvas.getBoundingClientRect();
     const [u, v] = this.unproject(event.clientX - rect.left, event.clientY - rect.top);
     for (const port of this.meta.ports) {
-      const cut = this.portCut(port, payload);
-      if (!cut) continue;
-      if (this.nearSegment(u, v, cut[0], cut[1], 6 / this.view.scale)) {
-        this.onPortSelect(port.name);
-        return;
+      const outline = this.portOutline(port, payload);
+      if (!outline) continue;
+      const tol = 6 / this.view.scale;
+      for (let i = 0; i < outline.length; i++) {
+        const a = outline[i];
+        const b = outline[(i + 1) % outline.length];
+        if (this.nearSegment(u, v, a, b, tol)) {
+          this.onPortSelect(port.name);
+          return;
+        }
       }
     }
     this.onPortSelect(null);
@@ -34655,7 +34713,22 @@ function render({ model, el }) {
   fullHint.className = "gfx-settings-value";
   fullHint.textContent = "unpainted";
   fullRow.append(fullLabel, fullInput, fullHint);
-  settingsPanel.append(settingsHeading, controlRow, sensitivityRow, fullRow);
+  const fadeRow = document.createElement("label");
+  fadeRow.className = "gfx-settings-row";
+  fadeRow.title = "2D port fade: distance (\xB5m) at which a port's outline falls to 1/e";
+  const fadeLabel = document.createElement("span");
+  fadeLabel.textContent = "Port fade (\xB5m)";
+  const fadeInput = document.createElement("input");
+  fadeInput.type = "range";
+  fadeInput.className = "gfx-fade";
+  fadeInput.min = "0.05";
+  fadeInput.max = "5";
+  fadeInput.step = "0.05";
+  fadeInput.value = "0.5";
+  const fadeValue = document.createElement("span");
+  fadeValue.className = "gfx-settings-value";
+  fadeRow.append(fadeLabel, fadeInput, fadeValue);
+  settingsPanel.append(settingsHeading, controlRow, sensitivityRow, fadeRow, fullRow);
   viewport.appendChild(settingsPanel);
   el.append(menubar, sectionControls, explorer.root, viewport);
   const scene = new Scene3D(sceneRoot);
@@ -34735,6 +34808,11 @@ function render({ model, el }) {
     "change",
     () => sendPatch(model, { show_full: fullInput.checked })
   );
+  fadeInput.addEventListener("input", () => {
+    const value = Number(fadeInput.value);
+    fadeValue.textContent = `${value.toFixed(2)} \xB5m`;
+    sendPatch(model, { port_fade_um: value });
+  });
   to3d.addEventListener("click", () => {
     closeSettings();
     sendPatch(model, { active_viewport: "3d" });
@@ -34806,6 +34884,8 @@ function render({ model, el }) {
     run.disabled = state.running;
     runNote.hidden = !state.running;
     fullInput.checked = state.show_full;
+    if (document.activeElement !== fadeInput) fadeInput.value = String(state.port_fade_um);
+    fadeValue.textContent = `${state.port_fade_um.toFixed(2)} \xB5m`;
     section.setState(state);
     explorer.render(state);
   };

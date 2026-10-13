@@ -23,8 +23,19 @@ const LABEL_GAP = (4 * (2 / 3)) / 3;
 //: the axis name is drawn larger than the tick values it sits among
 const AXIS_NAME_PX = 16;
 
-//: How far a port's outline reaches either side of the plane it cuts (µm).
-const PORT_CUT_HALF = 0.5;
+//: Default gaussian 1/e distance (µm) for the port fade; the state's
+//: ``port_fade_um`` overrides it (spec R4).
+const PORT_FADE_UM = 0.5;
+//: A port's outline is not drawn beyond this many 1/e distances from its plane
+//: (the gaussian has decayed to ~1% there, so it reads as gone, spec R4).
+const PORT_FADE_CUTOFF = 3;
+//: A box outline (the plane lies in the port's face) is filled at this fraction
+//: of the outline's own alpha, so the face reads as a translucent plate.
+const PORT_FILL_ALPHA = 0.25;
+//: Half-extent (µm) of the marker a source/detector glyph shows when it has no
+//: plane of its own (a point dipole), and the tolerance within which a
+//: parallel glyph plane is treated as coincident with the section (spec D11).
+const GLYPH_CUT_HALF = 0.5;
 
 interface View {
   //: screen pixels per µm
@@ -268,7 +279,7 @@ export class Section2D {
     | { kind: "segment"; a: [number, number]; b: [number, number] }
     | { kind: "rect"; u0: number; u1: number; v0: number; v1: number }
     | null {
-    const half = PORT_CUT_HALF;
+    const half = GLYPH_CUT_HALF;
     const [ox, oy, oz] = payload.origin;
     const origin = [ox, oy, oz];
     const center = glyph.center;
@@ -309,54 +320,117 @@ export class Section2D {
   private drawPorts(ctx: CanvasRenderingContext2D, payload: SectionPayload): void {
     const state = this.state;
     if (!state) return;
+    const fade = state.port_fade_um > 0 ? state.port_fade_um : PORT_FADE_UM;
     for (const port of this.meta.ports) {
       if (!(state.port_visible[port.name] ?? true)) continue;
-      const cut = this.portCut(port, payload);
-      if (!cut) continue;
+      const distance = this.portDistance(port, payload);
+      const alpha = Math.exp(-0.5 * (distance / fade) ** 2);
+      if (alpha < 0.01) continue;
+      const outline = this.portOutline(port, payload);
+      if (!outline) continue;
       const selected = state.selection?.kind === "port" && state.selection.name === port.name;
-      ctx.strokeStyle = selected ? SELECTED_COLOR : PORT_COLOR;
+      const color = selected ? SELECTED_COLOR : PORT_COLOR;
+      ctx.globalAlpha = alpha;
+      ctx.strokeStyle = color;
       ctx.lineWidth = 2;
-      const [a, b] = cut;
-      const [x0, y0] = this.project(a[0], a[1]);
-      const [x1, y1] = this.project(b[0], b[1]);
-      ctx.beginPath();
-      ctx.moveTo(x0, y0);
-      ctx.lineTo(x1, y1);
-      ctx.stroke();
+      const path = new Path2D();
+      const [x0, y0] = this.project(outline[0][0], outline[0][1]);
+      path.moveTo(x0, y0);
+      for (let i = 1; i < outline.length; i++) {
+        const [x, y] = this.project(outline[i][0], outline[i][1]);
+        path.lineTo(x, y);
+      }
+      path.closePath();
+      // a box outline (the plane lies in the port's face) gets a translucent
+      // fill so the face reads as a plate; the bar case stays an open line
+      if (outline.length === 4) {
+        ctx.fillStyle = color;
+        ctx.globalAlpha = alpha * PORT_FILL_ALPHA;
+        ctx.fill(path);
+        ctx.globalAlpha = alpha;
+      }
+      ctx.stroke(path);
+      ctx.globalAlpha = 1;
     }
   }
 
-  /** A port's outline where the section plane cuts it, in local (u, v), or null.
+  /** The distance from the section plane to a port's plane, along its normal (µm).
    *
    * Port metadata is local, like the rings (spec C5), while the plane position
    * is absolute (stack) coordinates, so the plane is brought into the local
-   * frame before the cut test; the outline is drawn in the local frame too.
+   * frame before the distance is measured.
    */
-  private portCut(port: PortMeta, payload: SectionPayload): [[number, number], [number, number]] | null {
-    const half = PORT_CUT_HALF;
+  private portDistance(port: PortMeta, payload: SectionPayload): number {
     const [ox, oy, oz] = payload.origin;
+    if (payload.plane === "xy") return port.z - (payload.position - oz);
+    if (payload.plane === "xz") return port.y - (payload.position - oy);
+    return port.x - (payload.position - ox);
+  }
+
+  /** A port's outline in local (u, v), or null when the plane misses it.
+   *
+   * A port is a flat face: it spans its width, perpendicular to its orientation
+   * (spec R3), and it lies in the plane of its own orientation axis. Where the
+   * section plane cuts across that face (the port's orientation is not the
+   * plane's normal) the outline is the width bar, as before. Where the plane's
+   * normal *is* the port's orientation the plane lies in the port's own plane,
+   * so the cut is the whole face and the outline is a box: the width across the
+   * port and the layer's thickness along the orientation (spec R4).
+   */
+  private portOutline(port: PortMeta, payload: SectionPayload): [number, number][] | null {
+    const half = PORT_FADE_CUTOFF * (this.state?.port_fade_um ?? PORT_FADE_UM);
+    const [ox, oy, oz] = payload.origin;
+    const angle = ((port.orientation ?? 0) * Math.PI) / 180;
+    // the port's normal (orientation) as a stack-axis unit vector; a port with no
+    // orientation is treated as +x, matching the 3D glyph (spec R3)
+    const nx = Math.cos(angle);
+    const ny = Math.sin(angle);
+    // the port face spans its width across the orientation (transverse) and the
+    // layer's thickness vertically; both half-extents, so the face box is
+    // width x height (spec R4)
+    const hw = port.width / 2;
+    const hh = port.height / 2;
     if (payload.plane === "xy") {
+      // the plane's normal is z; a port is never z-facing, so it always cuts the
+      // face and the outline is the width bar
       if (Math.abs(port.z - (payload.position - oz)) > half) return null;
-      // the bar runs across the port, perpendicular to its orientation
-      const angle = ((port.orientation ?? 0) * Math.PI) / 180;
-      const w = port.width / 2;
       return [
-        [port.x - w * Math.sin(angle), port.y + w * Math.cos(angle)],
-        [port.x + w * Math.sin(angle), port.y - w * Math.cos(angle)],
+        [port.x - hw * ny, port.y + hw * nx],
+        [port.x + hw * ny, port.y - hw * nx],
       ];
     }
     if (payload.plane === "xz") {
+      // the plane's normal is y; a y-facing port lies in it and shows its face,
+      // so the cut is the face box: width across x, thickness along z
       if (Math.abs(port.y - (payload.position - oy)) > half) return null;
+      if (Math.abs(ny) > 1e-9) {
+        return [
+          [port.x - hw * ny, port.z - hh],
+          [port.x + hw * ny, port.z - hh],
+          [port.x + hw * ny, port.z + hh],
+          [port.x - hw * ny, port.z + hh],
+        ];
+      }
       return [
-        [port.x, port.z - port.width / 2],
-        [port.x, port.z + port.width / 2],
+        [port.x, port.z - hw],
+        [port.x, port.z + hw],
       ];
     }
-    // yz: u = y, v = z (z vertical, spec R4)
+    // yz: u = y, v = z (z vertical, spec R4); the plane's normal is x, so an
+    // x-facing port lies in it and shows its face, so the cut is the face box:
+    // width across y, thickness along z
     if (Math.abs(port.x - (payload.position - ox)) > half) return null;
+    if (Math.abs(nx) > 1e-9) {
+      return [
+        [port.y - hw * nx, port.z - hh],
+        [port.y + hw * nx, port.z - hh],
+        [port.y + hw * nx, port.z + hh],
+        [port.y - hw * nx, port.z + hh],
+      ];
+    }
     return [
-      [port.y, port.z - port.width / 2],
-      [port.y, port.z + port.width / 2],
+      [port.y, port.z - hw],
+      [port.y, port.z + hw],
     ];
   }
 
@@ -450,11 +524,16 @@ export class Section2D {
     const rect = this.canvas.getBoundingClientRect();
     const [u, v] = this.unproject(event.clientX - rect.left, event.clientY - rect.top);
     for (const port of this.meta.ports) {
-      const cut = this.portCut(port, payload);
-      if (!cut) continue;
-      if (this.nearSegment(u, v, cut[0], cut[1], 6 / this.view.scale)) {
-        this.onPortSelect(port.name);
-        return;
+      const outline = this.portOutline(port, payload);
+      if (!outline) continue;
+      const tol = 6 / this.view.scale;
+      for (let i = 0; i < outline.length; i++) {
+        const a = outline[i];
+        const b = outline[(i + 1) % outline.length];
+        if (this.nearSegment(u, v, a, b, tol)) {
+          this.onPortSelect(port.name);
+          return;
+        }
       }
     }
     this.onPortSelect(null);

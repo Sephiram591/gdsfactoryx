@@ -98,6 +98,9 @@
 .gfx-sensitivity {
   width: 180px;
 }
+.gfx-fade {
+  width: 180px;
+}
 .gfx-settings-value {
   min-width: 34px;
   opacity: 0.8;

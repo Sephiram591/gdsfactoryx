@@ -43,6 +43,9 @@ __all__ = ["LayerStyle", "ViewerState", "spec_glyphs"]
 FILL_OPACITY = 0.15
 LEVEL_OPACITY = 0.9
 
+#: Default gaussian 1/e distance (um) for the 2D port fade vs. plane distance (spec R4).
+PORT_FADE_UM = 0.5
+
 #: The section planes the 2D viewport can show (spec R4).
 PLANES = ("xy", "xz", "yz")
 
@@ -145,6 +148,8 @@ class ViewerState:
         self.plane_positions: dict[str, float] = {
             plane: 0.5 * sum(self.plane_bounds(plane)) for plane in PLANES
         }
+        #: the 2D port fade's gaussian 1/e distance (um), editable in settings (spec R4)
+        self.port_fade_um: float = PORT_FADE_UM
 
     # ------------------------------------------------------------------ section
 
@@ -261,6 +266,7 @@ class ViewerState:
             "show_full",
             "plane",
             "plane_position",
+            "port_fade_um",
             "sources",
             "detectors",
             "simulation",
@@ -312,6 +318,12 @@ class ViewerState:
             lo, hi = self.plane_bounds()
             self.plane_positions[self.plane] = min(hi, max(lo, position))
 
+        if "port_fade_um" in patch:
+            fade = float(patch["port_fade_um"])
+            if not math.isfinite(fade) or fade <= 0:
+                raise ValueError(f"Non-positive port fade {patch['port_fade_um']!r}")
+            self.port_fade_um = fade
+
         if "sources" in patch:
             _apply_spec_patch(self, "source", patch["sources"])
         if "detectors" in patch:
@@ -337,6 +349,7 @@ class ViewerState:
             "plane": self.plane,
             "plane_position": self.plane_position,
             "plane_bounds": list(self.plane_bounds()),
+            "port_fade_um": self.port_fade_um,
             "sources": [s.to_wire() for s in self.specs if s.category == "source"],
             "detectors": [s.to_wire() for s in self.specs if s.category == "detector"],
             "glyphs": spec_glyphs(self),

@@ -44,6 +44,8 @@ export interface PortMeta {
   z: number;
   orientation: number | null;
   width: number;
+  //: the port layer's level thickness (µm); the 2D in-plane box depth (spec R4)
+  height: number;
   layer: number;
 }
 
@@ -125,6 +127,9 @@ export interface StatePayload {
   plane: "xy" | "xz" | "yz";
   plane_position: number;
   plane_bounds: [number, number];
+  //: gaussian 1/e distance (µm) for the 2D port fade vs. the plane's distance
+  //: from the port (spec R4)
+  port_fade_um: number;
   sources: SpecPayload[];
   detectors: SpecPayload[];
   glyphs: GlyphPayload[];
