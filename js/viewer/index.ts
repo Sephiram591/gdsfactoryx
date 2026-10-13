@@ -126,7 +126,10 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   save.className = "gfx-button gfx-save";
   save.title = "save the current viewport as a PNG";
   save.innerHTML = SAVE_ICON;
-  menubar.append(title, to3d, to2d, fit, run, runPhase, runProgress, settings, exaggeration, save);
+  // the view controls sit left; the z-exaggeration slider (margin-left: auto)
+  // starts the right-hand group, which reads left to right: the run's phase
+  // label and progress bar, then Run, Save and Settings
+  menubar.append(title, to3d, to2d, fit, exaggeration, runPhase, runProgress, run, save, settings);
 
   // -- section controls (2D only, spec R4) ---------------------------------
   const sectionControls = document.createElement("div");

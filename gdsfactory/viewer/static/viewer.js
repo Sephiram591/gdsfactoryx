@@ -29762,8 +29762,9 @@ var Explorer = class {
     add("time_fs", "time", this.numberControl(
       400,
       10,
-      (value) => this.callbacks.onSettings({ time_s: value * 1e-15 }),
-      true
+      (value) => this.callbacks.onSettings({ time_s: value }),
+      true,
+      1e-15
     ), "simulation time, in fs");
     return { rows: [fields, note], note };
   }
@@ -29773,7 +29774,8 @@ var Explorer = class {
       pulse_width_frac: settings.pulse_width_frac,
       pml_thickness: settings.pml_thickness,
       resolution_um: settings.resolution_um,
-      time_fs: settings.time_s / 1e-15
+      // the control's write() divides by its scale, so pass kernel units here
+      time_fs: settings.time_s
     };
     for (const [key, control] of this.simFields) {
       if (key === "port_size_mult") continue;
@@ -29820,7 +29822,11 @@ var Explorer = class {
       }
     };
   }
-  numberControl(initial, step, onChange, live = false) {
+  //: a numeric field in **display units**, converted to the kernel's units only
+  //: on emit (`scale` = kernel units per display unit). The box therefore holds
+  //: exactly what was typed; the round-trip through a small unit (the time field
+  //: shows fs but stores s) would otherwise echo back as `999.9999999999999`.
+  numberControl(initial, step, onChange, live = false, scale = 1) {
     const input = document.createElement("input");
     input.type = "number";
     input.step = String(step);
@@ -29828,15 +29834,15 @@ var Explorer = class {
     input.value = String(initial);
     const emit = (text) => {
       const value = Number(text);
-      if (Number.isFinite(value)) onChange(value);
+      if (Number.isFinite(value)) onChange(value * scale);
     };
     if (live) coalesce(input, emit);
     else input.addEventListener("change", () => emit(input.value));
     return {
       element: input,
       write(value) {
-        const text = value === null || value === void 0 ? "" : String(value);
-        if (document.activeElement !== input && input.value !== text) input.value = text;
+        const shown = value === null || value === void 0 ? "" : String(displayNumber(Number(value) / scale));
+        if (document.activeElement !== input && input.value !== shown) input.value = shown;
       },
       setDisabled(value) {
         input.disabled = value;
@@ -29952,6 +29958,12 @@ var Explorer = class {
     );
   }
 };
+function displayNumber(value) {
+  if (!Number.isFinite(value)) return "";
+  const rounded = Math.round(value);
+  const tolerance = Math.max(Math.abs(value), 1) * 1e-9;
+  return Math.abs(value - rounded) <= tolerance ? rounded : value;
+}
 function coalesce(input, handler) {
   let frame = 0;
   let pending = null;
@@ -34663,7 +34675,7 @@ function render({ model, el }) {
   save.className = "gfx-button gfx-save";
   save.title = "save the current viewport as a PNG";
   save.innerHTML = SAVE_ICON;
-  menubar.append(title2, to3d, to2d, fit, run, runPhase, runProgress, settings, exaggeration, save);
+  menubar.append(title2, to3d, to2d, fit, exaggeration, runPhase, runProgress, run, save, settings);
   const sectionControls = document.createElement("div");
   sectionControls.className = "gfx-section-controls";
   sectionControls.hidden = true;

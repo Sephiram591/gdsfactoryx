@@ -475,8 +475,10 @@ export class Explorer {
     add("resolution_um", "resolution", this.numberControl(
       0.02, 0.001, (value) => this.callbacks.onSettings({ resolution_um: value }), true,
     ), "grid resolution, in µm");
+    // the box is in fs; the kernel stores seconds (scale = s per fs), so the
+    // typed text survives the round-trip (spec R13)
     add("time_fs", "time", this.numberControl(
-      400, 10, (value) => this.callbacks.onSettings({ time_s: value * 1e-15 }), true,
+      400, 10, (value) => this.callbacks.onSettings({ time_s: value }), true, 1e-15,
     ), "simulation time, in fs");
     return { rows: [fields, note], note };
   }
@@ -487,7 +489,8 @@ export class Explorer {
       pulse_width_frac: settings.pulse_width_frac,
       pml_thickness: settings.pml_thickness,
       resolution_um: settings.resolution_um,
-      time_fs: settings.time_s / 1e-15,
+      // the control's write() divides by its scale, so pass kernel units here
+      time_fs: settings.time_s,
     };
     for (const [key, control] of this.simFields) {
       if (key === "port_size_mult") continue;
@@ -542,11 +545,16 @@ export class Explorer {
     };
   }
 
+  //: a numeric field in **display units**, converted to the kernel's units only
+  //: on emit (`scale` = kernel units per display unit). The box therefore holds
+  //: exactly what was typed; the round-trip through a small unit (the time field
+  //: shows fs but stores s) would otherwise echo back as `999.9999999999999`.
   private numberControl(
     initial: number,
     step: number,
     onChange: (value: number) => void,
     live = false,
+    scale = 1,
   ): Control {
     const input = document.createElement("input");
     input.type = "number";
@@ -555,15 +563,16 @@ export class Explorer {
     input.value = String(initial);
     const emit = (text: string): void => {
       const value = Number(text);
-      if (Number.isFinite(value)) onChange(value);
+      if (Number.isFinite(value)) onChange(value * scale);
     };
     if (live) coalesce(input, emit);
     else input.addEventListener("change", () => emit(input.value));
     return {
       element: input,
       write(value) {
-        const text = value === null || value === undefined ? "" : String(value);
-        if (document.activeElement !== input && input.value !== text) input.value = text;
+        const shown =
+          value === null || value === undefined ? "" : String(displayNumber(Number(value) / scale));
+        if (document.activeElement !== input && input.value !== shown) input.value = shown;
       },
       setDisabled(value) {
         input.disabled = value;
@@ -696,6 +705,19 @@ export class Explorer {
 }
 
 // ---------------------------------------------------------------------- helpers
+
+/**
+ * Formats a number for a display-unit field, absorbing the float noise a unit
+ * round-trip leaves behind (`1e-12 / 1e-15` is `999.9999999999999`, not `1000`).
+ * A value within a relative `1e-9` of a nearby integer is shown as that integer;
+ * everything else keeps its natural `String()` form.
+ */
+function displayNumber(value: number): number | string {
+  if (!Number.isFinite(value)) return "";
+  const rounded = Math.round(value);
+  const tolerance = Math.max(Math.abs(value), 1) * 1e-9;
+  return Math.abs(value - rounded) <= tolerance ? rounded : value;
+}
 
 /** Reports `input` events at most once per frame, with the latest value. */
 function coalesce(input: HTMLInputElement, handler: (value: string) => void): void {

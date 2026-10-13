@@ -275,7 +275,10 @@ editable fields:
   run would use; `fdtdx.BoundaryConfig.from_uniform_bound(thickness=...)`).
 - **Simulation config** — the fields that affect the grid, notably resolution
   and time (`fdtdx.SimulationConfig`). These also feed Q8's slider step and
-  Q18's derived defaults.
+  Q18's derived defaults. A numeric field shows its value in display units and
+  converts only when it is sent to the kernel (the time field shows fs while
+  the kernel stores s), so the text the user typed is never rewritten by a
+  unit round-trip.
 
 Edits are local state (D10/D11); nothing is placed or run (§2).
 
