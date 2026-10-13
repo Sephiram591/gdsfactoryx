@@ -177,7 +177,25 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   fullHint.textContent = "unpainted";
   fullRow.append(fullLabel, fullInput, fullHint);
 
-  settingsPanel.append(settingsHeading, controlRow, sensitivityRow, fullRow);
+  // the 2D port fade's 1/e distance (spec R4): larger keeps ports visible across
+  // more planes, smaller restricts them to their own plane
+  const fadeRow = document.createElement("label");
+  fadeRow.className = "gfx-settings-row";
+  fadeRow.title = "2D port fade: distance (µm) at which a port's outline falls to 1/e";
+  const fadeLabel = document.createElement("span");
+  fadeLabel.textContent = "Port fade (µm)";
+  const fadeInput = document.createElement("input");
+  fadeInput.type = "range";
+  fadeInput.className = "gfx-fade";
+  fadeInput.min = "0.05";
+  fadeInput.max = "5";
+  fadeInput.step = "0.05";
+  fadeInput.value = "0.5";
+  const fadeValue = document.createElement("span");
+  fadeValue.className = "gfx-settings-value";
+  fadeRow.append(fadeLabel, fadeInput, fadeValue);
+
+  settingsPanel.append(settingsHeading, controlRow, sensitivityRow, fadeRow, fullRow);
   viewport.appendChild(settingsPanel);
 
   el.append(menubar, sectionControls, explorer.root, viewport);
@@ -248,6 +266,11 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   fullInput.addEventListener("change", () =>
     sendPatch(model, { show_full: fullInput.checked }),
   );
+  fadeInput.addEventListener("input", () => {
+    const value = Number(fadeInput.value);
+    fadeValue.textContent = `${value.toFixed(2)} µm`;
+    sendPatch(model, { port_fade_um: value });
+  });
   to3d.addEventListener("click", () => {
     closeSettings();
     sendPatch(model, { active_viewport: "3d" });
@@ -320,6 +343,8 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
     }
     glyphs.setSelected(state.selection?.kind === "port" ? state.selection.name : null);
     fullInput.checked = state.show_full;
+    if (document.activeElement !== fadeInput) fadeInput.value = String(state.port_fade_um);
+    fadeValue.textContent = `${state.port_fade_um.toFixed(2)} µm`;
     section.setState(state);
     explorer.render(state);
   };

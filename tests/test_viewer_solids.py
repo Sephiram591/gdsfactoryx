@@ -276,3 +276,14 @@ def test_ports_are_in_the_local_origin_frame() -> None:
                 and np.all(point <= level.painted.positions.max(axis=0) + 1e-3)
                 for level in levels
             ), f"{name}/{port.name}: {point} inside no level"
+
+
+def test_port_height_is_the_level_thickness() -> None:
+    """A port's height is its layer's level thickness, for the 2D in-plane box (spec R4).
+
+    F2's core level is 0.22 um thick and both ports sit on it, so each port's
+    height is 0.22 regardless of its width (0.5).
+    """
+    _, _, levels, _, ports = solids.build(f2_stack())
+    thickness = {level.name: level.thickness for level in levels}["core"]
+    assert ports and all(math.isclose(port.height, thickness, abs_tol=1e-9) for port in ports)

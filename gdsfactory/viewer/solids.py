@@ -103,6 +103,9 @@ class PortGlyph(NamedTuple):
 
     ``x``/``y``/``z`` are in the same local-origin frame as the level meshes
     (spec C5), so the browser draws the glyphs and the solids together.
+    ``height`` is the port layer's level thickness, so the 2D viewport can size
+    an in-plane port box to the level (spec R4); it falls back to the port width
+    when the layer has no level (spec Q12).
     """
 
     name: str
@@ -111,6 +114,7 @@ class PortGlyph(NamedTuple):
     z: float
     orientation: float | None
     width: float
+    height: float
     layer: int
 
 
@@ -384,15 +388,32 @@ def _level_full(
 # ------------------------------------------------------------------ ports, painting, meshes
 
 
-def _port_z(device: Any, layer: int) -> float:
-    """The height a port's glyph is drawn at: the mid-height of its layer's level (spec Q12)."""
+def _port_level(device: Any, layer: int) -> Any | None:
+    """The level whose expression reads ``layer``, or None (spec Q12)."""
     from gdsfactory.fdtdx_stack import _expr_layers
 
     for level in device.levels:
         if layer in _expr_layers(level.expr):
-            lo, hi = span(level)
-            return 0.5 * (lo + hi)
+            return level
+    return None
+
+
+def _port_z(device: Any, layer: int) -> float:
+    """The height a port's glyph is drawn at: the mid-height of its layer's level (spec Q12)."""
+    level = _port_level(device, layer)
+    if level is not None:
+        lo, hi = span(level)
+        return 0.5 * (lo + hi)
     return float(device.z_center)
+
+
+def _port_height(device: Any, layer: int, width: float) -> float:
+    """A port's level thickness, or its width when the layer has no level (spec Q12)."""
+    level = _port_level(device, layer)
+    if level is None:
+        return width
+    lo, hi = span(level)
+    return hi - lo
 
 
 def _port_glyphs(device: Any, origin: tuple[float, float, float]) -> tuple[PortGlyph, ...]:
@@ -411,6 +432,7 @@ def _port_glyphs(device: Any, origin: tuple[float, float, float]) -> tuple[PortG
             z=_port_z(device, int(p.layer)) - oz,
             orientation=None if p.orientation is None else float(p.orientation),
             width=float(p.width),
+            height=_port_height(device, int(p.layer), float(p.width)),
             layer=int(p.layer),
         )
         for p in device.ports
