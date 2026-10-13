@@ -51,6 +51,21 @@ const GEAR_ICON =
   '<circle cx="12" cy="12" r="3"/>' +
   '<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
 
+//: A "fit to view" glyph for the Fit button (four arrows pointing outward).
+const FIT_ICON =
+  '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+  'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+  '<polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/>' +
+  '<polyline points="21 15 21 21 15 21"/><polyline points="3 9 3 3 9 3"/>' +
+  '<line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>' +
+  '<line x1="21" y1="21" x2="14" y2="14"/><line x1="3" y1="3" x2="10" y2="10"/></svg>';
+
+//: A play triangle for the Run button (spec R14 mode 1).
+const RUN_ICON =
+  '<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" ' +
+  'stroke="currentColor" stroke-width="1" stroke-linejoin="round" aria-hidden="true">' +
+  '<path d="M7 4.5v15l13-7.5z"/></svg>';
+
 function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void {
   const geometry = model.get("geometry") as GeometryPayload;
   const meta = model.get("meta") as MetaPayload;
@@ -66,9 +81,8 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   title.textContent = "gdsfactory viewer";
   const to3d = button("3D", true);
   const to2d = button("2D", false);
-  const fit = button("Fit", false);
-  const run = button("Run", false);
-  run.title = "run the simulation in the kernel (spec R14 mode 1)";
+  const fit = iconButton(FIT_ICON, "fit the view to the device");
+  const run = iconButton(RUN_ICON, "run the simulation in the kernel (spec R14 mode 1)");
   const runNote = document.createElement("span");
   runNote.className = "gfx-run-note";
   runNote.hidden = true;
@@ -130,6 +144,7 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
     onPatch: (patch) => sendPatch(model, patch),
     onSelect: (selection) => sendPatch(model, { selection }),
     onAddSource: (port) => send(model, { event: "add_source", port }),
+    onAddDetector: (port) => send(model, { event: "add_detector", port }),
     onUpdateSpec: (kind, id, change) =>
       send(model, { event: "update_spec", kind, spec: { id, ...change } }),
     onRemoveSpec: (kind, id) => send(model, { event: "remove_spec", kind, id }),
@@ -449,6 +464,16 @@ function button(text: string, active: boolean): HTMLButtonElement {
   element.type = "button";
   element.className = active ? "gfx-button gfx-active" : "gfx-button";
   element.textContent = text;
+  return element;
+}
+
+//: A menubar button whose label is a glyph, with the text in its tooltip (spec D9).
+function iconButton(icon: string, title: string): HTMLButtonElement {
+  const element = document.createElement("button");
+  element.type = "button";
+  element.className = "gfx-button gfx-icon";
+  element.title = title;
+  element.innerHTML = icon;
   return element;
 }
 

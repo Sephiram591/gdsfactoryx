@@ -29439,8 +29439,9 @@ var Explorer = class {
     this.detectorList = document.createElement("div");
     this.detectorList.className = "gfx-spec-list";
     this.sourceEmpty = emptyNote("No sources yet.");
-    this.detectorEmpty = emptyNote("Double-click a port in the 3D view to add a detector.");
-    this.sourceAdd = this.buildAddSource();
+    this.detectorEmpty = emptyNote("None yet. Use +, or double-click a port in 3D.");
+    this.sourceAdd = this.buildAddRow("source");
+    this.detectorAdd = this.buildAddRow("detector");
     const sim = this.buildSimForm();
     this.simNote = sim.note;
     this.panels = [
@@ -29449,8 +29450,16 @@ var Explorer = class {
         this.section("Ports", this.meta.ports.map((port) => this.buildPortRow(port)))
       ]),
       this.panel([
-        this.section("Sources", [this.sourceAdd, this.sourceEmpty, this.sourceList]),
-        this.section("Detectors", [this.detectorEmpty, this.detectorList])
+        this.section(
+          "Sources",
+          [this.sourceAdd.root, this.sourceEmpty, this.sourceList],
+          this.sourceAdd
+        ),
+        this.section(
+          "Detectors",
+          [this.detectorAdd.root, this.detectorEmpty, this.detectorList],
+          this.detectorAdd
+        )
       ]),
       this.panel([this.section("Simulation", sim.rows)])
     ];
@@ -29551,24 +29560,34 @@ var Explorer = class {
     return root;
   }
   // --------------------------------------------------------- sources/detectors
-  /** The "New source" control: pick a port, then add (spec R12). */
-  buildAddSource() {
-    const row2 = document.createElement("div");
-    row2.className = "gfx-row gfx-add";
+  /** A port picker plus an add button, revealed by the section's "+" (spec R12). */
+  buildAddRow(kind) {
+    const root = document.createElement("div");
+    root.className = "gfx-row gfx-add";
+    root.hidden = true;
     const select = document.createElement("select");
     select.className = "gfx-select gfx-add-port";
-    select.title = "port to add a source on";
-    const add = document.createElement("button");
-    add.type = "button";
-    add.className = "gfx-button";
-    add.textContent = "+ New source";
-    add.addEventListener("click", () => {
+    select.title = `port to add a ${kind} on`;
+    const button2 = document.createElement("button");
+    button2.type = "button";
+    button2.className = "gfx-button";
+    button2.textContent = "Add";
+    button2.addEventListener("click", () => {
       if (this.locked || !select.value) return;
-      this.callbacks.onAddSource(select.value);
+      if (kind === "source") this.callbacks.onAddSource(select.value);
+      else this.callbacks.onAddDetector(select.value);
     });
-    row2.append(select, add);
-    this.sourceAddRow = row2;
-    return select;
+    root.append(select, button2);
+    return { root, select, button: button2, open: false };
+  }
+  /** Shows or hides a section's add row (the section header's "+", spec R12). */
+  toggleAdd(add) {
+    add.open = !add.open;
+    add.root.hidden = !add.open;
+    if (add.open) {
+      this.fillPortChoices(add.select);
+      add.select.focus();
+    }
   }
   renderSpecs(specs, kind, rows, list, empty) {
     const seen = /* @__PURE__ */ new Set();
@@ -29788,20 +29807,21 @@ var Explorer = class {
       if (remove) remove.disabled = locked;
     }
     for (const control of this.simFields.values()) control.setDisabled(locked);
-    this.sourceAdd.disabled = locked;
-    const add = this.sourceAddRow.querySelector("button");
-    if (add) add.disabled = locked;
+    for (const add of [this.sourceAdd, this.detectorAdd]) {
+      add.select.disabled = locked;
+      add.button.disabled = locked;
+    }
     this.simNote.hidden = !locked;
     if (locked) this.simNote.textContent = "The setup is locked while a run is in flight.";
   }
-  /** Fills the "New source" port list from the device's ports (spec R12). */
-  fillPortChoices() {
-    if (this.sourceAdd.options.length > 0) return;
+  /** Fills an add row's port list from the device's ports (spec R12). */
+  fillPortChoices(select) {
+    if (select.options.length > 0) return;
     for (const port of this.meta.ports) {
       const option = document.createElement("option");
       option.value = port.name;
       option.textContent = port.name;
-      this.sourceAdd.appendChild(option);
+      select.appendChild(option);
     }
   }
   // ------------------------------------------------------------------- controls
@@ -29925,14 +29945,31 @@ var Explorer = class {
   setTab(index) {
     this.panels.forEach((panel, i) => panel.hidden = i !== index);
     this.tabButtons.forEach((tab, i) => tab.classList.toggle("gfx-active", i === index));
-    if (index === 1) this.fillPortChoices();
+    if (index === 1) {
+      this.fillPortChoices(this.sourceAdd.select);
+      this.fillPortChoices(this.detectorAdd.select);
+    }
   }
-  section(title2, rows) {
+  section(title2, rows, add) {
     const section = document.createElement("div");
     section.className = "gfx-section";
     const header = document.createElement("div");
     header.className = "gfx-section-header";
-    header.textContent = title2;
+    const name = document.createElement("span");
+    name.textContent = title2;
+    header.appendChild(name);
+    if (add) {
+      const plus = document.createElement("button");
+      plus.type = "button";
+      plus.className = "gfx-section-add";
+      plus.textContent = "+";
+      plus.title = `add a ${title2.toLowerCase().replace(/s$/, "")}`;
+      plus.addEventListener("click", () => {
+        if (this.locked) return;
+        this.toggleAdd(add);
+      });
+      header.appendChild(plus);
+    }
     section.appendChild(header);
     for (const row2 of rows) section.appendChild(row2);
     return section;
@@ -34611,6 +34648,8 @@ var CONTROL_LABELS = {
 };
 var SAVE_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>';
 var GEAR_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
+var FIT_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><polyline points="21 15 21 21 15 21"/><polyline points="3 9 3 3 9 3"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/><line x1="21" y1="21" x2="14" y2="14"/><line x1="3" y1="3" x2="10" y2="10"/></svg>';
+var RUN_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1" stroke-linejoin="round" aria-hidden="true"><path d="M7 4.5v15l13-7.5z"/></svg>';
 function render({ model, el }) {
   const geometry = model.get("geometry");
   const meta = model.get("meta");
@@ -34623,9 +34662,8 @@ function render({ model, el }) {
   title2.textContent = "gdsfactory viewer";
   const to3d = button("3D", true);
   const to2d = button("2D", false);
-  const fit = button("Fit", false);
-  const run = button("Run", false);
-  run.title = "run the simulation in the kernel (spec R14 mode 1)";
+  const fit = iconButton(FIT_ICON, "fit the view to the device");
+  const run = iconButton(RUN_ICON, "run the simulation in the kernel (spec R14 mode 1)");
   const runNote = document.createElement("span");
   runNote.className = "gfx-run-note";
   runNote.hidden = true;
@@ -34679,6 +34717,7 @@ function render({ model, el }) {
     onPatch: (patch) => sendPatch(model, patch),
     onSelect: (selection) => sendPatch(model, { selection }),
     onAddSource: (port) => send(model, { event: "add_source", port }),
+    onAddDetector: (port) => send(model, { event: "add_detector", port }),
     onUpdateSpec: (kind, id, change) => send(model, { event: "update_spec", kind, spec: { id, ...change } }),
     onRemoveSpec: (kind, id) => send(model, { event: "remove_spec", kind, id }),
     onSettings: (settings2) => send(model, { event: "set_settings", settings: settings2 })
@@ -34947,6 +34986,14 @@ function button(text, active) {
   element.type = "button";
   element.className = active ? "gfx-button gfx-active" : "gfx-button";
   element.textContent = text;
+  return element;
+}
+function iconButton(icon, title2) {
+  const element = document.createElement("button");
+  element.type = "button";
+  element.className = "gfx-button gfx-icon";
+  element.title = title2;
+  element.innerHTML = icon;
   return element;
 }
 var index_default = { render };

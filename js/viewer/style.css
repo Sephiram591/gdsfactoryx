@@ -55,6 +55,14 @@
   border-color: #6a8fc5;
 }
 
+/* an icon-only menubar button (Fit, Run); the label is its title */
+.gfx-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 8px;
+}
+
 .gfx-control {
   display: flex;
   align-items: center;
@@ -189,11 +197,35 @@
 }
 
 .gfx-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   opacity: 0.7;
   margin-bottom: 4px;
+}
+
+/* the "+" beside a section header: reveals that section's add row (spec R12) */
+.gfx-section-add {
+  padding: 0 6px;
+  border: 1px solid #4a4a55;
+  border-radius: 4px;
+  background: #2f2f37;
+  color: inherit;
+  font-size: 13px;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.gfx-section-add:hover {
+  background: #3a3a45;
+}
+
+.gfx-section-add:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .gfx-row {
