@@ -44,13 +44,13 @@ const CONTROL_LABELS: Record<ControlKind, string> = {
   orbit: "Orbit (turntable)",
 };
 
-//: A floppy-disk glyph for the save-image button (spec R3, R4).
+//: A camera glyph for the screenshot button (spec R3, R4): it saves an image
+//: of the active viewport, or of the whole widget, per the settings toggle.
 const SAVE_ICON =
   '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
   'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
-  '<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>' +
-  '<polyline points="17 21 17 13 7 13 7 21"/>' +
-  '<polyline points="7 3 7 8 15 8"/></svg>';
+  '<path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>' +
+  '<circle cx="12" cy="13" r="4"/></svg>';
 
 //: A gear glyph for the settings button (spec R3).
 const GEAR_ICON =
@@ -84,9 +84,6 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   // -- menubar (spec D9) ----------------------------------------------------
   const menubar = document.createElement("div");
   menubar.className = "gfx-menubar";
-  const title = document.createElement("span");
-  title.className = "gfx-title";
-  title.textContent = "gdsfactory viewer";
   const to3d = button("3D", true);
   const to2d = button("2D", false);
   const fit = iconButton(FIT_ICON, "fit the view to the device");
@@ -126,10 +123,12 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   save.className = "gfx-button gfx-save";
   save.title = "save the current viewport as a PNG";
   save.innerHTML = SAVE_ICON;
-  // the view controls sit left; the z-exaggeration slider (margin-left: auto)
-  // starts the right-hand group, which reads left to right: the run's phase
-  // label and progress bar, then Run, Save and Settings
-  menubar.append(title, to3d, to2d, fit, exaggeration, runPhase, runProgress, run, save, settings);
+  // the view controls sit left (3D, 2D, Fit, then the shared z multiplier);
+  // the spacer starts the right-hand group, which reads left to right: the
+  // run's phase label and progress bar, then Run, Save and Settings
+  const spacer = document.createElement("div");
+  spacer.className = "gfx-spacer";
+  menubar.append(to3d, to2d, fit, exaggeration, spacer, runPhase, runProgress, run, save, settings);
 
   // -- section controls (2D only, spec R4) ---------------------------------
   const sectionControls = document.createElement("div");
@@ -244,7 +243,27 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   fadeValue.className = "gfx-settings-value";
   fadeRow.append(fadeLabel, fadeInput, fadeValue);
 
-  settingsPanel.append(settingsHeading, controlRow, sensitivityRow, fadeRow, fullRow);
+  // screenshot scope (spec R3, D14): the camera button saves just the active
+  // viewport by default, or the whole widget when this is checked. It is a
+  // per-viewer preference, kept in localStorage (it never reaches the kernel).
+  const shotRow = document.createElement("label");
+  shotRow.className = "gfx-settings-row";
+  shotRow.title = "what the camera button saves";
+  const shotLabel = document.createElement("span");
+  shotLabel.textContent = "Screenshot";
+  const shotInput = document.createElement("input");
+  shotInput.type = "checkbox";
+  shotInput.checked = readShotWhole();
+  const shotHint = document.createElement("span");
+  shotHint.className = "gfx-settings-value";
+  shotHint.textContent = shotInput.checked ? "whole widget" : "viewport";
+  shotInput.addEventListener("change", () => {
+    shotHint.textContent = shotInput.checked ? "whole widget" : "viewport";
+    writeShotWhole(shotInput.checked);
+  });
+  shotRow.append(shotLabel, shotInput, shotHint);
+
+  settingsPanel.append(settingsHeading, controlRow, sensitivityRow, fadeRow, fullRow, shotRow);
   viewport.appendChild(settingsPanel);
 
   el.append(menubar, sectionControls, explorer.root, viewport);
@@ -354,7 +373,16 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   });
   save.addEventListener("click", () => {
     const is2d = currentState(model)?.active_viewport === "2d";
-    download(is2d ? section.toPng() : scene.toPng(), is2d ? "cross-section.png" : "view-3d.png");
+    const viewportPng = is2d ? section.toPng() : scene.toPng();
+    if (readShotWhole()) {
+      // the whole widget: rasterize the shell (chrome + the live canvas) into
+      // one image, falling back to the viewport alone if that is unavailable
+      captureShell(el, viewportPng).then((png) =>
+        download(png, is2d ? "viewer-2d.png" : "viewer-3d.png"),
+      );
+      return;
+    }
+    download(viewportPng, is2d ? "cross-section.png" : "view-3d.png");
   });
 
   // The slider drags faster than the kernel can round trip (spec D10), so
@@ -505,6 +533,49 @@ function download(dataUrl: string, filename: string): void {
   link.href = dataUrl;
   link.download = filename;
   link.click();
+}
+
+//: the localStorage key for the screenshot scope (spec R3, D14); a per-viewer
+//: preference, so it stays in the browser and never reaches the kernel
+const SHOT_WHOLE_KEY = "gfx-shot-whole";
+
+/** Whether the camera button should capture the whole widget (default: no). */
+function readShotWhole(): boolean {
+  try {
+    return window.localStorage.getItem(SHOT_WHOLE_KEY) === "1";
+  } catch {
+    return false; // a blocked/absent store just means the default
+  }
+}
+
+function writeShotWhole(whole: boolean): void {
+  try {
+    window.localStorage.setItem(SHOT_WHOLE_KEY, whole ? "1" : "0");
+  } catch {
+    // storage unavailable (private window, blocked) — the setting is session-only
+  }
+}
+
+/**
+ * Rasterizes the whole widget shell into one PNG data URL (spec D14).
+ *
+ * html2canvas redraws the DOM; the three.js canvas is a WebGL surface it can
+ * only read because the renderer keeps its drawing buffer (see `Scene3D`). If
+ * html2canvas is unavailable or throws, the viewport image is returned instead,
+ * so the button always produces something.
+ */
+async function captureShell(shell: HTMLElement, fallbackPng: string): Promise<string> {
+  try {
+    const { default: html2canvas } = await import("html2canvas");
+    const canvas = await html2canvas(shell, {
+      backgroundColor: null,
+      // the shell is dark; keep its own colors rather than html2canvas's white
+      useCORS: true,
+    });
+    return canvas.toDataURL("image/png");
+  } catch {
+    return fallbackPng;
+  }
 }
 
 function currentState(model: AnyModel): StatePayload | undefined {

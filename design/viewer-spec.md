@@ -167,10 +167,14 @@ AC:
   - z-exaggeration, since sub-µm films on 10–100 µm devices are hard to see at 1:1
   - the current 2D slice plane drawn in 3D
   - a settings screen (a gear beside Fit) that replaces the viewport and holds
-    the rotation style, its sensitivity and the full-extent toggle (D14)
+    the rotation style, its sensitivity, the full-extent toggle and the
+    screenshot scope (D14)
   - a "show full extent (unpainted)" toggle, per layer or global, to reveal a
     level that a higher-`mesh_order` level covers everywhere (Q13)
-  - a "save image" button that writes the active viewport to a PNG (D14)
+  - a **camera** button (a screenshot icon) that writes a PNG (D14). It saves
+    the **active viewport** by default; the settings' screenshot scope makes it
+    save the **whole widget** instead. The scope is a per-viewer preference kept
+    in the browser (localStorage), not kernel state.
 
 AC:
 - Hiding `oxide` reveals the `lower` and `upper` SiN levels and their vertical offset.
@@ -676,8 +680,15 @@ Three related viewport additions made while implementing M3.
   plane was left. The z multiplier is **shared** between the two viewports — one
   menubar slider drives both — and it does **not** affect the xy plane, whose
   vertical axis is y, not z.
-- **Save image.** A save button (floppy-disk glyph) writes the active viewport
-  to a PNG: the 3D renderer's canvas or the 2D canvas.
+- **Save image.** A save button (a camera glyph, the screenshot icon) writes a
+  PNG of the active viewport: the 3D renderer's canvas or the 2D canvas. The
+  settings screen's **screenshot scope** switches it to capture the **whole
+  widget** instead — the menubar, explorer and viewport together — via
+  `html2canvas` over the widget root, with the viewport canvas as a fallback if
+  that capture fails. The scope defaults to the viewport alone and is a
+  per-viewer preference in the browser (localStorage), not kernel state. The 3D
+  renderer sets `preserveDrawingBuffer` so the whole-widget capture does not
+  draw a blank canvas.
 - **Implemented in M3** (`js/viewer/scene.ts`, `section.ts`, `index.ts`;
   `gdsfactory/viewer/state.py`).
 - **Relates to R3, R4, D9, D10, Q8.**
@@ -954,3 +965,11 @@ from that, both settled here.
     `phase` trait. Placement and JAX compilation dominate the wall time and
     report no fraction, so the label says which phase the indeterminate bar is
     covering. Updated D15 and R14.
+- 2026-10-13 (later still): menubar polish and screenshot scope.
+  - The save button's glyph is a **camera** (the screenshot icon), and a new
+    settings row, **screenshot scope**, saves the **whole widget** instead of the
+    active viewport. It defaults to the viewport and lives in the browser
+    (localStorage). Updated R3 and D14.
+  - The redundant "gdsfactory viewer" title text is gone from the menubar.
+  - Menubar order is now: 3D, 2D, Fit, the shared **z multiplier**, then a
+    spacer, then the run's phase label and progress bar, Run, Save and Settings.

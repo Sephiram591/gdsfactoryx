@@ -176,7 +176,10 @@ export class Scene3D {
     this.camera = new THREE.PerspectiveCamera(45, width / height, 0.01, 1e5);
     this.camera.position.set(0, -2, 2);
 
-    this.renderer = new THREE.WebGLRenderer({ antialias: true });
+    // preserveDrawingBuffer keeps the frame readable after compositing, so a
+    // whole-widget capture (html2canvas) can draw this canvas without it coming
+    // out blank (spec D14)
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
     this.renderer.setPixelRatio(window.devicePixelRatio);
     this.renderer.setSize(width, height);
     container.appendChild(this.renderer.domElement);

@@ -31,6 +31,11 @@
   border-bottom: 1px solid #3a3a42;
 }
 
+/* pushes the run controls to the right edge of the menubar */
+.gfx-spacer {
+  flex: 1 1 auto;
+}
+
 .gfx-title {
   font-weight: 600;
   margin-right: 8px;
@@ -68,6 +73,12 @@
   align-items: center;
   gap: 6px;
   margin-left: auto;
+}
+
+/* in the menubar the z-multiplier sits with the view controls, not pushed
+   right: it reads 3D, 2D, Fit, z ×, then the run/phase/save/settings group */
+.gfx-menubar .gfx-control {
+  margin-left: 0;
 }
 
 /* save-image button: pushed to the far upper-right of the menubar */

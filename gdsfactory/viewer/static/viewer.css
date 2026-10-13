@@ -23,6 +23,9 @@
   background: #26262c;
   border-bottom: 1px solid #3a3a42;
 }
+.gfx-spacer {
+  flex: 1 1 auto;
+}
 .gfx-title {
   font-weight: 600;
   margin-right: 8px;
@@ -54,6 +57,9 @@
   align-items: center;
   gap: 6px;
   margin-left: auto;
+}
+.gfx-menubar .gfx-control {
+  margin-left: 0;
 }
 .gfx-save {
   display: inline-flex;
