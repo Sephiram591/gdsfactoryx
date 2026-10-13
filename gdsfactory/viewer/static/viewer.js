@@ -1,219 +1,3 @@
-// viewer/explorer.ts
-var TABS = ["Layout / Ports", "Sources / Detectors", "Simulation"];
-var Explorer = class {
-  constructor(meta, callbacks) {
-    this.meta = meta;
-    this.callbacks = callbacks;
-    this.tabButtons = [];
-    this.levelRows = /* @__PURE__ */ new Map();
-    this.portRows = /* @__PURE__ */ new Map();
-    this.root = document.createElement("div");
-    this.root.className = "gfx-explorer";
-    this.properties = document.createElement("div");
-    this.properties.className = "gfx-properties";
-    this.panels = [
-      this.panel([
-        this.section("Layers", this.meta.levels.map((level) => this.buildLevelRow(level))),
-        this.section("Ports", this.meta.ports.map((port) => this.buildPortRow(port)))
-      ]),
-      this.panel([
-        this.section("Sources", [emptyNote("No sources (R12 - M4).")]),
-        this.section("Detectors", [emptyNote("No detectors (R12 - M4).")])
-      ]),
-      this.panel([this.section("Simulation", [emptyNote("Settings (R13 - M4).")])])
-    ];
-    const tabbar = this.buildTabBar();
-    const body = document.createElement("div");
-    body.className = "gfx-tabbody";
-    body.append(...this.panels);
-    this.root.append(tabbar, body, this.properties);
-    this.setTab(0);
-  }
-  render(state) {
-    for (const level of this.meta.levels) {
-      const row2 = this.levelRows.get(level.name);
-      const style = state.styles[level.name];
-      if (!row2 || !style) continue;
-      if (row2.visible.checked !== style.visible) row2.visible.checked = style.visible;
-      if (row2.swatch.value !== style.color) row2.swatch.value = style.color;
-      const opacity = String(style.opacity);
-      if (row2.opacity.value !== opacity) row2.opacity.value = opacity;
-      row2.opacity.title = `opacity ${style.opacity.toFixed(2)}`;
-    }
-    for (const port of this.meta.ports) {
-      const row2 = this.portRows.get(port.name);
-      if (!row2) continue;
-      const visible = state.port_visible[port.name] ?? true;
-      if (row2.visible.checked !== visible) row2.visible.checked = visible;
-    }
-    for (const row2 of this.levelRows.values()) row2.root.classList.remove("gfx-selected");
-    for (const row2 of this.portRows.values()) row2.root.classList.remove("gfx-selected");
-    const selected = state.selection;
-    if (selected) this.row(selected.kind, selected.name)?.classList.add("gfx-selected");
-    this.renderProperties(state);
-  }
-  buildLevelRow(level) {
-    const root = document.createElement("div");
-    root.className = "gfx-row";
-    root.dataset.kind = "level";
-    root.dataset.name = level.name;
-    const visible = checkbox(
-      true,
-      (value) => this.callbacks.onPatch({ styles: { [level.name]: { visible: value } } })
-    );
-    const swatch = document.createElement("input");
-    swatch.type = "color";
-    swatch.className = "gfx-swatch";
-    swatch.addEventListener(
-      "input",
-      () => this.callbacks.onPatch({ styles: { [level.name]: { color: swatch.value } } })
-    );
-    const opacity = document.createElement("input");
-    opacity.type = "range";
-    opacity.min = "0";
-    opacity.max = "1";
-    opacity.step = "0.01";
-    opacity.className = "gfx-opacity";
-    let pending = null;
-    const flush = () => {
-      if (pending !== null) {
-        this.callbacks.onPatch({ styles: { [level.name]: { opacity: pending } } });
-        pending = null;
-      }
-    };
-    opacity.addEventListener("input", () => {
-      pending = Number(opacity.value);
-      if (window.requestAnimationFrame) window.requestAnimationFrame(flush);
-      else flush();
-    });
-    root.append(visible, swatch, opacity, label(level.name));
-    root.addEventListener("click", (event) => {
-      if (event.target.tagName === "INPUT") return;
-      this.callbacks.onSelect({ kind: "level", name: level.name });
-    });
-    this.levelRows.set(level.name, { root, visible, swatch, opacity });
-    return root;
-  }
-  buildPortRow(port) {
-    const root = document.createElement("div");
-    root.className = "gfx-row";
-    root.dataset.kind = "port";
-    root.dataset.name = port.name;
-    const visible = checkbox(
-      true,
-      (value) => this.callbacks.onPatch({ port_visible: { [port.name]: value } })
-    );
-    root.append(visible, label(port.name));
-    root.addEventListener("click", (event) => {
-      if (event.target.tagName === "INPUT") return;
-      this.callbacks.onSelect({ kind: "port", name: port.name });
-    });
-    this.portRows.set(port.name, { root, visible });
-    return root;
-  }
-  panel(children) {
-    const panel = document.createElement("div");
-    panel.className = "gfx-tabpanel";
-    panel.append(...children);
-    return panel;
-  }
-  buildTabBar() {
-    const bar = document.createElement("div");
-    bar.className = "gfx-tabbar";
-    TABS.forEach((name, index) => {
-      const tab = document.createElement("button");
-      tab.type = "button";
-      tab.className = "gfx-tab";
-      tab.textContent = name;
-      tab.addEventListener("click", () => this.setTab(index));
-      this.tabButtons.push(tab);
-      bar.appendChild(tab);
-    });
-    return bar;
-  }
-  setTab(index) {
-    this.panels.forEach((panel, i) => panel.hidden = i !== index);
-    this.tabButtons.forEach((tab, i) => tab.classList.toggle("gfx-active", i === index));
-  }
-  section(title2, rows) {
-    const section = document.createElement("div");
-    section.className = "gfx-section";
-    const header = document.createElement("div");
-    header.className = "gfx-section-header";
-    header.textContent = title2;
-    section.appendChild(header);
-    for (const row2 of rows) section.appendChild(row2);
-    return section;
-  }
-  row(kind, name) {
-    return this.root.querySelector(`[data-kind="${kind}"][data-name="${name}"]`) ?? void 0;
-  }
-  renderProperties(state) {
-    const selected = state.selection;
-    if (!selected) {
-      this.properties.textContent = "Select a layer or port.";
-      return;
-    }
-    const fields = selected.kind === "level" ? levelProperties(this.meta.levels.find((l) => l.name === selected.name)) : portProperties(this.meta.ports.find((p) => p.name === selected.name));
-    this.properties.replaceChildren(
-      title(`${selected.kind === "level" ? "Layer" : "Port"}: ${selected.name}`),
-      ...fields.map(([key, value]) => row(key, value))
-    );
-  }
-};
-function levelProperties(level) {
-  if (!level) return [];
-  return [
-    ["material", level.material],
-    ["mesh_order", String(level.mesh_order)],
-    ["fill", level.fill ? "yes" : "no"],
-    ["zmin", `${level.zmin.toFixed(4)} \xB5m`],
-    ["thickness", `${level.thickness.toFixed(4)} \xB5m`],
-    ["sidewall_angle", `${level.sidewall_angle}\xB0`],
-    ["bias", `${level.bias.toFixed(4)} \xB5m`]
-  ];
-}
-function portProperties(port) {
-  if (!port) return [];
-  return [
-    ["center", `(${port.x.toFixed(3)}, ${port.y.toFixed(3)}, ${port.z.toFixed(3)}) \xB5m`],
-    ["orientation", port.orientation === null ? "unset" : `${port.orientation}\xB0`],
-    ["width", `${port.width.toFixed(3)} \xB5m`],
-    ["layer", String(port.layer)]
-  ];
-}
-function checkbox(checked, onChange) {
-  const input = document.createElement("input");
-  input.type = "checkbox";
-  input.checked = checked;
-  input.addEventListener("change", () => onChange(input.checked));
-  return input;
-}
-function label(text) {
-  const span = document.createElement("span");
-  span.className = "gfx-label";
-  span.textContent = text;
-  return span;
-}
-function title(text) {
-  const div = document.createElement("div");
-  div.className = "gfx-properties-title";
-  div.textContent = text;
-  return div;
-}
-function row(key, value) {
-  const div = document.createElement("div");
-  div.className = "gfx-property";
-  div.textContent = `${key}: ${value}`;
-  return div;
-}
-function emptyNote(text) {
-  const div = document.createElement("div");
-  div.className = "gfx-note";
-  div.textContent = text;
-  return div;
-}
-
 // node_modules/three/build/three.core.js
 var REVISION = "186";
 var MOUSE = { LEFT: 0, MIDDLE: 1, RIGHT: 2, ROTATE: 0, DOLLY: 1, PAN: 2 };
@@ -14804,6 +14588,98 @@ var PlaneGeometry = class _PlaneGeometry extends BufferGeometry {
    */
   static fromJSON(data) {
     return new _PlaneGeometry(data.width, data.height, data.widthSegments, data.heightSegments);
+  }
+};
+var SphereGeometry = class _SphereGeometry extends BufferGeometry {
+  /**
+   * Constructs a new sphere geometry.
+   *
+   * @param {number} [radius=1] - The sphere radius.
+   * @param {number} [widthSegments=32] - The number of horizontal segments. Minimum value is `3`.
+   * @param {number} [heightSegments=16] - The number of vertical segments. Minimum value is `2`.
+   * @param {number} [phiStart=0] - The horizontal starting angle in radians.
+   * @param {number} [phiLength=Math.PI*2] - The horizontal sweep angle size.
+   * @param {number} [thetaStart=0] - The vertical starting angle in radians.
+   * @param {number} [thetaLength=Math.PI] - The vertical sweep angle size.
+   */
+  constructor(radius = 1, widthSegments = 32, heightSegments = 16, phiStart = 0, phiLength = Math.PI * 2, thetaStart = 0, thetaLength = Math.PI) {
+    super();
+    this.type = "SphereGeometry";
+    this.parameters = {
+      radius,
+      widthSegments,
+      heightSegments,
+      phiStart,
+      phiLength,
+      thetaStart,
+      thetaLength
+    };
+    widthSegments = Math.max(3, Math.floor(widthSegments));
+    heightSegments = Math.max(2, Math.floor(heightSegments));
+    const thetaEnd = Math.min(thetaStart + thetaLength, Math.PI);
+    let index = 0;
+    const grid = [];
+    const vertex2 = new Vector3();
+    const normal = new Vector3();
+    const indices = [];
+    const vertices = [];
+    const normals = [];
+    const uvs = [];
+    for (let iy = 0; iy <= heightSegments; iy++) {
+      const verticesRow = [];
+      const v = iy / heightSegments;
+      const theta = thetaStart + v * thetaLength;
+      const y = radius * Math.cos(theta);
+      const ringRadius = Math.sqrt(radius * radius - y * y);
+      let uOffset = 0;
+      if (iy === 0 && thetaStart === 0) {
+        uOffset = 0.5 / widthSegments;
+      } else if (iy === heightSegments && thetaEnd === Math.PI) {
+        uOffset = -0.5 / widthSegments;
+      }
+      for (let ix = 0; ix <= widthSegments; ix++) {
+        const u = ix / widthSegments;
+        const phi = phiStart + u * phiLength;
+        vertex2.x = -ringRadius * Math.cos(phi);
+        vertex2.y = y;
+        vertex2.z = ringRadius * Math.sin(phi);
+        vertices.push(vertex2.x, vertex2.y, vertex2.z);
+        normal.copy(vertex2).normalize();
+        normals.push(normal.x, normal.y, normal.z);
+        uvs.push(u + uOffset, 1 - v);
+        verticesRow.push(index++);
+      }
+      grid.push(verticesRow);
+    }
+    for (let iy = 0; iy < heightSegments; iy++) {
+      for (let ix = 0; ix < widthSegments; ix++) {
+        const a = grid[iy][ix + 1];
+        const b = grid[iy][ix];
+        const c = grid[iy + 1][ix];
+        const d = grid[iy + 1][ix + 1];
+        if (iy !== 0 || thetaStart > 0) indices.push(a, b, d);
+        if (iy !== heightSegments - 1 || thetaEnd < Math.PI) indices.push(b, c, d);
+      }
+    }
+    this.setIndex(indices);
+    this.setAttribute("position", new Float32BufferAttribute(vertices, 3));
+    this.setAttribute("normal", new Float32BufferAttribute(normals, 3));
+    this.setAttribute("uv", new Float32BufferAttribute(uvs, 2));
+  }
+  copy(source) {
+    super.copy(source);
+    this.parameters = Object.assign({}, source.parameters);
+    return this;
+  }
+  /**
+   * Factory method for creating an instance of this class from the given
+   * JSON object.
+   *
+   * @param {Object} data - A JSON object representing the serialized geometry.
+   * @return {SphereGeometry} A new instance.
+   */
+  static fromJSON(data) {
+    return new _SphereGeometry(data.radius, data.widthSegments, data.heightSegments, data.phiStart, data.phiLength, data.thetaStart, data.thetaLength);
   }
 };
 function cloneUniforms(src) {
@@ -29527,9 +29403,669 @@ var WebGLRenderer = class {
   }
 };
 
+// viewer/explorer.ts
+var TABS = ["Layout / Ports", "Sources / Detectors", "Simulation"];
+var SOURCE_TYPES = [
+  "ModePlaneSource",
+  "GaussianPlaneSource",
+  "UniformPlaneSource",
+  "HardConstantAmplitudePlanceSource",
+  "PointDipoleSource"
+];
+var DETECTOR_TYPES = [
+  "ModeOverlapDetector",
+  "PoyntingFluxDetector",
+  "PhasorDetector",
+  "FieldDetector",
+  "EnergyDetector"
+];
+var Explorer = class {
+  constructor(meta, callbacks) {
+    this.meta = meta;
+    this.callbacks = callbacks;
+    this.tabButtons = [];
+    this.levelRows = /* @__PURE__ */ new Map();
+    this.portRows = /* @__PURE__ */ new Map();
+    this.sourceRows = /* @__PURE__ */ new Map();
+    this.detectorRows = /* @__PURE__ */ new Map();
+    this.simFields = /* @__PURE__ */ new Map();
+    this.locked = false;
+    this.root = document.createElement("div");
+    this.root.className = "gfx-explorer";
+    this.properties = document.createElement("div");
+    this.properties.className = "gfx-properties";
+    this.sourceList = document.createElement("div");
+    this.sourceList.className = "gfx-spec-list";
+    this.detectorList = document.createElement("div");
+    this.detectorList.className = "gfx-spec-list";
+    this.sourceEmpty = emptyNote("No sources yet.");
+    this.detectorEmpty = emptyNote("Double-click a port in the 3D view to add a detector.");
+    this.sourceAdd = this.buildAddSource();
+    const sim = this.buildSimForm();
+    this.simNote = sim.note;
+    this.panels = [
+      this.panel([
+        this.section("Layers", this.meta.levels.map((level) => this.buildLevelRow(level))),
+        this.section("Ports", this.meta.ports.map((port) => this.buildPortRow(port)))
+      ]),
+      this.panel([
+        this.section("Sources", [this.sourceAdd, this.sourceEmpty, this.sourceList]),
+        this.section("Detectors", [this.detectorEmpty, this.detectorList])
+      ]),
+      this.panel([this.section("Simulation", sim.rows)])
+    ];
+    const tabbar = this.buildTabBar();
+    const body = document.createElement("div");
+    body.className = "gfx-tabbody";
+    body.append(...this.panels);
+    this.root.append(tabbar, body, this.properties);
+    this.setTab(0);
+  }
+  render(state) {
+    for (const level of this.meta.levels) {
+      const row2 = this.levelRows.get(level.name);
+      const style = state.styles[level.name];
+      if (!row2 || !style) continue;
+      if (row2.visible.checked !== style.visible) row2.visible.checked = style.visible;
+      if (row2.swatch.value !== style.color) row2.swatch.value = style.color;
+      const opacity = String(style.opacity);
+      if (row2.opacity.value !== opacity) row2.opacity.value = opacity;
+      row2.opacity.title = `opacity ${style.opacity.toFixed(2)}`;
+    }
+    for (const port of this.meta.ports) {
+      const row2 = this.portRows.get(port.name);
+      if (!row2) continue;
+      const visible = state.port_visible[port.name] ?? true;
+      if (row2.visible.checked !== visible) row2.visible.checked = visible;
+    }
+    this.renderSpecs(state.sources, "source", this.sourceRows, this.sourceList, this.sourceEmpty);
+    this.renderSpecs(state.detectors, "detector", this.detectorRows, this.detectorList, this.detectorEmpty);
+    this.renderSettings(state.simulation);
+    this.setLocked(state.running);
+    for (const row2 of this.levelRows.values()) row2.root.classList.remove("gfx-selected");
+    for (const row2 of this.portRows.values()) row2.root.classList.remove("gfx-selected");
+    for (const row2 of this.sourceRows.values()) row2.root.classList.remove("gfx-selected");
+    for (const row2 of this.detectorRows.values()) row2.root.classList.remove("gfx-selected");
+    const selected = state.selection;
+    if (selected) this.row(selected.kind, selected.name)?.classList.add("gfx-selected");
+    this.renderProperties(state);
+  }
+  // ------------------------------------------------------------- layout/ports
+  buildLevelRow(level) {
+    const root = document.createElement("div");
+    root.className = "gfx-row";
+    root.dataset.kind = "level";
+    root.dataset.name = level.name;
+    const visible = checkbox(
+      true,
+      (value) => this.callbacks.onPatch({ styles: { [level.name]: { visible: value } } })
+    );
+    const swatch = document.createElement("input");
+    swatch.type = "color";
+    swatch.className = "gfx-swatch";
+    swatch.addEventListener(
+      "input",
+      () => this.callbacks.onPatch({ styles: { [level.name]: { color: swatch.value } } })
+    );
+    const opacity = document.createElement("input");
+    opacity.type = "range";
+    opacity.min = "0";
+    opacity.max = "1";
+    opacity.step = "0.01";
+    opacity.className = "gfx-opacity";
+    let pending = null;
+    const flush = () => {
+      if (pending !== null) {
+        this.callbacks.onPatch({ styles: { [level.name]: { opacity: pending } } });
+        pending = null;
+      }
+    };
+    opacity.addEventListener("input", () => {
+      pending = Number(opacity.value);
+      if (window.requestAnimationFrame) window.requestAnimationFrame(flush);
+      else flush();
+    });
+    root.append(visible, swatch, opacity, label(level.name));
+    root.addEventListener("click", (event) => {
+      if (event.target.tagName === "INPUT") return;
+      this.callbacks.onSelect({ kind: "level", name: level.name });
+    });
+    this.levelRows.set(level.name, { root, visible, swatch, opacity });
+    return root;
+  }
+  buildPortRow(port) {
+    const root = document.createElement("div");
+    root.className = "gfx-row";
+    root.dataset.kind = "port";
+    root.dataset.name = port.name;
+    const visible = checkbox(
+      true,
+      (value) => this.callbacks.onPatch({ port_visible: { [port.name]: value } })
+    );
+    root.append(visible, label(port.name));
+    root.addEventListener("click", (event) => {
+      if (event.target.tagName === "INPUT") return;
+      this.callbacks.onSelect({ kind: "port", name: port.name });
+    });
+    this.portRows.set(port.name, { root, visible });
+    return root;
+  }
+  // --------------------------------------------------------- sources/detectors
+  /** The "New source" control: pick a port, then add (spec R12). */
+  buildAddSource() {
+    const row2 = document.createElement("div");
+    row2.className = "gfx-row gfx-add";
+    const select = document.createElement("select");
+    select.className = "gfx-select gfx-add-port";
+    select.title = "port to add a source on";
+    const add = document.createElement("button");
+    add.type = "button";
+    add.className = "gfx-button";
+    add.textContent = "+ New source";
+    add.addEventListener("click", () => {
+      if (this.locked || !select.value) return;
+      this.callbacks.onAddSource(select.value);
+    });
+    row2.append(select, add);
+    this.sourceAddRow = row2;
+    return select;
+  }
+  renderSpecs(specs, kind, rows, list, empty) {
+    const seen = /* @__PURE__ */ new Set();
+    for (const spec of specs) {
+      seen.add(spec.id);
+      const type = this.meta.types[spec.type];
+      if (!type) continue;
+      let row2 = rows.get(spec.id);
+      if (!row2) {
+        row2 = this.buildSpecRow(spec, type, kind);
+        rows.set(spec.id, row2);
+        list.appendChild(row2.root);
+      } else if (row2.type !== spec.type) {
+        const rebuilt = this.buildSpecRow(spec, type, kind);
+        row2.root.replaceWith(rebuilt.root);
+        rows.set(spec.id, rebuilt);
+        row2 = rebuilt;
+      }
+      this.fillSpecRow(row2, spec);
+    }
+    for (const [id, row2] of rows) {
+      if (seen.has(id)) continue;
+      row2.root.remove();
+      rows.delete(id);
+    }
+    empty.hidden = specs.length > 0;
+  }
+  buildSpecRow(spec, type, kind) {
+    const root = document.createElement("div");
+    root.className = "gfx-spec";
+    root.dataset.kind = kind;
+    root.dataset.name = spec.id;
+    const header = document.createElement("div");
+    header.className = "gfx-spec-header";
+    const visible = checkbox(
+      true,
+      (value) => this.callbacks.onUpdateSpec(kind, spec.id, { params: { visible: value } })
+    );
+    const name = document.createElement("span");
+    name.className = "gfx-label";
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "gfx-button gfx-remove";
+    remove.title = "remove";
+    remove.textContent = "\xD7";
+    remove.addEventListener("click", () => {
+      if (this.locked) return;
+      this.callbacks.onRemoveSpec(kind, spec.id);
+    });
+    header.append(visible, name, remove);
+    header.addEventListener("click", (event) => {
+      if (event.target.closest("button") || event.target.tagName === "INPUT") return;
+      this.callbacks.onSelect({ kind, name: spec.id });
+    });
+    const fields = document.createElement("div");
+    fields.className = "gfx-spec-fields";
+    const controls = /* @__PURE__ */ new Map();
+    const update = (change) => this.callbacks.onUpdateSpec(kind, spec.id, change);
+    const setParam = (key, value) => update({ params: { [key]: value } });
+    controls.set("port", this.selectControl(
+      this.meta.ports.map((p) => p.name),
+      spec.port,
+      (value) => update({ port: value })
+    ));
+    const typeNames = kind === "source" ? SOURCE_TYPES : DETECTOR_TYPES;
+    controls.set("type", this.selectControl(
+      typeNames.filter((n) => this.meta.types[n]),
+      spec.type,
+      (value) => update({ type: value })
+    ));
+    if (type.direction) {
+      controls.set("direction", this.selectControl(
+        ["in", "out"],
+        "in",
+        (value) => setParam("direction", value)
+      ));
+    }
+    controls.set("port_offset", this.numberControl(
+      0,
+      0.01,
+      (value) => setParam("port_offset", value),
+      true
+    ));
+    if (type.plane) {
+      controls.set("port_size_mult", this.pairControl(
+        (value) => setParam("port_size_mult", value)
+      ));
+    }
+    if (type.wave !== "none") {
+      controls.set("wavelengths", this.textControl(
+        (value) => setParam("wavelengths", parseWavelengths(value))
+      ));
+    }
+    if (this.meta.levels.length > 0) {
+      controls.set("level", this.selectControl(
+        ["", ...this.meta.levels.map((l) => l.name)],
+        "",
+        (value) => setParam("level", value || null)
+      ));
+    }
+    controls.set("name", this.textControl((value) => setParam("name", value)));
+    for (const extra of type.extra) {
+      controls.set(extra, this.textControl((value) => setParam(extra, parseValue(value))));
+    }
+    for (const [key, control] of controls) {
+      fields.appendChild(fieldRow(key, control.element));
+    }
+    root.append(header, fields);
+    return { root, type: spec.type, name, visible, fields: controls };
+  }
+  fillSpecRow(row2, spec) {
+    const name = spec.params.name;
+    row2.name.textContent = typeof name === "string" && name ? name : `${spec.port}_${spec.type}`;
+    const visible = spec.params.visible ?? true;
+    if (row2.visible.checked !== Boolean(visible)) row2.visible.checked = Boolean(visible);
+    const values = {
+      port: spec.port,
+      type: spec.type,
+      ...spec.params
+    };
+    for (const [key, control] of row2.fields) {
+      if (key === "port_size_mult") continue;
+      if (key === "wavelengths") {
+        control.write(formatWavelengths(spec.params.wavelengths));
+        continue;
+      }
+      if (key === "level") {
+        control.write(spec.params.level ?? "");
+        continue;
+      }
+      control.write(values[key]);
+    }
+  }
+  // ------------------------------------------------------------------ settings
+  buildSimForm() {
+    const note = emptyNote("No progress or cancel; the run ends on its own (\xA72).");
+    const fields = document.createElement("div");
+    fields.className = "gfx-spec-fields";
+    const add = (key, labelText, control) => {
+      this.simFields.set(key, control);
+      fields.appendChild(fieldRow(labelText, control.element));
+    };
+    add("wavelength_um", "default wavelength (\xB5m)", this.numberControl(
+      1.55,
+      0.01,
+      (value) => this.callbacks.onSettings({ wavelength_um: value }),
+      true
+    ));
+    add("pulse_width_frac", "pulse width (frac, 0 = CW)", this.numberControl(
+      0,
+      0.01,
+      (value) => this.callbacks.onSettings({ pulse_width_frac: value }),
+      true
+    ));
+    add("port_size_mult", "default plane size (a, b)", this.pairControl(
+      (value) => this.callbacks.onSettings({ port_size_mult: value })
+    ));
+    add("pml_thickness", "PML thickness (cells)", this.numberControl(
+      10,
+      1,
+      (value) => this.callbacks.onSettings({ pml_thickness: Math.round(value) }),
+      true
+    ));
+    add("resolution_um", "resolution (\xB5m)", this.numberControl(
+      0.02,
+      1e-3,
+      (value) => this.callbacks.onSettings({ resolution_um: value }),
+      true
+    ));
+    add("time_fs", "simulation time (fs)", this.numberControl(
+      400,
+      10,
+      (value) => this.callbacks.onSettings({ time_s: value * 1e-15 }),
+      true
+    ));
+    return { rows: [fields, note], note };
+  }
+  renderSettings(settings) {
+    const values = {
+      wavelength_um: settings.wavelength_um,
+      pulse_width_frac: settings.pulse_width_frac,
+      pml_thickness: settings.pml_thickness,
+      resolution_um: settings.resolution_um,
+      time_fs: settings.time_s / 1e-15
+    };
+    for (const [key, control] of this.simFields) {
+      if (key === "port_size_mult") continue;
+      control.write(values[key]);
+    }
+    this.simFields.get("port_size_mult")?.write(settings.port_size_mult);
+  }
+  /** Enables or disables every setup control (spec D15). */
+  setLocked(locked) {
+    this.locked = locked;
+    const rows = [...this.sourceRows.values(), ...this.detectorRows.values()];
+    for (const row2 of rows) {
+      for (const control of row2.fields.values()) control.setDisabled(locked);
+      row2.visible.disabled = locked;
+      const remove = row2.root.querySelector("button");
+      if (remove) remove.disabled = locked;
+    }
+    for (const control of this.simFields.values()) control.setDisabled(locked);
+    this.sourceAdd.disabled = locked;
+    const add = this.sourceAddRow.querySelector("button");
+    if (add) add.disabled = locked;
+    this.simNote.hidden = !locked;
+    if (locked) this.simNote.textContent = "The setup is locked while a run is in flight.";
+  }
+  /** Fills the "New source" port list from the device's ports (spec R12). */
+  fillPortChoices() {
+    if (this.sourceAdd.options.length > 0) return;
+    for (const port of this.meta.ports) {
+      const option = document.createElement("option");
+      option.value = port.name;
+      option.textContent = port.name;
+      this.sourceAdd.appendChild(option);
+    }
+  }
+  // ------------------------------------------------------------------- controls
+  selectControl(options, initial, onChange) {
+    const select = document.createElement("select");
+    select.className = "gfx-select";
+    for (const name of options) {
+      const option = document.createElement("option");
+      option.value = name;
+      option.textContent = name || "(auto)";
+      select.appendChild(option);
+    }
+    select.value = initial;
+    select.addEventListener("change", () => onChange(select.value));
+    return {
+      element: select,
+      write(value) {
+        const text = value === null || value === void 0 ? "" : String(value);
+        if (document.activeElement !== select && select.value !== text) select.value = text;
+      },
+      setDisabled(value) {
+        select.disabled = value;
+      }
+    };
+  }
+  numberControl(initial, step, onChange, live = false) {
+    const input = document.createElement("input");
+    input.type = "number";
+    input.step = String(step);
+    input.className = "gfx-numeric";
+    input.value = String(initial);
+    const emit = (text) => {
+      const value = Number(text);
+      if (Number.isFinite(value)) onChange(value);
+    };
+    if (live) coalesce(input, emit);
+    else input.addEventListener("change", () => emit(input.value));
+    return {
+      element: input,
+      write(value) {
+        const text = value === null || value === void 0 ? "" : String(value);
+        if (document.activeElement !== input && input.value !== text) input.value = text;
+      },
+      setDisabled(value) {
+        input.disabled = value;
+      }
+    };
+  }
+  textControl(onChange) {
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "gfx-text";
+    input.addEventListener("change", () => onChange(input.value));
+    return {
+      element: input,
+      write(value) {
+        const text = value === null || value === void 0 ? "" : String(value);
+        if (document.activeElement !== input && input.value !== text) input.value = text;
+      },
+      setDisabled(value) {
+        input.disabled = value;
+      }
+    };
+  }
+  /** A two-number control (port_size_mult, spec R12, R13). */
+  pairControl(onChange) {
+    const host = document.createElement("span");
+    host.className = "gfx-pair";
+    const a = document.createElement("input");
+    a.type = "number";
+    a.step = "0.1";
+    a.className = "gfx-numeric";
+    const b = document.createElement("input");
+    b.type = "number";
+    b.step = "0.1";
+    b.className = "gfx-numeric";
+    const emit = () => {
+      const first = Number(a.value);
+      const second = Number(b.value);
+      if (Number.isFinite(first) && Number.isFinite(second) && first > 0 && second > 0) {
+        onChange([first, second]);
+      }
+    };
+    a.addEventListener("change", emit);
+    b.addEventListener("change", emit);
+    host.append(a, b);
+    return {
+      element: host,
+      write(value) {
+        const pair = Array.isArray(value) ? value : [0, 0];
+        if (document.activeElement !== a && a.value !== String(pair[0])) a.value = String(pair[0]);
+        if (document.activeElement !== b && b.value !== String(pair[1])) b.value = String(pair[1]);
+      },
+      setDisabled(value) {
+        a.disabled = value;
+        b.disabled = value;
+      }
+    };
+  }
+  // ------------------------------------------------------------------- plumbing
+  panel(children) {
+    const panel = document.createElement("div");
+    panel.className = "gfx-tabpanel";
+    panel.append(...children);
+    return panel;
+  }
+  buildTabBar() {
+    const bar = document.createElement("div");
+    bar.className = "gfx-tabbar";
+    TABS.forEach((name, index) => {
+      const tab = document.createElement("button");
+      tab.type = "button";
+      tab.className = "gfx-tab";
+      tab.textContent = name;
+      tab.addEventListener("click", () => this.setTab(index));
+      this.tabButtons.push(tab);
+      bar.appendChild(tab);
+    });
+    return bar;
+  }
+  setTab(index) {
+    this.panels.forEach((panel, i) => panel.hidden = i !== index);
+    this.tabButtons.forEach((tab, i) => tab.classList.toggle("gfx-active", i === index));
+    if (index === 1) this.fillPortChoices();
+  }
+  section(title2, rows) {
+    const section = document.createElement("div");
+    section.className = "gfx-section";
+    const header = document.createElement("div");
+    header.className = "gfx-section-header";
+    header.textContent = title2;
+    section.appendChild(header);
+    for (const row2 of rows) section.appendChild(row2);
+    return section;
+  }
+  row(kind, name) {
+    return this.root.querySelector(`[data-kind="${kind}"][data-name="${name}"]`) ?? void 0;
+  }
+  renderProperties(state) {
+    const selected = state.selection;
+    if (!selected) {
+      this.properties.textContent = "Select a layer, port, source or detector.";
+      return;
+    }
+    const fields = selected.kind === "level" ? levelProperties(this.meta.levels.find((l) => l.name === selected.name)) : selected.kind === "port" ? portProperties(this.meta.ports.find((p) => p.name === selected.name)) : specProperties(
+      [...state.sources, ...state.detectors].find((s) => s.id === selected.name),
+      this.meta.types
+    );
+    const kindName = { level: "Layer", port: "Port", source: "Source", detector: "Detector" }[selected.kind];
+    this.properties.replaceChildren(
+      title(`${kindName}: ${selected.name}`),
+      ...fields.map(([key, value]) => row(key, value))
+    );
+  }
+};
+function coalesce(input, handler) {
+  let frame = 0;
+  let pending = null;
+  const flush = () => {
+    frame = 0;
+    if (pending === null) return;
+    const value = pending;
+    pending = null;
+    handler(value);
+  };
+  input.addEventListener("input", () => {
+    pending = input.value;
+    if (frame === 0) frame = requestAnimationFrame(flush);
+  });
+}
+function parseWavelengths(text) {
+  const parts = text.split(",").map((part) => part.trim()).filter((part) => part.length > 0);
+  const values = parts.map(Number);
+  if (values.length === 0 || values.some((value) => !Number.isFinite(value) || value <= 0)) return void 0;
+  return values;
+}
+function formatWavelengths(value) {
+  return Array.isArray(value) ? value.join(", ") : "";
+}
+function parseValue(text) {
+  const trimmed = text.trim();
+  if (trimmed === "") return void 0;
+  if (trimmed === "true") return true;
+  if (trimmed === "false") return false;
+  if (/^[+-]?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(trimmed)) return Number(trimmed);
+  if (trimmed.includes(",")) {
+    return trimmed.split(",").map((part) => parseValue(part));
+  }
+  return trimmed;
+}
+function levelProperties(level) {
+  if (!level) return [];
+  return [
+    ["material", level.material],
+    ["mesh_order", String(level.mesh_order)],
+    ["fill", level.fill ? "yes" : "no"],
+    ["zmin", `${level.zmin.toFixed(4)} \xB5m`],
+    ["thickness", `${level.thickness.toFixed(4)} \xB5m`],
+    ["sidewall_angle", `${level.sidewall_angle}\xB0`],
+    ["bias", `${level.bias.toFixed(4)} \xB5m`]
+  ];
+}
+function portProperties(port) {
+  if (!port) return [];
+  return [
+    ["center", `(${port.x.toFixed(3)}, ${port.y.toFixed(3)}, ${port.z.toFixed(3)}) \xB5m`],
+    ["orientation", port.orientation === null ? "unset" : `${port.orientation}\xB0`],
+    ["width", `${port.width.toFixed(3)} \xB5m`],
+    ["layer", String(port.layer)]
+  ];
+}
+function specProperties(spec, types) {
+  if (!spec) return [];
+  const params = spec.params;
+  const rows = [
+    ["type", spec.type],
+    ["port", spec.port],
+    ["category", types[spec.type]?.category ?? "-"]
+  ];
+  for (const [key, value] of Object.entries(params)) {
+    rows.push([key, Array.isArray(value) ? value.join(", ") : String(value)]);
+  }
+  return rows;
+}
+function fieldRow(name, element) {
+  const row2 = document.createElement("label");
+  row2.className = "gfx-field";
+  const span = document.createElement("span");
+  span.className = "gfx-field-name";
+  span.textContent = name;
+  row2.append(span, element);
+  return row2;
+}
+function checkbox(checked, onChange) {
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.checked = checked;
+  input.addEventListener("change", () => onChange(input.checked));
+  return input;
+}
+function label(text) {
+  const span = document.createElement("span");
+  span.className = "gfx-label";
+  span.textContent = text;
+  return span;
+}
+function title(text) {
+  const div = document.createElement("div");
+  div.className = "gfx-properties-title";
+  div.textContent = text;
+  return div;
+}
+function row(key, value) {
+  const div = document.createElement("div");
+  div.className = "gfx-property";
+  div.textContent = `${key}: ${value}`;
+  return div;
+}
+function emptyNote(text) {
+  const div = document.createElement("div");
+  div.className = "gfx-note";
+  div.textContent = text;
+  return div;
+}
+
 // viewer/glyphs.ts
 var GLYPH_COLOR = 16763955;
 var SELECTED_COLOR = 6750054;
+var SOURCE_COLOR = 16746564;
+var DETECTOR_COLOR = 4504575;
+var ERROR_COLOR = 16729156;
+var PLANE_OPACITY = 0.35;
+var POINT_RADIUS = 0.15;
+var PLANE_SPAN = [
+  [new Vector3(0, 1, 0), new Vector3(0, 0, 1)],
+  // normal x: u=y, v=z
+  [new Vector3(1, 0, 0), new Vector3(0, 0, 1)],
+  // normal y: u=x, v=z
+  [new Vector3(1, 0, 0), new Vector3(0, 1, 0)]
+  // normal z: u=x, v=y
+];
 var PortGlyphs = class {
   constructor(ports) {
     this.group = new Group();
@@ -29568,6 +30104,16 @@ var PortGlyphs = class {
       item.material.color.setHex(key === name ? SELECTED_COLOR : GLYPH_COLOR);
     }
   }
+  /** The port whose glyph a ray hits first, or null (spec R12, double-click). */
+  pick(raycaster) {
+    const hits = raycaster.intersectObjects(this.group.children, true);
+    if (hits.length === 0) return null;
+    let node = hits[0].object;
+    while (node && node.parent !== this.group) node = node.parent;
+    if (!node) return null;
+    for (const [name, item] of this.items) if (item.group === node) return name;
+    return null;
+  }
   dispose() {
     for (const item of this.items.values()) {
       item.group.traverse((object) => {
@@ -29575,6 +30121,66 @@ var PortGlyphs = class {
       });
       item.material.dispose();
     }
+  }
+};
+var PlaneGlyphs = class {
+  constructor() {
+    this.group = new Group();
+    this.items = /* @__PURE__ */ new Map();
+  }
+  /** Rebuilds every glyph from the state's glyph payload (spec R12, D11). */
+  rebuild(glyphs) {
+    this.clear();
+    for (const glyph of glyphs) this.items.set(glyph.id, this.build(glyph));
+  }
+  build(glyph) {
+    const group = new Group();
+    const baseColor = glyph.error ? ERROR_COLOR : glyph.kind === "source" ? SOURCE_COLOR : DETECTOR_COLOR;
+    const material = new MeshBasicMaterial({
+      color: baseColor,
+      transparent: true,
+      opacity: PLANE_OPACITY,
+      side: DoubleSide,
+      depthWrite: false
+    });
+    material.userData.baseColor = baseColor;
+    group.position.set(glyph.center[0], glyph.center[1], glyph.center[2]);
+    if (glyph.u_half > 0 && glyph.v_half > 0) {
+      const [u, v] = PLANE_SPAN[glyph.axis] ?? PLANE_SPAN[0];
+      const mesh = new Mesh(new PlaneGeometry(2 * glyph.u_half, 2 * glyph.v_half), material);
+      const normal = u.clone().cross(v);
+      const basis = new Matrix4().makeBasis(u, v, normal);
+      mesh.quaternion.setFromRotationMatrix(basis);
+      group.add(mesh);
+      this.group.add(group);
+      return { group, material, uHalf: glyph.u_half, vHalf: glyph.v_half, axis: glyph.axis };
+    }
+    group.add(new Mesh(new SphereGeometry(POINT_RADIUS, 12, 8), material));
+    this.group.add(group);
+    return { group, material, uHalf: 0, vHalf: 0, axis: glyph.axis };
+  }
+  setVisible(id, visible) {
+    const item = this.items.get(id);
+    if (item) item.group.visible = visible;
+  }
+  setSelected(id) {
+    for (const [key, item] of this.items) {
+      if (key === id) item.material.color.setHex(SELECTED_COLOR);
+      else item.material.color.setHex(item.material.userData.baseColor);
+    }
+  }
+  dispose() {
+    this.clear();
+  }
+  clear() {
+    for (const item of this.items.values()) {
+      item.group.traverse((object) => {
+        if (object instanceof Mesh) object.geometry.dispose();
+      });
+      item.material.dispose();
+    }
+    this.items.clear();
+    this.group.clear();
   }
 };
 
@@ -33479,6 +34085,8 @@ var BG_COLOR = "#15151a";
 var EDGE_COLOR = "#000000";
 var PORT_COLOR = "#ffcc33";
 var SELECTED_COLOR2 = "#66ff66";
+var SOURCE_COLOR2 = "#ff8844";
+var DETECTOR_COLOR2 = "#44bbff";
 var TICK_LABEL_PX = 11;
 var TICK_PX = 5 * (2 / 3);
 var LABEL_GAP = 4 * (2 / 3) / 3;
@@ -33631,8 +34239,84 @@ var Section2D = class {
       ctx.stroke(path);
     }
     this.drawPorts(ctx, payload);
+    this.drawGlyphs(ctx, payload);
     this.drawRegion(ctx, payload);
     this.drawTicks(ctx, payload);
+  }
+  /**
+   * Outlines each source/detector where the section plane cuts it (spec R12).
+   *
+   * A glyph is an axis-aligned rectangle on a port frame (spec D11). The
+   * section shows its intersection with the section plane: a segment when the
+   * two planes cross, or the whole rectangle when they are parallel and
+   * coincide. A dipole (zero extents) draws a small marker instead.
+   */
+  drawGlyphs(ctx, payload) {
+    const state = this.state;
+    if (!state) return;
+    for (const glyph of state.glyphs ?? []) {
+      if (!glyph.visible) continue;
+      const cut = this.glyphCut(glyph, payload);
+      if (!cut) continue;
+      const selected = (state.selection?.kind === "source" || state.selection?.kind === "detector") && state.selection.name === glyph.id;
+      ctx.strokeStyle = selected ? SELECTED_COLOR2 : glyph.kind === "source" ? SOURCE_COLOR2 : DETECTOR_COLOR2;
+      ctx.lineWidth = 2;
+      if (cut.kind === "segment") {
+        const [x0, y0] = this.project(cut.a[0], cut.a[1]);
+        const [x1, y1] = this.project(cut.b[0], cut.b[1]);
+        ctx.beginPath();
+        ctx.moveTo(x0, y0);
+        ctx.lineTo(x1, y1);
+        ctx.stroke();
+        if (glyph.u_half === 0 && glyph.v_half === 0) {
+          ctx.beginPath();
+          ctx.arc((x0 + x1) / 2, (y0 + y1) / 2, 3, 0, 2 * Math.PI);
+          ctx.stroke();
+        }
+      } else {
+        const [x0, y0] = this.project(cut.u0, cut.v0);
+        const [x1, y1] = this.project(cut.u1, cut.v1);
+        ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+      }
+    }
+  }
+  /**
+   * A source/detector's cut in the section's local (u, v), or null.
+   *
+   * The glyph's center is already local (spec C5) and its `axis` is the plane
+   * normal; the absolute plane position is brought into the local frame, as
+   * :meth:`portCut` does for a port. The two planes either cross in a segment
+   * or are parallel (then shown only where they coincide).
+   */
+  glyphCut(glyph, payload) {
+    const half = PORT_CUT_HALF;
+    const [ox, oy, oz] = payload.origin;
+    const origin = [ox, oy, oz];
+    const center = glyph.center;
+    const [au, av] = { xy: [0, 1], xz: [0, 2], yz: [1, 2] }[payload.plane];
+    const normalStack = { xy: 2, xz: 1, yz: 0 }[payload.plane];
+    const spans = [0, 1, 2].filter((axis) => axis !== glyph.axis);
+    const extent = (axis) => {
+      if (glyph.u_half === 0 && glyph.v_half === 0) return half;
+      return axis === spans[0] ? glyph.u_half : glyph.v_half;
+    };
+    if (glyph.axis === normalStack) {
+      if (Math.abs(center[glyph.axis] - (payload.position - origin[normalStack])) > half) return null;
+      return {
+        kind: "rect",
+        u0: center[au] - extent(au),
+        u1: center[au] + extent(au),
+        v0: center[av] - extent(av),
+        v1: center[av] + extent(av)
+      };
+    }
+    const fixed = glyph.axis;
+    const vary = fixed === au ? av : au;
+    const reach = extent(vary);
+    if (fixed === au) {
+      return { kind: "segment", a: [center[au], center[av] - reach], b: [center[au], center[av] + reach] };
+    }
+    return { kind: "segment", a: [center[au] - reach, center[av]], b: [center[au] + reach, center[av]] };
   }
   drawPorts(ctx, payload) {
     const state = this.state;
@@ -33864,6 +34548,12 @@ function render({ model, el }) {
   const to3d = button("3D", true);
   const to2d = button("2D", false);
   const fit = button("Fit", false);
+  const run = button("Run", false);
+  run.title = "run the simulation in the kernel (spec R14 mode 1)";
+  const runNote = document.createElement("span");
+  runNote.className = "gfx-run-note";
+  runNote.hidden = true;
+  runNote.textContent = "running\u2026";
   const settings = document.createElement("button");
   settings.type = "button";
   settings.className = "gfx-button gfx-settings";
@@ -33885,7 +34575,7 @@ function render({ model, el }) {
   save.className = "gfx-button gfx-save";
   save.title = "save the current viewport as a PNG";
   save.innerHTML = SAVE_ICON;
-  menubar.append(title2, to3d, to2d, fit, settings, exaggeration, save);
+  menubar.append(title2, to3d, to2d, fit, run, runNote, settings, exaggeration, save);
   const sectionControls = document.createElement("div");
   sectionControls.className = "gfx-section-controls";
   sectionControls.hidden = true;
@@ -33911,7 +34601,11 @@ function render({ model, el }) {
   sectionControls.append(planeToggle, position);
   const explorer = new Explorer(meta, {
     onPatch: (patch) => sendPatch(model, patch),
-    onSelect: (selection) => sendPatch(model, { selection })
+    onSelect: (selection) => sendPatch(model, { selection }),
+    onAddSource: (port) => send(model, { event: "add_source", port }),
+    onUpdateSpec: (kind, id, change) => send(model, { event: "update_spec", kind, spec: { id, ...change } }),
+    onRemoveSpec: (kind, id) => send(model, { event: "remove_spec", kind, id }),
+    onSettings: (settings2) => send(model, { event: "set_settings", settings: settings2 })
   });
   const viewport = document.createElement("div");
   viewport.className = "gfx-viewport";
@@ -33982,6 +34676,24 @@ function render({ model, el }) {
   }
   const glyphs = new PortGlyphs(meta.ports);
   scene.content.add(glyphs.group);
+  const planes = new PlaneGlyphs();
+  scene.content.add(planes.group);
+  run.addEventListener("click", () => {
+    if (run.disabled) return;
+    send(model, { event: "run" });
+  });
+  const raycaster = new Raycaster();
+  scene.renderer.domElement.addEventListener("dblclick", (event) => {
+    if (currentState(model)?.running) return;
+    const rect = scene.renderer.domElement.getBoundingClientRect();
+    const pointer = new Vector2(
+      (event.clientX - rect.left) / rect.width * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1
+    );
+    raycaster.setFromCamera(pointer, scene.camera);
+    const port = glyphs.pick(raycaster);
+    if (port) send(model, { event: "add_detector", port });
+  });
   fit.addEventListener("click", () => {
     closeSettings();
     if (currentState(model)?.active_viewport === "2d") section.fit();
@@ -34086,6 +34798,13 @@ function render({ model, el }) {
       glyphs.setVisible(port.name, state.port_visible[port.name] ?? true);
     }
     glyphs.setSelected(state.selection?.kind === "port" ? state.selection.name : null);
+    planes.rebuild(state.glyphs ?? []);
+    for (const glyph of state.glyphs ?? []) planes.setVisible(glyph.id, glyph.visible);
+    planes.setSelected(
+      state.selection && (state.selection.kind === "source" || state.selection.kind === "detector") ? state.selection.name : null
+    );
+    run.disabled = state.running;
+    runNote.hidden = !state.running;
     fullInput.checked = state.show_full;
     section.setState(state);
     explorer.render(state);
@@ -34104,10 +34823,14 @@ function render({ model, el }) {
     scene.dispose();
     for (const meshes of levels.values()) meshes.dispose();
     glyphs.dispose();
+    planes.dispose();
   };
 }
 function sendPatch(model, patch) {
   model.send({ event: "set_state", patch });
+}
+function send(model, content) {
+  model.send(content);
 }
 function download(dataUrl, filename) {
   const link = document.createElement("a");

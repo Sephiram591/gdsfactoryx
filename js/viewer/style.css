@@ -226,6 +226,99 @@
   padding: 2px 4px;
 }
 
+/* sources/detectors and the simulation form (spec R12, R13) */
+.gfx-spec-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.gfx-spec {
+  border: 1px solid #3a3a42;
+  border-radius: 4px;
+  padding: 4px;
+  background: #23232a;
+}
+
+.gfx-spec-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.gfx-spec-header:hover {
+  background: #2c2c35;
+}
+
+.gfx-remove {
+  padding: 0 6px;
+  line-height: 16px;
+}
+
+.gfx-spec-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+}
+
+.gfx-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.gfx-field-name {
+  flex: 0 0 96px;
+  opacity: 0.7;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gfx-field .gfx-select,
+.gfx-field .gfx-text,
+.gfx-field .gfx-numeric {
+  flex: 1;
+  min-width: 0;
+}
+
+.gfx-text {
+  padding: 2px 4px;
+  border: 1px solid #4a4a55;
+  border-radius: 4px;
+  background: #2f2f37;
+  color: inherit;
+}
+
+.gfx-pair {
+  display: flex;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.gfx-pair .gfx-numeric {
+  flex: 1;
+  min-width: 0;
+}
+
+.gfx-add {
+  gap: 4px;
+}
+
+.gfx-add .gfx-add-port {
+  flex: 1;
+  min-width: 0;
+}
+
+/* the "running…" hint beside the Run button (spec D15) */
+.gfx-run-note {
+  opacity: 0.7;
+  font-style: italic;
+}
+
 .gfx-properties {
   margin-top: auto;
   padding-top: 8px;

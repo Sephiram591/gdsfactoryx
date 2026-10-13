@@ -21,7 +21,13 @@ from typing import Any
 
 import numpy as np
 
-from gdsfactory.viewer.section import section, section_axis_names, section_bounds, section_normal_axis
+from gdsfactory.viewer.section import (
+    section,
+    section_axis_names,
+    section_bounds,
+    section_normal_axis,
+)
+from gdsfactory.viewer.sim import TYPES
 from gdsfactory.viewer.solids import SolidMesh
 from gdsfactory.viewer.state import ViewerState
 
@@ -99,8 +105,27 @@ def build_payload(viewer_state: ViewerState) -> tuple[dict[str, Any], dict[str, 
         "levels": [_level_meta(level) for level in viewer_state.levels],
         "ports": [_port_meta(port) for port in viewer_state.ports],
         "background": viewer_state.stack.background,
+        "types": _types_meta(),
     }
     return geometry, meta
+
+
+def _types_meta() -> dict[str, Any]:
+    """The source/detector types the explorer can add (spec R12).
+
+    Keyed by type name with ``{category, plane, wave, direction, extra}``, so
+    the frontend can build the "type" selector and know which fields to show.
+    """
+    return {
+        name: {
+            "category": kind.category,
+            "plane": kind.plane,
+            "wave": kind.wave,
+            "direction": kind.direction,
+            "extra": list(kind.extra),
+        }
+        for name, kind in TYPES.items()
+    }
 
 
 def _rings(rings: tuple[np.ndarray, ...]) -> list[list[list[float]]]:

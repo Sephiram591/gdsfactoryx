@@ -5,8 +5,10 @@
 // cross-section (Canvas2D, spec R4); ``active_viewport`` picks which is shown.
 import "./style.css";
 
+import * as THREE from "three";
+
 import { Explorer } from "./explorer";
-import { PortGlyphs } from "./glyphs";
+import { PlaneGlyphs, PortGlyphs } from "./glyphs";
 import { LevelMeshes } from "./mesh";
 import { Scene3D, CONTROL_KINDS, type ControlKind } from "./scene";
 import { Section2D } from "./section";
@@ -65,6 +67,12 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   const to3d = button("3D", true);
   const to2d = button("2D", false);
   const fit = button("Fit", false);
+  const run = button("Run", false);
+  run.title = "run the simulation in the kernel (spec R14 mode 1)";
+  const runNote = document.createElement("span");
+  runNote.className = "gfx-run-note";
+  runNote.hidden = true;
+  runNote.textContent = "running…";
   const settings = document.createElement("button");
   settings.type = "button";
   settings.className = "gfx-button gfx-settings";
@@ -86,7 +94,7 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   save.className = "gfx-button gfx-save";
   save.title = "save the current viewport as a PNG";
   save.innerHTML = SAVE_ICON;
-  menubar.append(title, to3d, to2d, fit, settings, exaggeration, save);
+  menubar.append(title, to3d, to2d, fit, run, runNote, settings, exaggeration, save);
 
   // -- section controls (2D only, spec R4) ---------------------------------
   const sectionControls = document.createElement("div");
@@ -121,6 +129,11 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   const explorer = new Explorer(meta, {
     onPatch: (patch) => sendPatch(model, patch),
     onSelect: (selection) => sendPatch(model, { selection }),
+    onAddSource: (port) => send(model, { event: "add_source", port }),
+    onUpdateSpec: (kind, id, change) =>
+      send(model, { event: "update_spec", kind, spec: { id, ...change } }),
+    onRemoveSpec: (kind, id) => send(model, { event: "remove_spec", kind, id }),
+    onSettings: (settings) => send(model, { event: "set_settings", settings }),
   });
 
   // -- viewport -------------------------------------------------------------
@@ -201,6 +214,30 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   }
   const glyphs = new PortGlyphs(meta.ports);
   scene.content.add(glyphs.group);
+  // source/detector planes, drawn from their specs before anything is placed
+  // (spec R12, D11); rebuilt on every setup edit
+  const planes = new PlaneGlyphs();
+  scene.content.add(planes.group);
+
+  // -- run (spec R14 mode 1, D15) -------------------------------------------
+  run.addEventListener("click", () => {
+    if (run.disabled) return;
+    send(model, { event: "run" });
+  });
+
+  // -- double-click a port in 3D to add a detector (spec R12) ---------------
+  const raycaster = new THREE.Raycaster();
+  scene.renderer.domElement.addEventListener("dblclick", (event) => {
+    if (currentState(model)?.running) return;
+    const rect = scene.renderer.domElement.getBoundingClientRect();
+    const pointer = new THREE.Vector2(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    raycaster.setFromCamera(pointer, scene.camera);
+    const port = glyphs.pick(raycaster);
+    if (port) send(model, { event: "add_detector", port });
+  });
 
   fit.addEventListener("click", () => {
     closeSettings(); // switching the view or fitting returns to the viewport
@@ -319,6 +356,19 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
       glyphs.setVisible(port.name, state.port_visible[port.name] ?? true);
     }
     glyphs.setSelected(state.selection?.kind === "port" ? state.selection.name : null);
+    // the source/detector planes, from the specs (spec R12, D11); selection
+    // matches on the spec id, since two specs may share a name
+    planes.rebuild(state.glyphs ?? []);
+    for (const glyph of state.glyphs ?? []) planes.setVisible(glyph.id, glyph.visible);
+    planes.setSelected(
+      state.selection && (state.selection.kind === "source" || state.selection.kind === "detector")
+        ? state.selection.name
+        : null,
+    );
+    // while a mode-1 run is in flight the setup is frozen (spec D15); the
+    // explorer disables its own controls, and Run is disabled here
+    run.disabled = state.running;
+    runNote.hidden = !state.running;
     fullInput.checked = state.show_full;
     section.setState(state);
     explorer.render(state);
@@ -340,11 +390,17 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
     scene.dispose();
     for (const meshes of levels.values()) meshes.dispose();
     glyphs.dispose();
+    planes.dispose();
   };
 }
 
 function sendPatch(model: AnyModel, patch: Record<string, unknown>): void {
   model.send({ event: "set_state", patch });
+}
+
+/** Sends a setup event (spec R12, R13, R14, D15). */
+function send(model: AnyModel, content: Record<string, unknown>): void {
+  model.send(content);
 }
 
 /** Triggers a browser download of a data-URL image. */

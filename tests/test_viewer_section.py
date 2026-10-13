@@ -22,10 +22,10 @@ import pytest
 
 pytest.importorskip("manifold3d")
 
-from test_viewer_geometry import f1_stack, f2_stack, f3_stack  # noqa: E402
+from test_viewer_geometry import f1_stack, f2_stack, f3_stack
 
-from gdsfactory.viewer import payload, solids, state  # noqa: E402
-from gdsfactory.viewer.section import (  # noqa: E402
+from gdsfactory.viewer import payload, solids, state
+from gdsfactory.viewer.section import (
     PLANES,
     section,
     section_axis_names,
@@ -229,6 +229,7 @@ def test_xy_section_matches_m0_slice_regions(name: str) -> None:
     the arc chord tolerance of a boundary are excluded (spec Q16).
     """
     import shapely
+
     from gdsfactory.viewer.geometry import slice_regions
 
     device = FIXTURES[name]()
@@ -382,6 +383,7 @@ def test_axis_mapping_is_asymmetric() -> None:
     pair (spec R4).
     """
     import fdtdx
+
     import gdsfactory as gf
     from gdsfactory.fdtdx_stack import StackDevice
     from gdsfactory.technology import LayerLevel, LayerStack

@@ -1,8 +1,8 @@
-"""The viewer's ``anywidget`` app shell (spec D2, D7, D9, D10).
+"""The viewer's ``anywidget`` app shell (spec D2, D7, D9, D10, D15).
 
 One widget owns the menubar, the explorer and both viewports (spec D9). It
 holds the shared :class:`~gdsfactory.viewer.state.ViewerState` in the kernel and
-syncs four traits to the browser:
+syncs traits to the browser:
 
 - ``geometry`` and ``meta`` — set once, from
   :func:`gdsfactory.viewer.payload.build_payload`; they carry the mesh buffers.
@@ -14,10 +14,22 @@ The browser edits the state by sending ``{"event": "set_state", "patch": ...}``;
 :meth:`Viewer._on_msg` applies it to the kernel's state and syncs the canonical
 result back (spec D10). A rejected patch re-syncs the state unchanged, so the
 browser cannot diverge.
+
+The three run modes (spec R14) hang off the handle:
+
+- ``.objects`` / ``.config`` / ``.constraints`` — the mode-2 export, computed on
+  access (spec D11), so they are properties, not stored attributes.
+- ``.run()`` — mode 1: places and runs on a **background thread** and returns
+  immediately (spec D15), so the widget stays interactive. The setup is locked
+  while the run is in flight: ``state["running"]`` is set, and the kernel
+  rejects setup edits in :meth:`_on_msg`.
+- ``.launch_code()`` — mode 3, the script tail (spec D12). M5.
 """
 
 from __future__ import annotations
 
+import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -25,11 +37,16 @@ import anywidget
 import traitlets
 
 from gdsfactory.viewer.payload import build_payload, build_section_payload
+from gdsfactory.viewer.sim import build_objects
+from gdsfactory.viewer.sim import run as _run_sim
 from gdsfactory.viewer.state import ViewerState
 
 __all__ = ["Viewer", "view"]
 
 _STATIC = Path(__file__).parent / "static"
+
+#: the messages the browser can send besides a state patch
+_SETUP_EVENTS = frozenset({"add_source", "add_detector", "update_spec", "remove_spec", "set_settings"})
 
 
 class Viewer(anywidget.AnyWidget):
@@ -46,6 +63,8 @@ class Viewer(anywidget.AnyWidget):
     state = traitlets.Dict(default_value={}).tag(sync=True)
     #: the 2D cross-section rings, rebuilt when the plane changes (spec R4)
     section = traitlets.Dict(default_value={}).tag(sync=True)
+    #: the last run's outcome summary, for the browser to show (spec R14, Q20)
+    run_result = traitlets.Dict(default_value={}).tag(sync=True)
 
     def __init__(self, stack: Any, **kwargs: Any) -> None:
         """Builds the device's geometry and prepares the widget.
@@ -55,6 +74,12 @@ class Viewer(anywidget.AnyWidget):
             **kwargs: passed to :class:`anywidget.AnyWidget`.
         """
         self._viewer_state = ViewerState(stack)
+        self._run_result: Any = None
+        self._run_error: BaseException | None = None
+        self._run_thread: threading.Thread | None = None
+        #: cache of the prepared ``(objects, config, constraints)``, keyed by the
+        #: state revision, so the three properties share one build (spec D11)
+        self._prepared: tuple[int, tuple[list[Any], Any, list[Any]]] | None = None
         super().__init__(**kwargs)
         geometry, meta = build_payload(self._viewer_state)
         self.geometry = geometry
@@ -63,24 +88,173 @@ class Viewer(anywidget.AnyWidget):
         self.section = build_section_payload(self._viewer_state)
         self.on_msg(self._on_msg)
 
+    # ------------------------------------------------------------------ handle
+
     @property
     def stack(self) -> Any:
         """The :class:`~gdsfactory.fdtdx_stack.StackDevice` being viewed (spec D7)."""
         return self._viewer_state.stack
 
+    @property
+    def specs(self) -> list[Any]:
+        """The source/detector specs (spec R12, D11)."""
+        return self._viewer_state.specs
+
+    @property
+    def settings(self) -> Any:
+        """The simulation settings (spec R13)."""
+        return self._viewer_state.settings
+
+    @property
+    def running(self) -> bool:
+        """Whether a mode-1 run is in flight (spec D15)."""
+        return self._viewer_state.running
+
+    def _prepare(self) -> tuple[list[Any], Any, list[Any]]:
+        """The prepared objects, config and constraints (spec R14 mode 2, D11).
+
+        Memoized on the state revision: the three properties (``objects``,
+        ``config``, ``constraints``) share one build, so the constraints'
+        object names always match the objects they were built with. A setup
+        edit bumps the revision and forces a rebuild on next access.
+        """
+        revision = self._viewer_state.revision
+        if self._prepared is None or self._prepared[0] != revision:
+            self._prepared = (revision, build_objects(self.stack, self._viewer_state))
+        return self._prepared[1]
+
+    @property
+    def objects(self) -> list[Any]:
+        """The prepared simulation objects, computed on access (spec D11)."""
+        return self._prepare()[0]
+
+    @property
+    def config(self) -> Any:
+        """The prepared ``fdtdx.SimulationConfig``, computed on access (spec D11)."""
+        return self._prepare()[1]
+
+    @property
+    def constraints(self) -> list[Any]:
+        """The prepared placement constraints, computed on access (spec D11)."""
+        return self._prepare()[2]
+
+    def run(self, on_done: Callable[[Any], None] | None = None, key: Any = None) -> None:
+        """Places and runs the simulation on a background thread (spec D15).
+
+        Returns immediately; the widget stays interactive. While the run is in
+        flight the setup is locked (``state['running']`` is true and setup edits
+        are rejected). On completion ``run_result`` carries a summary and
+        ``state['running']`` returns to false; detector results are on
+        ``self.last_result.arrays.detector_states``.
+
+        Args:
+            on_done: called with the :class:`~gdsfactory.viewer.sim.RunResult`
+                (or None on error) when the run finishes, on the worker thread.
+            key: an optional ``jax`` PRNG key.
+
+        Raises:
+            RuntimeError: if a run is already in flight.
+        """
+        if self._viewer_state.running:
+            raise RuntimeError("A run is already in flight")
+        self._run_result = None
+        self._run_error = None
+        self._viewer_state.running = True
+        self.state = self._viewer_state.to_state()
+        self.run_result = {"status": "running"}
+
+        def _work() -> None:
+            try:
+                result = _run_sim(self.stack, self._viewer_state, key=key)
+                self._run_result = result
+                self.run_result = {"status": "done", "detectors": _detector_names(result)}
+            except BaseException as exc:
+                self._run_error = exc
+                self.run_result = {"status": "error", "message": str(exc)}
+            finally:
+                self._viewer_state.running = False
+                self.state = self._viewer_state.to_state()
+                if on_done is not None:
+                    on_done(self._run_result)
+
+        self._run_thread = threading.Thread(target=_work, name="viewer-run", daemon=True)
+        self._run_thread.start()
+
+    @property
+    def last_result(self) -> Any:
+        """The last completed run's :class:`~gdsfactory.viewer.sim.RunResult` (spec Q20)."""
+        return self._run_result
+
+    @property
+    def last_error(self) -> BaseException | None:
+        """The last run's exception, if it failed (spec Q20)."""
+        return self._run_error
+
+    # ------------------------------------------------------------------ messages
+
     def _on_msg(self, _widget: Any, content: dict[str, Any], _buffers: list) -> None:
-        """Applies a browser patch to the kernel state and re-syncs it (spec D10)."""
-        if content.get("event") != "set_state":
+        """Applies a browser message to the kernel state and re-syncs (spec D10).
+
+        Handles a state ``patch`` (the general path) and the setup events
+        (add/update/remove a source or detector, edit the settings). While a run
+        is in flight the setup events and any setup-editing patch are refused
+        (spec D15): the state is re-synced unchanged, so the browser cannot
+        diverge from the kernel's authority.
+        """
+        event = content.get("event")
+        if event == "run":
+            # mode 1 from the widget's Run action (spec R14, D15); a second
+            # request while a run is in flight is ignored, not an error
+            try:
+                self.run()
+            except RuntimeError:
+                pass
             return
         before = (self._viewer_state.plane, self._viewer_state.plane_position)
         try:
-            self._viewer_state.apply_patch(content.get("patch") or {})
-        except (ValueError, TypeError):
-            pass  # a bad patch leaves the state unchanged
+            if event == "set_state":
+                self._viewer_state.apply_patch(content.get("patch") or {})
+            elif event in _SETUP_EVENTS:
+                self._apply_setup_event(event, content)
+            else:
+                return
+        except (ValueError, TypeError, KeyError):
+            pass  # a bad or refused message leaves the state unchanged
         self.state = self._viewer_state.to_state()
         after = (self._viewer_state.plane, self._viewer_state.plane_position)
         if after != before:
             self.section = build_section_payload(self._viewer_state)
+
+    def _apply_setup_event(self, event: str, content: dict[str, Any]) -> None:
+        """Turns a setup event into a state patch (spec R12, R13, D15).
+
+        Refused while a run is in flight, so the message can only touch the
+        setup when the lock is clear.
+        """
+        if self._viewer_state.running:
+            raise ValueError("The setup is locked while a run is in flight")
+        if event == "add_source":
+            self._viewer_state.apply_patch({"sources": [{"op": "add", "port": content["port"],
+                                                         **({"spec": content["spec"]} if "spec" in content else {})}]})
+        elif event == "add_detector":
+            self._viewer_state.apply_patch({"detectors": [{"op": "add", "port": content["port"],
+                                                           **({"spec": content["spec"]} if "spec" in content else {})}]})
+        elif event == "update_spec":
+            key = "sources" if content["kind"] == "source" else "detectors"
+            self._viewer_state.apply_patch({key: [{"op": "update", **content["spec"]}]})
+        elif event == "remove_spec":
+            key = "sources" if content["kind"] == "source" else "detectors"
+            self._viewer_state.apply_patch({key: [{"op": "remove", "id": content["id"]}]})
+        elif event == "set_settings":
+            self._viewer_state.apply_patch({"simulation": content["settings"]})
+
+
+def _detector_names(result: Any) -> list[str]:
+    """The names of the detectors in a run's result (spec R14, Q20)."""
+    try:
+        return sorted(result.arrays.detector_states)
+    except (AttributeError, TypeError):
+        return []
 
 
 def view(stack: Any) -> Viewer:

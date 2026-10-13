@@ -51,6 +51,19 @@ export interface MetaPayload {
   levels: LevelMeta[];
   ports: PortMeta[];
   background: string;
+  //: the source/detector types the explorer can add (spec R12)
+  types: Record<string, TypeMeta>;
+}
+
+//: One creatable source/detector type (spec R12): its category, whether it is
+//: sized by `port_size_mult`, how many wavelengths it takes, whether it has an
+//: `in`/`out` direction, and the extra editable parameter names it accepts.
+export interface TypeMeta {
+  category: "source" | "detector";
+  plane: boolean;
+  wave: "one" | "many" | "none";
+  direction: boolean;
+  extra: string[];
 }
 
 export interface LayerStyle {
@@ -60,8 +73,47 @@ export interface LayerStyle {
 }
 
 export interface Selection {
-  kind: "level" | "port";
+  kind: "level" | "port" | "source" | "detector";
   name: string;
+}
+
+//: A source/detector as data, not a live object (spec D11). `id` is stable;
+//: `params` holds the editable fields (absent ones fall back to the settings).
+export interface SpecPayload {
+  id: string;
+  type: string;
+  port: string;
+  params: Record<string, unknown>;
+}
+
+//: A source/detector plane glyph, in the local frame the meshes use (spec C5,
+//: R12). `axis` is the plane normal (0=x, 1=y, 2=z); `u_half`/`v_half` are the
+//: two half-extents.
+export interface GlyphPayload {
+  //: the spec's id; two specs may share a name, so selection matches on this
+  id: string;
+  name: string;
+  kind: "source" | "detector";
+  type: string;
+  port: string;
+  center: [number, number, number];
+  axis: number;
+  u_half: number;
+  v_half: number;
+  direction: string | null;
+  //: the pre-placement visibility toggle (spec R12)
+  visible: boolean;
+  error?: boolean;
+}
+
+//: The setup-wide simulation settings (spec R13).
+export interface SimSettingsPayload {
+  wavelength_um: number;
+  pulse_width_frac: number;
+  port_size_mult: [number, number];
+  pml_thickness: number;
+  resolution_um: number;
+  time_s: number;
 }
 
 export interface StatePayload {
@@ -73,6 +125,12 @@ export interface StatePayload {
   plane: "xy" | "xz" | "yz";
   plane_position: number;
   plane_bounds: [number, number];
+  sources: SpecPayload[];
+  detectors: SpecPayload[];
+  glyphs: GlyphPayload[];
+  simulation: SimSettingsPayload;
+  //: true while a mode-1 run is in flight; the setup is locked (spec D15)
+  running: boolean;
 }
 
 // The 2D cross-section payload (spec R4). Rings are `[u, v]` pairs in the

@@ -7,7 +7,11 @@ solids, their ``mesh_order`` painting and the port glyphs
 (:mod:`gdsfactory.viewer.solids`, milestone M1, spec D3). The explorer and the
 3D viewport are M2 (spec R1-R3): :mod:`gdsfactory.viewer.state` holds the shared
 state, :mod:`gdsfactory.viewer.payload` the wire format and
-:mod:`gdsfactory.viewer.widget` the app shell.
+:mod:`gdsfactory.viewer.widget` the app shell. The sources, detectors and the
+run are M4 (spec R12-R14, D11, D15): :mod:`gdsfactory.viewer.sim` holds the
+declarative specs and the preparation path, and ``widget`` exposes
+``.objects``/``.config``/``.constraints`` (mode 2) and ``.run()`` (mode 1, on a
+background thread with the setup locked while it runs).
 
 Nothing here is imported by ``import gdsfactory`` (spec C3); the extra
 dependencies (``manifold3d``, ``anywidget``) are the ``[gui]`` extra (spec C6).

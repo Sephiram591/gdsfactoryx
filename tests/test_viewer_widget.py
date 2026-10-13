@@ -198,6 +198,12 @@ def test_state_edit_carries_no_geometry() -> None:
         "plane",
         "plane_position",
         "plane_bounds",
+        # M4 adds the setup and the run flag (spec R12, R13, D15)
+        "sources",
+        "detectors",
+        "glyphs",
+        "simulation",
+        "running",
     }
 
 

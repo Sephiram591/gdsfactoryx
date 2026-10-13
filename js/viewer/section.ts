@@ -5,12 +5,15 @@
 // rings are filled with Canvas2D's even-odd rule (holes come for free) and
 // zoom/pan are a screen transform applied on redraw, so nothing is resampled.
 import { REGION_COLOR, formatTick, niceStep, tickValues } from "./ticks";
-import type { MetaPayload, PortMeta, Ring, SectionPayload, StatePayload } from "./wire";
+import type { GlyphPayload, MetaPayload, PortMeta, Ring, SectionPayload, StatePayload } from "./wire";
 
 const BG_COLOR = "#15151a";
 const EDGE_COLOR = "#000000";
 const PORT_COLOR = "#ffcc33";
 const SELECTED_COLOR = "#66ff66";
+//: sources are warm, detectors cool, matching the 3D planes (spec R12)
+const SOURCE_COLOR = "#ff8844";
+const DETECTOR_COLOR = "#44bbff";
 //: tick label font size, in screen pixels
 const TICK_LABEL_PX = 11;
 const TICK_PX = 5 * (2 / 3);
@@ -204,8 +207,103 @@ export class Section2D {
     }
 
     this.drawPorts(ctx, payload);
+    this.drawGlyphs(ctx, payload);
     this.drawRegion(ctx, payload);
     this.drawTicks(ctx, payload);
+  }
+
+  /**
+   * Outlines each source/detector where the section plane cuts it (spec R12).
+   *
+   * A glyph is an axis-aligned rectangle on a port frame (spec D11). The
+   * section shows its intersection with the section plane: a segment when the
+   * two planes cross, or the whole rectangle when they are parallel and
+   * coincide. A dipole (zero extents) draws a small marker instead.
+   */
+  private drawGlyphs(ctx: CanvasRenderingContext2D, payload: SectionPayload): void {
+    const state = this.state;
+    if (!state) return;
+    for (const glyph of state.glyphs ?? []) {
+      if (!glyph.visible) continue;
+      const cut = this.glyphCut(glyph, payload);
+      if (!cut) continue;
+      const selected =
+        (state.selection?.kind === "source" || state.selection?.kind === "detector") &&
+        state.selection.name === glyph.id;
+      ctx.strokeStyle = selected ? SELECTED_COLOR : glyph.kind === "source" ? SOURCE_COLOR : DETECTOR_COLOR;
+      ctx.lineWidth = 2;
+      if (cut.kind === "segment") {
+        const [x0, y0] = this.project(cut.a[0], cut.a[1]);
+        const [x1, y1] = this.project(cut.b[0], cut.b[1]);
+        ctx.beginPath();
+        ctx.moveTo(x0, y0);
+        ctx.lineTo(x1, y1);
+        ctx.stroke();
+        if (glyph.u_half === 0 && glyph.v_half === 0) {
+          // a dipole has no plane; mark the point at the cut's midpoint
+          ctx.beginPath();
+          ctx.arc((x0 + x1) / 2, (y0 + y1) / 2, 3, 0, 2 * Math.PI);
+          ctx.stroke();
+        }
+      } else {
+        const [x0, y0] = this.project(cut.u0, cut.v0);
+        const [x1, y1] = this.project(cut.u1, cut.v1);
+        ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+      }
+    }
+  }
+
+  /**
+   * A source/detector's cut in the section's local (u, v), or null.
+   *
+   * The glyph's center is already local (spec C5) and its `axis` is the plane
+   * normal; the absolute plane position is brought into the local frame, as
+   * :meth:`portCut` does for a port. The two planes either cross in a segment
+   * or are parallel (then shown only where they coincide).
+   */
+  private glyphCut(
+    glyph: GlyphPayload,
+    payload: SectionPayload,
+  ):
+    | { kind: "segment"; a: [number, number]; b: [number, number] }
+    | { kind: "rect"; u0: number; u1: number; v0: number; v1: number }
+    | null {
+    const half = PORT_CUT_HALF;
+    const [ox, oy, oz] = payload.origin;
+    const origin = [ox, oy, oz];
+    const center = glyph.center;
+    // the section's two in-plane stack axes and its normal
+    const [au, av] = { xy: [0, 1], xz: [0, 2], yz: [1, 2] }[payload.plane];
+    const normalStack = { xy: 2, xz: 1, yz: 0 }[payload.plane];
+    // the glyph's two spanning axes, ascending (matching the payload's spans)
+    const spans = [0, 1, 2].filter((axis) => axis !== glyph.axis);
+    const extent = (axis: number): number => {
+      if (glyph.u_half === 0 && glyph.v_half === 0) return half;
+      return axis === spans[0] ? glyph.u_half : glyph.v_half;
+    };
+
+    if (glyph.axis === normalStack) {
+      // parallel planes: show the rectangle only where the two coincide
+      if (Math.abs(center[glyph.axis] - (payload.position - origin[normalStack])) > half) return null;
+      return {
+        kind: "rect",
+        u0: center[au] - extent(au),
+        u1: center[au] + extent(au),
+        v0: center[av] - extent(av),
+        v1: center[av] + extent(av),
+      };
+    }
+
+    // the planes cross: the glyph normal is one of the section's in-plane axes
+    // and fixes that coordinate; the segment runs along the other in-plane axis,
+    // which is the glyph spanning axis that lies in the section
+    const fixed = glyph.axis;
+    const vary = fixed === au ? av : au;
+    const reach = extent(vary);
+    if (fixed === au) {
+      return { kind: "segment", a: [center[au], center[av] - reach], b: [center[au], center[av] + reach] };
+    }
+    return { kind: "segment", a: [center[au] - reach, center[av]], b: [center[au] + reach, center[av]] };
   }
 
   private drawPorts(ctx: CanvasRenderingContext2D, payload: SectionPayload): void {
