@@ -26,14 +26,14 @@ const PLANE_SPAN: [THREE.Vector3, THREE.Vector3][] = [
 export class PortGlyphs {
   readonly group = new THREE.Group();
   private readonly items = new Map<string, { group: THREE.Group; material: THREE.MeshBasicMaterial }>();
-  //: names of the simulation-volume plane ports (spec R12), which a
-  //: double-click must not pick (a volume-spanning plane would shadow ports)
-  private readonly planes = new Set<string>();
 
   constructor(ports: PortMeta[]) {
+    // a simulation-volume plane port (spec R12) draws nothing on its own: it is
+    // only a dropdown choice, and the plane shows up once a source/detector is
+    // placed on it (PlaneGlyphs, spec D11)
     for (const port of ports) {
+      if (port.plane !== null) continue;
       this.items.set(port.name, this.build(port));
-      if (port.plane !== null) this.planes.add(port.name);
     }
   }
 
@@ -42,22 +42,6 @@ export class PortGlyphs {
     const material = new THREE.MeshBasicMaterial({ color: GLYPH_COLOR });
     // ports are drawn at their own z; the group is placed at the port center
     group.position.set(port.x, port.y, port.z);
-
-    // a simulation-volume plane port (spec R12) is the plane's rectangle, not a
-    // port arrow: it has no orientation and its width/height are the box's
-    // in-plane extents, so port_size_mult=(1, 1) draws the whole plane
-    if (port.plane !== null) {
-      material.transparent = true;
-      material.opacity = 0.18;
-      material.side = THREE.DoubleSide;
-      material.depthWrite = false;
-      const [u, v] = PLANE_SPAN[port.plane] ?? PLANE_SPAN[2];
-      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(port.width, port.height), material);
-      mesh.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(u, v, u.clone().cross(v)));
-      group.add(mesh);
-      this.group.add(group);
-      return { group, material };
-    }
 
     const angle = ((port.orientation ?? 0) * Math.PI) / 180;
     const arrow = new THREE.Group();
@@ -99,22 +83,12 @@ export class PortGlyphs {
   /** The port whose glyph a ray hits first, or null (spec R12, double-click). */
   pick(raycaster: THREE.Raycaster): string | null {
     const hits = raycaster.intersectObjects(this.group.children, true);
-    // skip plane-port hits: a volume-spanning plane would shadow every port
-    // behind it, so a double-click adds on the port you meant, not the plane
-    for (const hit of hits) {
-      let node: THREE.Object3D | null = hit.object;
-      while (node && node.parent !== this.group) node = node.parent;
-      if (!node) continue;
-      let name: string | null = null;
-      for (const [key, item] of this.items) {
-        if (item.group === node) {
-          name = key;
-          break;
-        }
-      }
-      if (name === null || this.planes.has(name)) continue;
-      return name;
-    }
+    if (hits.length === 0) return null;
+    // the hit mesh sits under the port's group; walk up to that group
+    let node: THREE.Object3D | null = hits[0].object;
+    while (node && node.parent !== this.group) node = node.parent;
+    if (!node) return null;
+    for (const [name, item] of this.items) if (item.group === node) return name;
     return null;
   }
 

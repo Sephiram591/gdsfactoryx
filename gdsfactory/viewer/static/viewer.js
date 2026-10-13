@@ -30078,30 +30078,15 @@ var PortGlyphs = class {
   constructor(ports) {
     this.group = new Group();
     this.items = /* @__PURE__ */ new Map();
-    //: names of the simulation-volume plane ports (spec R12), which a
-    //: double-click must not pick (a volume-spanning plane would shadow ports)
-    this.planes = /* @__PURE__ */ new Set();
     for (const port of ports) {
+      if (port.plane !== null) continue;
       this.items.set(port.name, this.build(port));
-      if (port.plane !== null) this.planes.add(port.name);
     }
   }
   build(port) {
     const group = new Group();
     const material = new MeshBasicMaterial({ color: GLYPH_COLOR });
     group.position.set(port.x, port.y, port.z);
-    if (port.plane !== null) {
-      material.transparent = true;
-      material.opacity = 0.18;
-      material.side = DoubleSide;
-      material.depthWrite = false;
-      const [u, v] = PLANE_SPAN[port.plane] ?? PLANE_SPAN[2];
-      const mesh = new Mesh(new PlaneGeometry(port.width, port.height), material);
-      mesh.quaternion.setFromRotationMatrix(new Matrix4().makeBasis(u, v, u.clone().cross(v)));
-      group.add(mesh);
-      this.group.add(group);
-      return { group, material };
-    }
     const angle = (port.orientation ?? 0) * Math.PI / 180;
     const arrow = new Group();
     arrow.rotation.z = angle;
@@ -30133,20 +30118,11 @@ var PortGlyphs = class {
   /** The port whose glyph a ray hits first, or null (spec R12, double-click). */
   pick(raycaster) {
     const hits = raycaster.intersectObjects(this.group.children, true);
-    for (const hit of hits) {
-      let node = hit.object;
-      while (node && node.parent !== this.group) node = node.parent;
-      if (!node) continue;
-      let name = null;
-      for (const [key, item] of this.items) {
-        if (item.group === node) {
-          name = key;
-          break;
-        }
-      }
-      if (name === null || this.planes.has(name)) continue;
-      return name;
-    }
+    if (hits.length === 0) return null;
+    let node = hits[0].object;
+    while (node && node.parent !== this.group) node = node.parent;
+    if (!node) return null;
+    for (const [name, item] of this.items) if (item.group === node) return name;
     return null;
   }
   dispose() {

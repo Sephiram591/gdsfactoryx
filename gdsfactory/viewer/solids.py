@@ -110,8 +110,9 @@ class PortGlyph(NamedTuple):
 
     ``plane`` is the normal axis (0 = x, 1 = y, 2 = z) for one of the
     simulation-volume plane ports (spec R12), or None for a device port. A
-    plane port is drawn as the plane's rectangle, not a port arrow, and has no
-    layer (``layer`` is -1).
+    plane port draws no glyph of its own — it is only a port choice, and the
+    plane appears once a source/detector is placed on it — and has no layer
+    (``layer`` is -1).
     """
 
     name: str

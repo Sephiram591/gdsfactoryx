@@ -65,7 +65,8 @@ def _port_meta(port: Any) -> dict[str, Any]:
     """A port's metadata for the explorer (spec R1).
 
     ``plane`` is the normal axis for a simulation-volume plane port (spec R12),
-    or None for a device port; the browser draws a plane port as a rectangle.
+    or None for a device port; the browser uses it to tell a plane choice (no
+    glyph of its own) from a port glyph.
     """
     return {
         "name": port.name,
