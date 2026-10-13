@@ -35,7 +35,9 @@ def _(mo):
     the **Sources / Detectors** tab as a `ModeOverlapDetector` row, drawn as a
     translucent plane at the port (before anything is placed, spec D11).
 
-    **Add a source:** pick a port in the **+ New source** control and click it.
+    **Add a source:** click the **+** beside the Sources header.
+
+    **Volume planes:** the port dropdown also offers `xy`, `xz` and `yz` - the plane through the **center of the simulation volume** parallel to those faces. They are not device ports. A plane's width and height are the volume's own in-plane extents, so `port_size_mult = (1, 1)` (the default for a plane) fills the whole simulation plane.
 
     **Edit a row:** change the type, port, `port_offset` (the plane moves live),
     `port_size_mult`, the wavelength, `level`, `name`, or a type-specific extra.

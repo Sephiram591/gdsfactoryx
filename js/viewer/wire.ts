@@ -47,6 +47,9 @@ export interface PortMeta {
   //: the port layer's level thickness (µm); the 2D in-plane box depth (spec R4)
   height: number;
   layer: number;
+  //: the normal axis (0=x, 1=y, 2=z) of a simulation-volume plane port, or null
+  //: for a device port; a plane port is drawn as a rectangle (spec R12)
+  plane: number | null;
 }
 
 export interface MetaPayload {

@@ -62,7 +62,11 @@ def _level_meta(level: Any) -> dict[str, Any]:
 
 
 def _port_meta(port: Any) -> dict[str, Any]:
-    """A port's metadata for the explorer (spec R1)."""
+    """A port's metadata for the explorer (spec R1).
+
+    ``plane`` is the normal axis for a simulation-volume plane port (spec R12),
+    or None for a device port; the browser draws a plane port as a rectangle.
+    """
     return {
         "name": port.name,
         "x": float(port.x),
@@ -72,6 +76,7 @@ def _port_meta(port: Any) -> dict[str, Any]:
         "width": float(port.width),
         "height": float(port.height),
         "layer": int(port.layer),
+        "plane": None if port.plane is None else int(port.plane),
     }
 
 
@@ -104,7 +109,9 @@ def build_payload(viewer_state: ViewerState) -> tuple[dict[str, Any], dict[str, 
     }
     meta = {
         "levels": [_level_meta(level) for level in viewer_state.levels],
-        "ports": [_port_meta(port) for port in viewer_state.ports],
+        "ports": [
+            _port_meta(port) for port in (*viewer_state.ports, *viewer_state.plane_ports)
+        ],
         "background": viewer_state.stack.background,
         "types": _types_meta(),
     }

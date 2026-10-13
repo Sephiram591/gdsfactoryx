@@ -68,6 +68,7 @@ __all__ = [
     "background_mesh",
     "build",
     "level_solids",
+    "plane_ports",
 ]
 
 _ROUND = m3.JoinType.Round
@@ -106,6 +107,11 @@ class PortGlyph(NamedTuple):
     ``height`` is the port layer's level thickness, so the 2D viewport can size
     an in-plane port box to the level (spec R4); it falls back to the port width
     when the layer has no level (spec Q12).
+
+    ``plane`` is the normal axis (0 = x, 1 = y, 2 = z) for one of the
+    simulation-volume plane ports (spec R12), or None for a device port. A
+    plane port is drawn as the plane's rectangle, not a port arrow, and has no
+    layer (``layer`` is -1).
     """
 
     name: str
@@ -116,6 +122,7 @@ class PortGlyph(NamedTuple):
     width: float
     height: float
     layer: int
+    plane: int | None = None
 
 
 class SolidSet(NamedTuple):
@@ -414,6 +421,34 @@ def _port_height(device: Any, layer: int, width: float) -> float:
         return width
     lo, hi = span(level)
     return hi - lo
+
+
+def plane_ports(device: Any, origin: tuple[float, float, float]) -> tuple[PortGlyph, ...]:
+    """The simulation-volume plane ports as glyphs (spec R12, Q18).
+
+    The three planes through the box center (``xy``, ``xz``, ``yz``) are extra
+    choices in the explorer's port list. They are not device ports — the
+    device's own :attr:`~gdsfactory.fdtdx_stack.StackDevice.ports` is untouched
+    — each is drawn at the box center with the box's own in-plane extent as its
+    width and height, so ``port_size_mult=(1, 1)`` fills the whole simulation
+    plane. ``layer`` is -1: a plane has no layer.
+    """
+    if device.partial_real_shape is None or None in tuple(device.partial_real_shape):
+        return ()
+    size = tuple(float(s) * 1e6 for s in device.partial_real_shape)
+    ox, oy, oz = origin
+    cx, cy, cz = float(device.center[0]) - ox, float(device.center[1]) - oy, float(device.z_center) - oz
+    #: each plane's normal axis and its (width, height) extents, both taken
+    #: from the box's size along the plane's two in-plane axes
+    planes = (
+        ("xy", 2, size[0], size[1]),
+        ("xz", 1, size[0], size[2]),
+        ("yz", 0, size[1], size[2]),
+    )
+    return tuple(
+        PortGlyph(name=name, x=cx, y=cy, z=cz, orientation=None, width=w, height=h, layer=-1, plane=axis)
+        for name, axis, w, h in planes
+    )
 
 
 def _port_glyphs(device: Any, origin: tuple[float, float, float]) -> tuple[PortGlyph, ...]:

@@ -35,6 +35,7 @@ from gdsfactory.viewer.solids import (
     analytic_solids,
     background_mesh,
     level_solids,
+    plane_ports,
 )
 
 __all__ = ["LayerStyle", "ViewerState", "spec_glyphs"]
@@ -116,6 +117,9 @@ class ViewerState:
         self.levels: list[LevelSolid] = level_solids(stack, solids)
         self.background: SolidMesh = background_mesh(solids)
         self.ports: tuple[PortGlyph, ...] = solids.ports
+        #: the simulation-volume plane ports (spec R12): extra port choices for
+        #: sources/detectors, not ports of the device
+        self.plane_ports: tuple[PortGlyph, ...] = plane_ports(stack, solids.origin)
 
         self.styles: dict[str, LayerStyle] = {
             level.name: LayerStyle(
@@ -125,7 +129,11 @@ class ViewerState:
             )
             for index, level in enumerate(self.levels)
         }
-        self.port_visible: dict[str, bool] = {port.name: True for port in self.ports}
+        #: every port glyph's visibility, device ports and plane ports alike
+        #: (spec R1, R12), so either can be toggled and either may carry a spec
+        self.port_visible: dict[str, bool] = {
+            port.name: True for port in (*self.ports, *self.plane_ports)
+        }
         self.selection: dict[str, str] | None = None
         self.active_viewport: str = "3d"
         self.show_full: bool = False

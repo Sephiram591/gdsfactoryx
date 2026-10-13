@@ -221,10 +221,20 @@ setup; it is not a run launcher (see §2).
 - **Double-click to add.** In the **3D viewport only**, double-clicking a port
   glyph adds a default detector (a `ModeOverlapDetector`) on that port. Adding
   a source is explorer-driven (a "New source" control on the Sources tab).
+- **Volume planes as port choices.** The port list also offers three virtual
+  ports — `xy`, `xz` and `yz` — for the plane through the **center of the
+  simulation volume** parallel to those faces. They are *not* ports of the
+  device (`StackDevice.ports` is untouched): a source or detector may be placed
+  on one exactly as on a port. A plane's width and height are the volume's own
+  in-plane extents, so `port_size_mult = (1, 1)` fills the whole simulation
+  plane. A plane defaults to `(1, 1)` for this reason — a port's default
+  multiplier would overflow the volume.
 - **Parameters editable in the explorer.** Each added object is a row whose
   properties are editable: the port, the object type, `port_offset`,
   `port_size_mult`, the wavelength(s), `direction`, `level` and `name`.
   Changing `port_offset` moves the object's glyph in the viewports live.
+  A spec on a plane has no meaningful `level` (a plane spans the whole volume),
+  so `level` is ignored for it.
 - **Declarative, not eager.** The widget stores each object as a *spec* (its
   type, port and parameters). It does **not** call `stack.create_*_at` when the
   object is added or edited. `create_*_at` is called only when the user
@@ -244,6 +254,9 @@ AC:
   `create_*_at` call.
 - Calling the retrieval method on the widget returns an object and constraints
   that `fdtdx.place_objects` accepts (checked in a test, no FDTD run).
+- The port list offers `xy`, `xz` and `yz`; `StackDevice.ports` is unchanged
+  (checked in a test). Adding a source on `xy` with the default size yields a
+  plane spanning the whole simulation volume, and `place_objects` accepts it.
 
 ### R13. Simulation settings: *Must*
 

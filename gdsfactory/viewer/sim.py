@@ -219,20 +219,27 @@ class RunResult(NamedTuple):
 
 def default_source_spec(port: str, settings: SimSettings) -> ObjectSpec:
     """The default source added by the "New source" control (spec R12)."""
-    return ObjectSpec(DEFAULT_SOURCE, port, _default_params(DEFAULT_SOURCE, settings))
+    return ObjectSpec(DEFAULT_SOURCE, port, _default_params(DEFAULT_SOURCE, port, settings))
 
 
 def default_detector_spec(port: str, settings: SimSettings) -> ObjectSpec:
     """The default detector added by a 3D port double-click (spec R12, Q18)."""
-    return ObjectSpec(DEFAULT_DETECTOR, port, _default_params(DEFAULT_DETECTOR, settings))
+    return ObjectSpec(DEFAULT_DETECTOR, port, _default_params(DEFAULT_DETECTOR, port, settings))
 
 
-def _default_params(type_name: str, settings: SimSettings) -> dict[str, Any]:
-    """The starting parameters for a new spec, taken from the settings (spec Q18)."""
+def _default_params(type_name: str, port: str, settings: SimSettings) -> dict[str, Any]:
+    """The starting parameters for a new spec, taken from the settings (spec Q18).
+
+    A spec on a simulation-volume plane (spec R12) defaults to
+    ``port_size_mult=(1, 1)``: the plane's width and height are already the
+    volume's in-plane extents, so a port's multiplier would overflow the volume.
+    """
     kind = TYPES[type_name]
     params: dict[str, Any] = {"port_offset": 0.0, "level": None, "visible": True}
     if kind.plane:
-        params["port_size_mult"] = list(settings.port_size_mult)
+        from gdsfactory.fdtdx_stack import PLANE_PORTS
+
+        params["port_size_mult"] = [1.0, 1.0] if port in PLANE_PORTS else list(settings.port_size_mult)
     if kind.wave != "none":
         params["wavelengths"] = [settings.wavelength_um]
     if kind.direction:

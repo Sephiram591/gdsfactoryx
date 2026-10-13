@@ -228,6 +228,63 @@ def test_retrieval_is_accepted_by_place_objects() -> None:
     assert type(placed).__name__ == "ObjectContainer"
 
 
+# --------------------------------------------------------- R12: volume planes
+
+
+def test_plane_ports_are_offered_but_are_not_device_ports() -> None:
+    """R12: xy/xz/yz are port choices, but not ports of the device."""
+    stack = f1_stack()
+    viewer_state = state.ViewerState(stack)
+    # R1's AC still holds: the device's own ports are unchanged
+    assert [port.name for port in viewer_state.ports] == ["o1", "o2"]
+    assert {"xy", "xz", "yz"}.isdisjoint({p.name for p in stack.ports})
+    # ... and they are offered to the explorer, after the device's ports
+    meta = viewer_state.plane_ports
+    assert [port.name for port in meta] == ["xy", "xz", "yz"]
+    assert {"xy", "xz", "yz"} <= set(viewer_state.port_visible)
+
+
+def test_plane_size_one_fills_the_simulation_plane() -> None:
+    """R12/Q18: ``port_size_mult=(1, 1)`` on a plane fills the whole plane."""
+    stack = f1_stack()
+    size = tuple(float(s) * 1e6 for s in stack.partial_real_shape)
+    for plane, (u, v) in (("yz", (1, 2)), ("xz", (0, 2)), ("xy", (0, 1))):
+        _p, axis, sign, center, height = stack._port_frame(plane, None, 0.0)
+        assert axis == {"yz": 0, "xz": 1, "xy": 2}[plane]
+        assert sign == 1
+        # centered in the volume
+        assert center[0] == pytest.approx(stack.center[0])
+        assert center[1] == pytest.approx(stack.center[1])
+        assert center[2] == pytest.approx(stack.z_center)
+        # (1, 1) spans the box's two in-plane extents
+        assert height == pytest.approx(size[v])
+        assert _p.width == pytest.approx(size[u])
+        obj, _ = stack.create_uniform_plane_source_at(
+            plane, (1.0, 1.0), wave_character=sim._wave_character(1.55), name=f"{plane}_s"
+        )
+        real = obj.partial_real_shape
+        # the two in-plane extents are the box's; the normal axis is grid-shaped
+        # (None in partial_real_shape, 1 in partial_grid_shape)
+        assert float(real[u]) * 1e6 == pytest.approx(size[u])
+        assert float(real[v]) * 1e6 == pytest.approx(size[v])
+        assert real[axis] is None
+        assert obj.partial_grid_shape[axis] == 1
+
+
+def test_a_plane_source_places_like_a_port_source() -> None:
+    """R12/R14: a source on a volume plane is accepted by ``place_objects``."""
+    import jax
+
+    viewer = widget.view(f1_stack())
+    _coarse(viewer)
+    viewer._on_msg(None, {"event": "add_source", "port": "xy"}, [])
+    assert viewer.state["sources"][-1]["port"] == "xy"
+
+    objects, config, constraints = viewer.objects, viewer.config, viewer.constraints
+    placed, _, _, _, _ = fdtdx.place_objects(objects, config, constraints, jax.random.PRNGKey(0))
+    assert type(placed).__name__ == "ObjectContainer"
+
+
 def test_export_shares_one_build() -> None:
     """D11: ``objects``/``config``/``constraints`` come from one build.
 

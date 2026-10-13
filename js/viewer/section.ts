@@ -378,6 +378,10 @@ export class Section2D {
    * port and the layer's thickness along the orientation (spec R4).
    */
   private portOutline(port: PortMeta, payload: SectionPayload): [number, number][] | null {
+    // a simulation-volume plane port (spec R12) has no orientation and spans the
+    // whole volume; its width bar in 2D would be meaningless, so it is drawn
+    // only in 3D (as the plane's rectangle)
+    if (port.plane !== null) return null;
     const half = PORT_FADE_CUTOFF * (this.state?.port_fade_um ?? PORT_FADE_UM);
     const [ox, oy, oz] = payload.origin;
     const angle = ((port.orientation ?? 0) * Math.PI) / 180;
