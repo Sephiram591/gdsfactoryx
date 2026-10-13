@@ -29509,7 +29509,7 @@ var Section2D = class {
     //: resize and payload change (the container starts hidden at zero size)
     this.userAdjusted = false;
     this.root = document.createElement("div");
-    this.root.className = "gfx-section";
+    this.root.className = "gfx-cross-section";
     this.canvas = document.createElement("canvas");
     this.canvas.className = "gfx-section-canvas";
     this.readout = document.createElement("div");

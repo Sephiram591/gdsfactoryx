@@ -182,12 +182,12 @@
   color: inherit;
 }
 .gfx-viewport-3d,
-.gfx-section {
+.gfx-cross-section {
   position: absolute;
   inset: 0;
 }
 .gfx-viewport-3d[hidden],
-.gfx-section[hidden] {
+.gfx-cross-section[hidden] {
   display: none;
 }
 .gfx-section-canvas {
