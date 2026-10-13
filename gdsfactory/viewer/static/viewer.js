@@ -42847,10 +42847,12 @@ async function captureShell(shell, fallbackPng) {
     const canvas = await html2canvas(shell, {
       backgroundColor: null,
       // the shell is dark; keep its own colors rather than html2canvas's white
-      useCORS: true
+      useCORS: true,
+      foreignObjectRendering: true
     });
     return canvas.toDataURL("image/png");
-  } catch {
+  } catch (error2) {
+    console.warn("whole-widget capture failed; saving the viewport instead", error2);
     return fallbackPng;
   }
 }

@@ -559,10 +559,14 @@ function writeShotWhole(whole: boolean): void {
 /**
  * Rasterizes the whole widget shell into one PNG data URL (spec D14).
  *
- * html2canvas redraws the DOM; the three.js canvas is a WebGL surface it can
- * only read because the renderer keeps its drawing buffer (see `Scene3D`). If
- * html2canvas is unavailable or throws, the viewport image is returned instead,
- * so the button always produces something.
+ * The host notebook's own stylesheets are in the same document, and html2canvas
+ * 1.4.1's color parser throws on modern color functions they use (`color()`,
+ * `oklch()`, `color-mix()`, `light-dark()`), which aborts the capture. Its
+ * `foreignObjectRendering` mode hands the rasterization to the browser instead,
+ * sidestepping that parser, and reads the three.js canvas because the renderer
+ * keeps its drawing buffer (see `Scene3D`). If html2canvas is unavailable or
+ * still throws, the viewport image is returned instead, so the button always
+ * produces something.
  */
 async function captureShell(shell: HTMLElement, fallbackPng: string): Promise<string> {
   try {
@@ -571,9 +575,11 @@ async function captureShell(shell: HTMLElement, fallbackPng: string): Promise<st
       backgroundColor: null,
       // the shell is dark; keep its own colors rather than html2canvas's white
       useCORS: true,
+      foreignObjectRendering: true,
     });
     return canvas.toDataURL("image/png");
-  } catch {
+  } catch (error) {
+    console.warn("whole-widget capture failed; saving the viewport instead", error);
     return fallbackPng;
   }
 }

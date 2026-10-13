@@ -685,10 +685,14 @@ Three related viewport additions made while implementing M3.
   settings screen's **screenshot scope** switches it to capture the **whole
   widget** instead — the menubar, explorer and viewport together — via
   `html2canvas` over the widget root, with the viewport canvas as a fallback if
-  that capture fails. The scope defaults to the viewport alone and is a
-  per-viewer preference in the browser (localStorage), not kernel state. The 3D
-  renderer sets `preserveDrawingBuffer` so the whole-widget capture does not
-  draw a blank canvas.
+  that capture fails. The capture uses html2canvas's `foreignObjectRendering`
+  mode: the host notebook's own stylesheets share the document, and html2canvas
+  1.4.1's color parser throws on the modern color functions they use
+  (`color()`, `oklch()`, `color-mix()`, `light-dark()`), aborting the capture —
+  the browser-native path sidesteps that parser. The scope defaults to the
+  viewport alone and is a per-viewer preference in the browser (localStorage),
+  not kernel state. The 3D renderer sets `preserveDrawingBuffer` so the
+  whole-widget capture does not draw a blank canvas.
 - **Implemented in M3** (`js/viewer/scene.ts`, `section.ts`, `index.ts`;
   `gdsfactory/viewer/state.py`).
 - **Relates to R3, R4, D9, D10, Q8.**
