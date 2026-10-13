@@ -323,7 +323,7 @@ class _FakeResult:
 def _slow_run(monkeypatch: pytest.MonkeyPatch, seconds: float = 0.6) -> None:
     """Replaces the kernel's run with a slow stub, so D15 is testable."""
 
-    def fake(stack: Any, viewer_state: Any, *, key: Any = None) -> Any:
+    def fake(stack: Any, viewer_state: Any, *, key: Any = None, progress: Any = None) -> Any:
         time.sleep(seconds)
         return _FakeResult()
 
@@ -405,7 +405,7 @@ def test_setup_unlocks_after_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_run_reports_a_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """D15/Q20: a failing run records the error and still unlocks the setup."""
 
-    def boom(stack: Any, viewer_state: Any, *, key: Any = None) -> Any:
+    def boom(stack: Any, viewer_state: Any, *, key: Any = None, progress: Any = None) -> Any:
         raise RuntimeError("no GPU")
 
     monkeypatch.setattr(widget, "_run_sim", boom)
@@ -448,6 +448,59 @@ def test_run_uses_a_worker_thread(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(viewer._run_thread, threading.Thread)
     assert viewer._run_thread is not threading.main_thread()
     viewer._run_thread.join()
+
+
+def test_run_forwards_fdtdx_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D15/R14: fdtdx's progress callback is mirrored into the ``progress`` trait."""
+    seen: list[tuple[int, int]] = []
+
+    def fake(stack: Any, viewer_state: Any, *, key: Any = None, progress: Any = None) -> Any:
+        assert progress is not None, "the widget must pass a progress callback (spec D15)"
+        progress(1, 4)
+        seen.append((viewer.progress["step"], viewer.progress["total"]))
+        progress(4, 4)
+        return _FakeResult()
+
+    monkeypatch.setattr(widget, "_run_sim", fake)
+    viewer = widget.view(f1_stack())
+    assert viewer.progress == {}
+    viewer.run()
+    viewer._run_thread.join()
+
+    # the callback fired mid-run and was visible on the trait at that moment
+    assert seen == [(1, 4)]
+    # and it is cleared once the run finishes
+    assert viewer.progress == {}
+
+
+def test_sim_run_turns_off_fdtdx_tqdm_and_forwards_the_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D15: ``sim.run`` passes the callback to ``run_fdtd`` and silences tqdm."""
+    import fdtdx
+
+    captured: dict[str, Any] = {}
+
+    def fake_run_fdtd(*, arrays: Any, objects: Any, config: Any, key: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return None, arrays
+
+    monkeypatch.setattr(fdtdx, "run_fdtd", fake_run_fdtd)
+    monkeypatch.setattr(sim, "build_objects", lambda _stack, _state: ([], object(), []))
+    monkeypatch.setattr(fdtdx, "place_objects", lambda *_a, **_k: (None, None, {}, None, None))
+
+    from gdsfactory import fdtdx_stack
+
+    monkeypatch.setattr(
+        fdtdx_stack, "apply_stack", lambda _arrays, _objects, _params, _key: (None, None, None)
+    )
+    monkeypatch.setattr(fdtdx_stack, "init_stack_params", lambda _objects: {})
+
+    def cb(step: int, total: int) -> None: ...
+
+    sim.run(object(), object(), progress=cb)
+    assert captured["progress_callback"] is cb
+    assert captured["show_progress"] is False
 
 
 # ------------------------------------------------------------------- helpers

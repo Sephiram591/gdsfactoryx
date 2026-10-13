@@ -22,7 +22,8 @@ The three run modes (spec R14) hang off the handle:
 - ``.run()`` — mode 1: places and runs on a **background thread** and returns
   immediately (spec D15), so the widget stays interactive. The setup is locked
   while the run is in flight: ``state["running"]`` is set, and the kernel
-  rejects setup edits in :meth:`_on_msg`.
+  rejects setup edits in :meth:`_on_msg`. fdtdx's ``progress_callback`` is
+  mirrored into the ``progress`` trait, which the browser draws as a bar.
 - ``.launch_code()`` — mode 3, the script tail (spec D12). M5.
 """
 
@@ -65,6 +66,9 @@ class Viewer(anywidget.AnyWidget):
     section = traitlets.Dict(default_value={}).tag(sync=True)
     #: the last run's outcome summary, for the browser to show (spec R14, Q20)
     run_result = traitlets.Dict(default_value={}).tag(sync=True)
+    #: the in-flight run's progress as ``{"step": int, "total": int}`` (spec D15);
+    #: ``{}`` when no run is in flight or the total is not yet known
+    progress = traitlets.Dict(default_value={}).tag(sync=True)
 
     def __init__(self, stack: Any, **kwargs: Any) -> None:
         """Builds the device's geometry and prepares the widget.
@@ -162,10 +166,14 @@ class Viewer(anywidget.AnyWidget):
         self._viewer_state.running = True
         self.state = self._viewer_state.to_state()
         self.run_result = {"status": "running"}
+        self.progress = {}
+
+        def _on_progress(step: int, total: int) -> None:
+            self.progress = {"step": int(step), "total": int(total)}
 
         def _work() -> None:
             try:
-                result = _run_sim(self.stack, self._viewer_state, key=key)
+                result = _run_sim(self.stack, self._viewer_state, key=key, progress=_on_progress)
                 self._run_result = result
                 self.run_result = {"status": "done", "detectors": _detector_names(result)}
             except BaseException as exc:
@@ -174,6 +182,7 @@ class Viewer(anywidget.AnyWidget):
             finally:
                 self._viewer_state.running = False
                 self.state = self._viewer_state.to_state()
+                self.progress = {}
                 if on_done is not None:
                     on_done(self._run_result)
 

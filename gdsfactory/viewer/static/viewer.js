@@ -34621,10 +34621,14 @@ function render({ model, el }) {
   const to2d = button("2D", false);
   const fit = iconButton(FIT_ICON, "fit the view to the device");
   const run = iconButton(RUN_ICON, "run the simulation in the kernel (spec R14 mode 1)");
-  const runNote = document.createElement("span");
-  runNote.className = "gfx-run-note";
-  runNote.hidden = true;
-  runNote.textContent = "running\u2026";
+  const runProgress = document.createElement("div");
+  runProgress.className = "gfx-run-progress";
+  runProgress.hidden = true;
+  runProgress.setAttribute("role", "progressbar");
+  runProgress.setAttribute("aria-label", "simulation progress");
+  const runProgressFill = document.createElement("div");
+  runProgressFill.className = "gfx-run-progress-fill";
+  runProgress.append(runProgressFill);
   const settings = document.createElement("button");
   settings.type = "button";
   settings.className = "gfx-button gfx-settings";
@@ -34646,7 +34650,7 @@ function render({ model, el }) {
   save.className = "gfx-button gfx-save";
   save.title = "save the current viewport as a PNG";
   save.innerHTML = SAVE_ICON;
-  menubar.append(title2, to3d, to2d, fit, run, runNote, settings, exaggeration, save);
+  menubar.append(title2, to3d, to2d, fit, run, runProgress, settings, exaggeration, save);
   const sectionControls = document.createElement("div");
   sectionControls.className = "gfx-section-controls";
   sectionControls.hidden = true;
@@ -34896,7 +34900,8 @@ function render({ model, el }) {
       state.selection && (state.selection.kind === "source" || state.selection.kind === "detector") ? state.selection.name : null
     );
     run.disabled = state.running;
-    runNote.hidden = !state.running;
+    runProgress.hidden = !state.running;
+    if (!state.running) applyProgress();
     fullInput.checked = state.show_full;
     if (document.activeElement !== fadeInput) fadeInput.value = String(state.port_fade_um);
     fadeValue.textContent = `${state.port_fade_um.toFixed(2)} \xB5m`;
@@ -34907,10 +34912,28 @@ function render({ model, el }) {
     const payload = model.get("section");
     if (payload && Object.keys(payload).length > 0) section.setPayload(payload);
   };
+  const applyProgress = () => {
+    const payload = model.get("progress");
+    const step = payload?.step ?? 0;
+    const total = payload?.total ?? 0;
+    if (total > 0) {
+      runProgressFill.style.width = `${Math.min(100, 100 * step / total).toFixed(1)}%`;
+      runProgress.classList.remove("gfx-run-progress-indeterminate");
+      runProgress.setAttribute("aria-valuenow", String(step));
+      runProgress.setAttribute("aria-valuemax", String(total));
+    } else {
+      runProgressFill.style.width = "100%";
+      runProgress.classList.add("gfx-run-progress-indeterminate");
+      runProgress.removeAttribute("aria-valuenow");
+      runProgress.removeAttribute("aria-valuemax");
+    }
+  };
   model.on("change:state", applyState);
+  model.on("change:progress", applyProgress);
   model.on("change:section", applySection);
   applySection();
   applyState();
+  applyProgress();
   return () => {
     if (positionFrame !== 0) cancelAnimationFrame(positionFrame);
     section.dispose();

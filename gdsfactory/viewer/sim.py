@@ -359,7 +359,7 @@ def export(stack: Any, state: Any) -> tuple[list[Any], Any, list[Any]]:
     return build_objects(stack, state)
 
 
-def run(stack: Any, state: Any, *, key: Any = None) -> RunResult:
+def run(stack: Any, state: Any, *, key: Any = None, progress: Any = None) -> RunResult:
     """Places and runs the simulation in the kernel (spec R14 mode 1).
 
     Blocks until the run finishes; callers that must not block (the widget's
@@ -370,6 +370,9 @@ def run(stack: Any, state: Any, *, key: Any = None) -> RunResult:
         stack: the :class:`~gdsfactory.fdtdx_stack.StackDevice`.
         state: the :class:`~gdsfactory.viewer.state.ViewerState`.
         key: an optional ``jax`` PRNG key (default: ``PRNGKey(0)``).
+        progress: an optional ``callable(step, total)`` fdtdx calls as the run
+            advances (spec D15). When given, fdtdx's own tqdm bar is turned off,
+            since the caller is drawing the progress instead.
     """
     import fdtdx
     import jax
@@ -380,7 +383,14 @@ def run(stack: Any, state: Any, *, key: Any = None) -> RunResult:
     key = jax.random.PRNGKey(0) if key is None else key
     objects, arrays, params, config, _ = fdtdx.place_objects(objects, config, constraints, key)
     arrays, objects, _ = apply_stack(arrays, objects, {**params, **init_stack_params(objects)}, key)
-    _, arrays = fdtdx.run_fdtd(arrays=arrays, objects=objects, config=config, key=key)
+    _, arrays = fdtdx.run_fdtd(
+        arrays=arrays,
+        objects=objects,
+        config=config,
+        key=key,
+        show_progress=progress is None,
+        progress_callback=progress,
+    )
     return RunResult(objects=objects, arrays=arrays, config=config)
 
 

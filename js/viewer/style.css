@@ -371,10 +371,39 @@
   min-width: 0;
 }
 
-/* the "running…" hint beside the Run button (spec D15) */
-.gfx-run-note {
-  opacity: 0.7;
-  font-style: italic;
+/* the run's progress bar beside the Run button (spec D15) */
+.gfx-run-progress {
+  position: relative;
+  flex: 0 0 120px;
+  height: 6px;
+  overflow: hidden;
+  border: 1px solid #4a4a55;
+  border-radius: 3px;
+  background: #1b1b1f;
+}
+
+.gfx-run-progress-fill {
+  height: 100%;
+  width: 0;
+  background: #6a8fc5;
+  transition: width 0.15s linear;
+}
+
+/* until the kernel reports a total, sweep a band instead of a fixed fill */
+.gfx-run-progress-indeterminate .gfx-run-progress-fill {
+  width: 40%;
+  background: linear-gradient(90deg, transparent, #6a8fc5, transparent);
+  transition: none;
+  animation: gfx-run-sweep 1.2s ease-in-out infinite;
+}
+
+@keyframes gfx-run-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
 }
 
 .gfx-properties {

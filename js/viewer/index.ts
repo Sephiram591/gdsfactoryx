@@ -83,10 +83,16 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   const to2d = button("2D", false);
   const fit = iconButton(FIT_ICON, "fit the view to the device");
   const run = iconButton(RUN_ICON, "run the simulation in the kernel (spec R14 mode 1)");
-  const runNote = document.createElement("span");
-  runNote.className = "gfx-run-note";
-  runNote.hidden = true;
-  runNote.textContent = "running…";
+  // the run's progress bar (spec D15): hidden until a run starts, then filled
+  // from the kernel's `progress` trait; indeterminate until the total is known
+  const runProgress = document.createElement("div");
+  runProgress.className = "gfx-run-progress";
+  runProgress.hidden = true;
+  runProgress.setAttribute("role", "progressbar");
+  runProgress.setAttribute("aria-label", "simulation progress");
+  const runProgressFill = document.createElement("div");
+  runProgressFill.className = "gfx-run-progress-fill";
+  runProgress.append(runProgressFill);
   const settings = document.createElement("button");
   settings.type = "button";
   settings.className = "gfx-button gfx-settings";
@@ -108,7 +114,7 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   save.className = "gfx-button gfx-save";
   save.title = "save the current viewport as a PNG";
   save.innerHTML = SAVE_ICON;
-  menubar.append(title, to3d, to2d, fit, run, runNote, settings, exaggeration, save);
+  menubar.append(title, to3d, to2d, fit, run, runProgress, settings, exaggeration, save);
 
   // -- section controls (2D only, spec R4) ---------------------------------
   const sectionControls = document.createElement("div");
@@ -406,7 +412,8 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
     // while a mode-1 run is in flight the setup is frozen (spec D15); the
     // explorer disables its own controls, and Run is disabled here
     run.disabled = state.running;
-    runNote.hidden = !state.running;
+    runProgress.hidden = !state.running;
+    if (!state.running) applyProgress();
     fullInput.checked = state.show_full;
     if (document.activeElement !== fadeInput) fadeInput.value = String(state.port_fade_um);
     fadeValue.textContent = `${state.port_fade_um.toFixed(2)} µm`;
@@ -419,10 +426,31 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
     if (payload && Object.keys(payload).length > 0) section.setPayload(payload);
   };
 
+  // the run's progress (spec D15): fill the bar from the kernel's `progress`
+  // trait; until the total is known the bar is indeterminate (the CSS sweep)
+  const applyProgress = (): void => {
+    const payload = model.get("progress") as { step?: number; total?: number } | undefined;
+    const step = payload?.step ?? 0;
+    const total = payload?.total ?? 0;
+    if (total > 0) {
+      runProgressFill.style.width = `${Math.min(100, (100 * step) / total).toFixed(1)}%`;
+      runProgress.classList.remove("gfx-run-progress-indeterminate");
+      runProgress.setAttribute("aria-valuenow", String(step));
+      runProgress.setAttribute("aria-valuemax", String(total));
+    } else {
+      runProgressFill.style.width = "100%";
+      runProgress.classList.add("gfx-run-progress-indeterminate");
+      runProgress.removeAttribute("aria-valuenow");
+      runProgress.removeAttribute("aria-valuemax");
+    }
+  };
+
   model.on("change:state", applyState);
+  model.on("change:progress", applyProgress);
   model.on("change:section", applySection);
   applySection();
   applyState();
+  applyProgress();
 
   return () => {
     if (positionFrame !== 0) cancelAnimationFrame(positionFrame);

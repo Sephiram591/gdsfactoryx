@@ -49,8 +49,8 @@ def _(mo):
     **Run (spec R14 mode 1, D15):** press **Run** in the menubar. The run starts
     on a background thread, so the widget stays live — orbit, switch tabs, scrub
     the section — while the **setup is locked**: the Sources/Detectors and
-    Simulation tabs are disabled and the kernel refuses setup edits. There is no
-    progress and no cancel (spec §2); the run ends on its own and unlocks.
+    Simulation tabs are disabled and the kernel refuses setup edits. A **progress bar** beside Run tracks
+    it (fdtdx's `progress_callback`); there is no cancel (spec §2), so the run ends on its own and unlocks.
 
     **Export (spec R14 mode 2):** `viewer.objects`, `viewer.config` and
     `viewer.constraints` are computed on access, ready for

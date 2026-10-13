@@ -25,8 +25,9 @@ stable: never renumber, only add. Item status is one of *Proposed*, *Accepted*,
 - Full-chip GDS viewing (KLayout / kweb already do this).
 - The solver's voxelized / subpixel-averaged view (deferred to R7).
 - Any sampled or voxelized geometry in the viewer itself (C2).
-- Monitoring a run's progress in the widget; a run started from the widget (R14
-  mode 1) blocks and returns results, it is not streamed or cancellable.
+- Cancelling a run from the widget; a run started from the widget (R14 mode 1)
+  blocks until it returns. It *does* show a progress bar (D15), but it is not
+  cancellable.
 - _TBD_
 
 ## 3. Workflows
@@ -288,9 +289,11 @@ increasing in separation from the session:
 
 1. **In the widget.** A "Run" action places and runs in the kernel the widget
    already occupies (C1: on the compute node) and returns the results. It
-   **blocks** until done; there is no progress streaming and no cancel (§2). The
-   kernel's allocation must be sized for the run — a run that needs a GPU must
-   be in a GPU allocation, which the notebook session must already be.
+   **blocks** until done; there is no cancel (§2). It **does** report progress:
+   fdtdx's `run_fdtd` is driven with a `progress_callback`, and the widget shows
+   a progress bar (D15). The kernel's allocation must be sized for the run — a
+   run that needs a GPU must be in a GPU allocation, which the notebook session
+   must already be.
 2. **Export.** The widget returns the prepared `objects`, `config` and
    `constraints` as Python values, for the user to place and run themselves
    (`fdtdx.place_objects`, `apply_stack`, `fdtdx.run_fdtd`). This is D11's
@@ -312,6 +315,9 @@ AC:
 - Mode 3's returned code, appended to a script that defines `stack`, builds the
   same object list as mode 2 (compared in a test; the script need not run the
   FDTD in CI).
+- Mode 1's run is off-thread (`.run()` returns before the run finishes), locks
+  the setup while in flight, and mirrors fdtdx's `progress_callback` into the
+  `progress` trait (checked in a test).
 
 ### Later candidates (not v1 unless promoted; see Q9)
 
@@ -579,7 +585,8 @@ by returning launch code. All three come from one prepared setup, so the design
 question is only how the setup travels to the run.
 
 - **Mode 1 (in the widget).** Run in the kernel the widget occupies (D10), on the
-  compute node (C1). Blocks; no streaming or cancel (§2).
+  compute node (C1). Blocks; no cancel. Progress is streamed from fdtdx's
+  `progress_callback` (D15).
 - **Mode 2 (export).** Return the prepared `objects`, `config` and `constraints`
   as Python values.
 - **Mode 3 (launch code).** Return a self-contained snippet of Python the user
@@ -666,6 +673,30 @@ Three related viewport additions made while implementing M3.
 - **Implemented in M3** (`js/viewer/scene.ts`, `section.ts`, `index.ts`;
   `gdsfactory/viewer/state.py`).
 - **Relates to R3, R4, D9, D10, Q8.**
+
+---
+
+### D15. The run streams progress on a background thread: *Accepted* (2026-10-13)
+
+Mode 1 (R14) runs the simulation in the widget's own kernel. Two things follow
+from that, both settled here.
+
+- **Off the kernel's main thread.** `.run()` returns immediately and the
+  simulation runs on a daemon thread, so the widget stays interactive while it
+  works. The setup is **locked** for the duration — `state['running']` is true
+  and the kernel rejects setup edits (`sources`, `detectors`, `simulation`),
+  since the run has already captured its `objects`/`config`/`constraints`. Read-
+  only edits (viewport, styling, tab switches, plane position) stay live.
+- **Progress is streamed.** fdtdx's `run_fdtd` takes a `progress_callback(step,
+  total)`, so the widget passes one and mirrors it into a synced `progress`
+  trait (`{"step", "total"}`, `{}` when idle). The browser draws it as a
+  **progress bar** in the menubar, beside Run: determinate once `total` is
+  known, an indeterminate sweep before that. Passing a callback also turns
+  fdtdx's own tqdm bar **off** (`show_progress=False`), so the two do not
+  compete for the same output.
+- **Implemented in M4** (`gdsfactory/viewer/widget.py`, `sim.py`;
+  `js/viewer/index.ts`, `style.css`).
+- **Relates to R14, D10, D12, Q20.**
 
 ---
 
@@ -894,3 +925,10 @@ Three related viewport additions made while implementing M3.
     with the 3D viewport and does not affect the xy plane.
   - Save-image button for the active viewport; added to R3 and R4 *Should*s.
   - Updated R3/R4, D14 and the M3 milestone.
+- 2026-10-13 (later): added D15, streaming the mode-1 run's progress.
+  - Mode 1 runs on a background thread with the setup locked (D15), and mirrors
+    fdtdx's `progress_callback(step, total)` into a synced `progress` trait.
+  - The menubar shows a **progress bar** in place of the old "running…" text:
+    determinate once the total is known, an indeterminate sweep before that.
+  - Narrowed §2's non-goal: mode 1 is still not cancellable, but it now reports
+    progress. Updated R14 (prose and AC) and D12.
