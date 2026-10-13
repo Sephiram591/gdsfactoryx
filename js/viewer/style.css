@@ -2,7 +2,10 @@
 .gfx-shell {
   display: grid;
   grid-template-columns: auto 1fr;
-  grid-template-rows: auto auto 1fr;
+  /* the last row must be allowed to shrink below its content (minmax(0, 1fr)),
+     or a tall explorer grows the row past the shell's height and the tabbody
+     never gets a bounded box to scroll in */
+  grid-template-rows: auto auto minmax(0, 1fr);
   grid-template-areas:
     "menubar menubar"
     "section section"
@@ -137,6 +140,10 @@
   flex-direction: column;
   width: 260px;
   min-width: 200px;
+  /* as a grid item the default min-height: auto lets a long setup grow the
+     pane past the shell; pin it to 0 so the tabbody scrolls instead (spec R12) */
+  min-height: 0;
+  overflow: hidden;
   padding: 8px;
   gap: 8px;
   background: #202027;
@@ -251,6 +258,30 @@
   cursor: pointer;
 }
 
+/* the collapse arrow on a source/detector row (spec R12): points down when the
+   parameters are shown, right when they are collapsed */
+.gfx-twisty {
+  flex: 0 0 auto;
+  width: 14px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font-size: 9px;
+  line-height: 1;
+  opacity: 0.75;
+  cursor: pointer;
+}
+
+.gfx-twisty:hover {
+  opacity: 1;
+}
+
+/* a collapsed row keeps its header and hides only the fields */
+.gfx-spec.gfx-collapsed .gfx-spec-fields {
+  display: none;
+}
+
 .gfx-spec-header:hover {
   background: #2c2c35;
 }
@@ -324,9 +355,12 @@
 }
 
 .gfx-properties {
+  flex-shrink: 0;
   margin-top: auto;
   padding-top: 8px;
   border-top: 1px solid #3a3a42;
+  max-height: 40%;
+  overflow-y: auto;
 }
 
 .gfx-properties-title {

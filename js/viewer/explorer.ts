@@ -65,6 +65,9 @@ interface SpecRow {
   root: HTMLElement;
   /** the type the row's fields were built for; a change rebuilds them */
   type: string;
+  /** the collapse arrow; its label tracks the row's collapsed state */
+  twisty: HTMLButtonElement;
+  collapsed: boolean;
   name: HTMLElement;
   visible: HTMLInputElement;
   fields: Map<string, Control>;
@@ -275,8 +278,9 @@ export class Explorer {
         rows.set(spec.id, row);
         list.appendChild(row.root);
       } else if (row.type !== spec.type) {
-        // the type selects which fields exist, so a type change rebuilds them
-        const rebuilt = this.buildSpecRow(spec, type, kind);
+        // the type selects which fields exist, so a type change rebuilds them;
+        // keep the row's collapse state across the rebuild
+        const rebuilt = this.buildSpecRow(spec, type, kind, row.collapsed);
         row.root.replaceWith(rebuilt.root);
         rows.set(spec.id, rebuilt);
         row = rebuilt;
@@ -291,7 +295,12 @@ export class Explorer {
     empty.hidden = specs.length > 0;
   }
 
-  private buildSpecRow(spec: SpecPayload, type: TypeMeta, kind: "source" | "detector"): SpecRow {
+  private buildSpecRow(
+    spec: SpecPayload,
+    type: TypeMeta,
+    kind: "source" | "detector",
+    collapsed = false,
+  ): SpecRow {
     const root = document.createElement("div");
     root.className = "gfx-spec";
     root.dataset.kind = kind;
@@ -299,6 +308,11 @@ export class Explorer {
 
     const header = document.createElement("div");
     header.className = "gfx-spec-header";
+    // the collapse arrow (spec R12): hides the row's fields, leaving the header
+    // so a long setup stays navigable
+    const twisty = document.createElement("button");
+    twisty.type = "button";
+    twisty.className = "gfx-twisty";
     // the pre-placement visibility toggle (spec R12); display-only, so it never
     // reaches create_*_at
     const visible = checkbox(true, (value) =>
@@ -315,7 +329,7 @@ export class Explorer {
       if (this.locked) return;
       this.callbacks.onRemoveSpec(kind, spec.id);
     });
-    header.append(visible, name, remove);
+    header.append(twisty, visible, name, remove);
     header.addEventListener("click", (event) => {
       if ((event.target as HTMLElement).closest("button") || (event.target as HTMLElement).tagName === "INPUT") return;
       this.callbacks.onSelect({ kind, name: spec.id });
@@ -380,8 +394,25 @@ export class Explorer {
       fields.appendChild(fieldRow(key, control.element));
     }
 
+    const row: SpecRow = { root, type: spec.type, twisty, collapsed, name, visible, fields: controls };
+    // collapsing is view-only, so it lives in the row, not the kernel state: a
+    // state round-trip must not expand a row the user collapsed
+    twisty.addEventListener("click", (event) => {
+      event.stopPropagation();
+      row.collapsed = !row.collapsed;
+      this.applyCollapsed(row);
+    });
     root.append(header, fields);
-    return { root, type: spec.type, name, visible, fields: controls };
+    this.applyCollapsed(row);
+    return row;
+  }
+
+  /** Shows or hides a spec row's fields to match its collapsed flag (spec R12). */
+  private applyCollapsed(row: SpecRow): void {
+    row.root.classList.toggle("gfx-collapsed", row.collapsed);
+    row.twisty.textContent = row.collapsed ? "▶" : "▼";
+    row.twisty.title = row.collapsed ? "expand" : "collapse";
+    row.twisty.setAttribute("aria-expanded", String(!row.collapsed));
   }
 
   private fillSpecRow(row: SpecRow, spec: SpecPayload): void {
@@ -416,28 +447,29 @@ export class Explorer {
     const note = emptyNote("No progress or cancel; the run ends on its own (§2).");
     const fields = document.createElement("div");
     fields.className = "gfx-spec-fields";
-    const add = (key: string, labelText: string, control: Control): void => {
+    // short labels; the descriptor and units ride along as tooltips (spec R13)
+    const add = (key: string, labelText: string, control: Control, hint: string): void => {
       this.simFields.set(key, control);
-      fields.appendChild(fieldRow(labelText, control.element));
+      fields.appendChild(fieldRow(labelText, control.element, hint));
     };
-    add("wavelength_um", "default wavelength (µm)", this.numberControl(
+    add("wavelength_um", "wavelength", this.numberControl(
       1.55, 0.01, (value) => this.callbacks.onSettings({ wavelength_um: value }), true,
-    ));
-    add("pulse_width_frac", "pulse width (frac, 0 = CW)", this.numberControl(
+    ), "default wavelength for a new source or detector, in µm");
+    add("pulse_width_frac", "pulse width", this.numberControl(
       0, 0.01, (value) => this.callbacks.onSettings({ pulse_width_frac: value }), true,
-    ));
-    add("port_size_mult", "default plane size (a, b)", this.pairControl(
+    ), "Gaussian pulse spectral width, as a fraction of the center frequency; 0 = continuous wave");
+    add("port_size_mult", "plane size", this.pairControl(
       (value) => this.callbacks.onSettings({ port_size_mult: value }),
-    ));
-    add("pml_thickness", "PML thickness (cells)", this.numberControl(
+    ), "a new plane is (a) port widths wide and (b) level heights tall");
+    add("pml_thickness", "PML", this.numberControl(
       10, 1, (value) => this.callbacks.onSettings({ pml_thickness: Math.round(value) }), true,
-    ));
-    add("resolution_um", "resolution (µm)", this.numberControl(
+    ), "perfectly-matched-layer thickness, in grid cells");
+    add("resolution_um", "resolution", this.numberControl(
       0.02, 0.001, (value) => this.callbacks.onSettings({ resolution_um: value }), true,
-    ));
-    add("time_fs", "simulation time (fs)", this.numberControl(
+    ), "grid resolution, in µm");
+    add("time_fs", "time", this.numberControl(
       400, 10, (value) => this.callbacks.onSettings({ time_s: value * 1e-15 }), true,
-    ));
+    ), "simulation time, in fs");
     return { rows: [fields, note], note };
   }
 
@@ -746,12 +778,15 @@ function specProperties(spec: SpecPayload | undefined, types: Record<string, Typ
   return rows;
 }
 
-function fieldRow(name: string, element: HTMLElement): HTMLElement {
+function fieldRow(name: string, element: HTMLElement, hint?: string): HTMLElement {
   const row = document.createElement("label");
   row.className = "gfx-field";
   const span = document.createElement("span");
   span.className = "gfx-field-name";
   span.textContent = name;
+  // the descriptor and units live in the tooltip, so the label column stays
+  // narrow enough to read (spec R13)
+  if (hint) span.title = hint;
   row.append(span, element);
   return row;
 }

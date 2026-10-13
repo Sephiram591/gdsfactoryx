@@ -29582,7 +29582,7 @@ var Explorer = class {
         rows.set(spec.id, row2);
         list.appendChild(row2.root);
       } else if (row2.type !== spec.type) {
-        const rebuilt = this.buildSpecRow(spec, type, kind);
+        const rebuilt = this.buildSpecRow(spec, type, kind, row2.collapsed);
         row2.root.replaceWith(rebuilt.root);
         rows.set(spec.id, rebuilt);
         row2 = rebuilt;
@@ -29596,13 +29596,16 @@ var Explorer = class {
     }
     empty.hidden = specs.length > 0;
   }
-  buildSpecRow(spec, type, kind) {
+  buildSpecRow(spec, type, kind, collapsed = false) {
     const root = document.createElement("div");
     root.className = "gfx-spec";
     root.dataset.kind = kind;
     root.dataset.name = spec.id;
     const header = document.createElement("div");
     header.className = "gfx-spec-header";
+    const twisty = document.createElement("button");
+    twisty.type = "button";
+    twisty.className = "gfx-twisty";
     const visible = checkbox(
       true,
       (value) => this.callbacks.onUpdateSpec(kind, spec.id, { params: { visible: value } })
@@ -29618,7 +29621,7 @@ var Explorer = class {
       if (this.locked) return;
       this.callbacks.onRemoveSpec(kind, spec.id);
     });
-    header.append(visible, name, remove);
+    header.append(twisty, visible, name, remove);
     header.addEventListener("click", (event) => {
       if (event.target.closest("button") || event.target.tagName === "INPUT") return;
       this.callbacks.onSelect({ kind, name: spec.id });
@@ -29676,8 +29679,22 @@ var Explorer = class {
     for (const [key, control] of controls) {
       fields.appendChild(fieldRow(key, control.element));
     }
+    const row2 = { root, type: spec.type, twisty, collapsed, name, visible, fields: controls };
+    twisty.addEventListener("click", (event) => {
+      event.stopPropagation();
+      row2.collapsed = !row2.collapsed;
+      this.applyCollapsed(row2);
+    });
     root.append(header, fields);
-    return { root, type: spec.type, name, visible, fields: controls };
+    this.applyCollapsed(row2);
+    return row2;
+  }
+  /** Shows or hides a spec row's fields to match its collapsed flag (spec R12). */
+  applyCollapsed(row2) {
+    row2.root.classList.toggle("gfx-collapsed", row2.collapsed);
+    row2.twisty.textContent = row2.collapsed ? "\u25B6" : "\u25BC";
+    row2.twisty.title = row2.collapsed ? "expand" : "collapse";
+    row2.twisty.setAttribute("aria-expanded", String(!row2.collapsed));
   }
   fillSpecRow(row2, spec) {
     const name = spec.params.name;
@@ -29707,43 +29724,43 @@ var Explorer = class {
     const note = emptyNote("No progress or cancel; the run ends on its own (\xA72).");
     const fields = document.createElement("div");
     fields.className = "gfx-spec-fields";
-    const add = (key, labelText, control) => {
+    const add = (key, labelText, control, hint) => {
       this.simFields.set(key, control);
-      fields.appendChild(fieldRow(labelText, control.element));
+      fields.appendChild(fieldRow(labelText, control.element, hint));
     };
-    add("wavelength_um", "default wavelength (\xB5m)", this.numberControl(
+    add("wavelength_um", "wavelength", this.numberControl(
       1.55,
       0.01,
       (value) => this.callbacks.onSettings({ wavelength_um: value }),
       true
-    ));
-    add("pulse_width_frac", "pulse width (frac, 0 = CW)", this.numberControl(
+    ), "default wavelength for a new source or detector, in \xB5m");
+    add("pulse_width_frac", "pulse width", this.numberControl(
       0,
       0.01,
       (value) => this.callbacks.onSettings({ pulse_width_frac: value }),
       true
-    ));
-    add("port_size_mult", "default plane size (a, b)", this.pairControl(
+    ), "Gaussian pulse spectral width, as a fraction of the center frequency; 0 = continuous wave");
+    add("port_size_mult", "plane size", this.pairControl(
       (value) => this.callbacks.onSettings({ port_size_mult: value })
-    ));
-    add("pml_thickness", "PML thickness (cells)", this.numberControl(
+    ), "a new plane is (a) port widths wide and (b) level heights tall");
+    add("pml_thickness", "PML", this.numberControl(
       10,
       1,
       (value) => this.callbacks.onSettings({ pml_thickness: Math.round(value) }),
       true
-    ));
-    add("resolution_um", "resolution (\xB5m)", this.numberControl(
+    ), "perfectly-matched-layer thickness, in grid cells");
+    add("resolution_um", "resolution", this.numberControl(
       0.02,
       1e-3,
       (value) => this.callbacks.onSettings({ resolution_um: value }),
       true
-    ));
-    add("time_fs", "simulation time (fs)", this.numberControl(
+    ), "grid resolution, in \xB5m");
+    add("time_fs", "time", this.numberControl(
       400,
       10,
       (value) => this.callbacks.onSettings({ time_s: value * 1e-15 }),
       true
-    ));
+    ), "simulation time, in fs");
     return { rows: [fields, note], note };
   }
   renderSettings(settings) {
@@ -30009,12 +30026,13 @@ function specProperties(spec, types) {
   }
   return rows;
 }
-function fieldRow(name, element) {
+function fieldRow(name, element, hint) {
   const row2 = document.createElement("label");
   row2.className = "gfx-field";
   const span = document.createElement("span");
   span.className = "gfx-field-name";
   span.textContent = name;
+  if (hint) span.title = hint;
   row2.append(span, element);
   return row2;
 }
