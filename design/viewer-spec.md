@@ -859,12 +859,13 @@ from that, both settled here.
 ## 10. Test fixtures
 
 - **F1.** Elevator coupler: `examples/fdtdx_elevator_coupler.py`,
-  `build_stack(overlap=1.0)`. No simulation objects are needed in v1.
+  `build_stack(overlap=5.0)`. No simulation objects are needed in v1.
   - levels `oxide` (WAFER fill, `mesh_order` 9), `lower` and `upper` (SiN,
     `mesh_order` 1), with `background="air"`
   - ports `o1` and `o2`, each with a 1 µm extension
-  - box: y ∈ [−2, 2] µm and z ∈ [−1.6, 1.4] µm (the example's `domain()`); x is
-    the polygons' extent, extensions included
+  - box: y ∈ [−2, 2] µm and z ∈ [−1.6, 1.4] µm (the example's `domain()`); the x
+    span is `2 * LENGTH - overlap + 2 * (LEAD + EXTENSION)`, so 18 µm at the
+    5 µm overlap (22 µm at 1 µm), centered at x = 7.5 µm (9.5 µm at 1 µm)
 - **F2.** Straight waveguide, 10° sidewalls, with a fill level. Builder `f2_stack()`.
   - component: `gf.components.straight(length=2.0, width=0.5)` on layer `(1,0)`;
     ports `o1`/`o2` at the ends, no extensions
@@ -1045,3 +1046,6 @@ from that, both settled here.
   - The section slider range follows the new box; a slider parked outside a
     shrunk box is clamped back in. A box that would collapse is refused.
   - Updated R13 (the field and its AC).
+- 2026-10-14: F1's fixture overlap raised from 1 µm to 5 µm (§10). The shorter
+  overlap shortens the box (x 22 µm → 18 µm), so the spec's F1 box note and the
+  yz slider-range test now derive from the stack rather than a fixed value.
