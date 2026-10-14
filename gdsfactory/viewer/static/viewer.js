@@ -42601,9 +42601,42 @@ function render({ model, el }) {
     writeShotWhole(shotInput.checked);
   });
   shotRow.append(shotLabel, shotInput, shotHint);
-  settingsPanel.append(settingsHeading, controlRow, sensitivityRow, fadeRow, fullRow, shotRow);
+  const saveRow = document.createElement("label");
+  saveRow.className = "gfx-settings-row";
+  saveRow.title = "where the camera button writes";
+  const saveLabel = document.createElement("span");
+  saveLabel.textContent = "Save to";
+  const saveSelect = document.createElement("select");
+  saveSelect.className = "gfx-select";
+  for (const [value, text] of [
+    ["browser", "browser (download)"],
+    ["server", "server (kernel)"]
+  ]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = text;
+    saveSelect.appendChild(option);
+  }
+  saveSelect.value = readSaveTarget();
+  saveSelect.addEventListener(
+    "change",
+    () => writeSaveTarget(saveSelect.value)
+  );
+  saveRow.append(saveLabel, saveSelect);
+  settingsPanel.append(
+    settingsHeading,
+    controlRow,
+    sensitivityRow,
+    fadeRow,
+    fullRow,
+    shotRow,
+    saveRow
+  );
   viewport.appendChild(settingsPanel);
-  el.append(menubar, sectionControls, explorer.root, viewport);
+  const toast = document.createElement("div");
+  toast.className = "gfx-toast";
+  toast.hidden = true;
+  el.append(menubar, sectionControls, explorer.root, viewport, toast);
   const scene = new Scene3D(sceneRoot);
   scene.setBounds(geometry.size, geometry.origin);
   controlSelect.value = scene.control;
@@ -42697,13 +42730,13 @@ function render({ model, el }) {
   save.addEventListener("click", () => {
     const is2d = currentState(model)?.active_viewport === "2d";
     const viewportPng = is2d ? section.toPng() : scene.toPng();
-    if (readShotWhole()) {
-      captureShell(el, viewportPng).then(
-        (png) => download(png, is2d ? "viewer-2d.png" : "viewer-3d.png")
-      );
-      return;
-    }
-    download(viewportPng, is2d ? "cross-section.png" : "view-3d.png");
+    const shot = readShotWhole() ? captureShell(el, viewportPng).then(
+      (png) => [png, is2d ? "viewer-2d.png" : "viewer-3d.png"]
+    ) : Promise.resolve([viewportPng, is2d ? "cross-section.png" : "view-3d.png"]);
+    shot.then(([png, filename]) => {
+      if (readSaveTarget() === "server") send(model, { event: "save_image", data: png, filename });
+      else download(png, filename);
+    });
   });
   let pendingPosition = null;
   let positionFrame = 0;
@@ -42798,16 +42831,34 @@ function render({ model, el }) {
       runProgress.removeAttribute("aria-valuemax");
     }
   };
+  let toastTimer = 0;
+  const showToast = (message) => {
+    toast.textContent = message;
+    toast.hidden = false;
+    if (toastTimer !== 0) window.clearTimeout(toastTimer);
+    toastTimer = window.setTimeout(() => {
+      toast.hidden = true;
+      toastTimer = 0;
+    }, 4e3);
+  };
+  const applySaveResult = () => {
+    const payload = model.get("save_result");
+    if (!payload || Object.keys(payload).length === 0) return;
+    if (payload.error) showToast(`save failed: ${payload.error}`);
+    else if (payload.path) showToast(`saved ${payload.path}`);
+  };
   model.on("change:state", applyState);
   model.on("change:progress", applyProgress);
   model.on("change:phase", applyPhase);
   model.on("change:section", applySection);
+  model.on("change:save_result", applySaveResult);
   applySection();
   applyState();
   applyProgress();
   applyPhase();
   return () => {
     if (positionFrame !== 0) cancelAnimationFrame(positionFrame);
+    if (toastTimer !== 0) window.clearTimeout(toastTimer);
     section.dispose();
     scene.dispose();
     for (const meshes of levels.values()) meshes.dispose();
@@ -42838,6 +42889,20 @@ function readShotWhole() {
 function writeShotWhole(whole) {
   try {
     window.localStorage.setItem(SHOT_WHOLE_KEY, whole ? "1" : "0");
+  } catch {
+  }
+}
+var SAVE_TO_KEY = "gfx-save-to";
+function readSaveTarget() {
+  try {
+    return window.localStorage.getItem(SAVE_TO_KEY) === "server" ? "server" : "browser";
+  } catch {
+    return "browser";
+  }
+}
+function writeSaveTarget(target) {
+  try {
+    window.localStorage.setItem(SAVE_TO_KEY, target);
   } catch {
   }
 }

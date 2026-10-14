@@ -263,10 +263,49 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   });
   shotRow.append(shotLabel, shotInput, shotHint);
 
-  settingsPanel.append(settingsHeading, controlRow, sensitivityRow, fadeRow, fullRow, shotRow);
+  // save target (spec R3, D14): the camera button downloads the PNG in the
+  // browser by default, or hands it to the kernel to write beside the notebook.
+  // A per-viewer preference, kept in localStorage like the scope above.
+  const saveRow = document.createElement("label");
+  saveRow.className = "gfx-settings-row";
+  saveRow.title = "where the camera button writes";
+  const saveLabel = document.createElement("span");
+  saveLabel.textContent = "Save to";
+  const saveSelect = document.createElement("select");
+  saveSelect.className = "gfx-select";
+  for (const [value, text] of [
+    ["browser", "browser (download)"],
+    ["server", "server (kernel)"],
+  ] as const) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = text;
+    saveSelect.appendChild(option);
+  }
+  saveSelect.value = readSaveTarget();
+  saveSelect.addEventListener("change", () =>
+    writeSaveTarget(saveSelect.value as SaveTarget),
+  );
+  saveRow.append(saveLabel, saveSelect);
+
+  settingsPanel.append(
+    settingsHeading,
+    controlRow,
+    sensitivityRow,
+    fadeRow,
+    fullRow,
+    shotRow,
+    saveRow,
+  );
   viewport.appendChild(settingsPanel);
 
-  el.append(menubar, sectionControls, explorer.root, viewport);
+  // a transient message over the shell (spec D14): confirms a kernel-side save
+  // or reports a failure, so a server write is not silent
+  const toast = document.createElement("div");
+  toast.className = "gfx-toast";
+  toast.hidden = true;
+
+  el.append(menubar, sectionControls, explorer.root, viewport, toast);
 
   const scene = new Scene3D(sceneRoot);
   scene.setBounds(geometry.size, geometry.origin);
@@ -374,15 +413,17 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   save.addEventListener("click", () => {
     const is2d = currentState(model)?.active_viewport === "2d";
     const viewportPng = is2d ? section.toPng() : scene.toPng();
-    if (readShotWhole()) {
-      // the whole widget: rasterize the shell (chrome + the live canvas) into
-      // one image, falling back to the viewport alone if that is unavailable
-      captureShell(el, viewportPng).then((png) =>
-        download(png, is2d ? "viewer-2d.png" : "viewer-3d.png"),
-      );
-      return;
-    }
-    download(viewportPng, is2d ? "cross-section.png" : "view-3d.png");
+    // the whole widget is a heavier capture (rasterizing the shell), so build
+    // it first and deliver the result once it is ready
+    const shot: Promise<[string, string]> = readShotWhole()
+      ? captureShell(el, viewportPng).then(
+          (png): [string, string] => [png, is2d ? "viewer-2d.png" : "viewer-3d.png"],
+        )
+      : Promise.resolve([viewportPng, is2d ? "cross-section.png" : "view-3d.png"]);
+    shot.then(([png, filename]) => {
+      if (readSaveTarget() === "server") send(model, { event: "save_image", data: png, filename });
+      else download(png, filename);
+    });
   });
 
   // The slider drags faster than the kernel can round trip (spec D10), so
@@ -499,10 +540,30 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
     }
   };
 
+  // a kernel-side save's outcome (spec D14): confirm the written path, or show
+  // the error; the toast clears itself after a few seconds
+  let toastTimer = 0;
+  const showToast = (message: string): void => {
+    toast.textContent = message;
+    toast.hidden = false;
+    if (toastTimer !== 0) window.clearTimeout(toastTimer);
+    toastTimer = window.setTimeout(() => {
+      toast.hidden = true;
+      toastTimer = 0;
+    }, 4000);
+  };
+  const applySaveResult = (): void => {
+    const payload = model.get("save_result") as { path?: string; error?: string } | undefined;
+    if (!payload || Object.keys(payload).length === 0) return;
+    if (payload.error) showToast(`save failed: ${payload.error}`);
+    else if (payload.path) showToast(`saved ${payload.path}`);
+  };
+
   model.on("change:state", applyState);
   model.on("change:progress", applyProgress);
   model.on("change:phase", applyPhase);
   model.on("change:section", applySection);
+  model.on("change:save_result", applySaveResult);
   applySection();
   applyState();
   applyProgress();
@@ -510,6 +571,7 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
 
   return () => {
     if (positionFrame !== 0) cancelAnimationFrame(positionFrame);
+    if (toastTimer !== 0) window.clearTimeout(toastTimer);
     section.dispose();
     scene.dispose();
     for (const meshes of levels.values()) meshes.dispose();
@@ -551,6 +613,29 @@ function readShotWhole(): boolean {
 function writeShotWhole(whole: boolean): void {
   try {
     window.localStorage.setItem(SHOT_WHOLE_KEY, whole ? "1" : "0");
+  } catch {
+    // storage unavailable (private window, blocked) — the setting is session-only
+  }
+}
+
+//: the localStorage key for where the save button writes (spec R3, D14):
+//: "browser" downloads the PNG, "server" sends it to the kernel to write
+const SAVE_TO_KEY = "gfx-save-to";
+
+type SaveTarget = "browser" | "server";
+
+/** Whether the camera button downloads or writes server-side (default: browser). */
+function readSaveTarget(): SaveTarget {
+  try {
+    return window.localStorage.getItem(SAVE_TO_KEY) === "server" ? "server" : "browser";
+  } catch {
+    return "browser"; // a blocked/absent store just means the default
+  }
+}
+
+function writeSaveTarget(target: SaveTarget): void {
+  try {
+    window.localStorage.setItem(SAVE_TO_KEY, target);
   } catch {
     // storage unavailable (private window, blocked) — the setting is session-only
   }

@@ -1,6 +1,7 @@
 /* viewer/style.css */
 .gfx-shell {
   display: grid;
+  position: relative;
   grid-template-columns: auto 1fr;
   grid-template-rows: auto auto minmax(0, 1fr);
   grid-template-areas: "menubar menubar" "section section" "explorer viewport";
@@ -421,4 +422,22 @@
   background: rgba(20, 20, 24, 0.75);
   font-variant-numeric: tabular-nums;
   pointer-events: none;
+}
+.gfx-toast {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  max-width: 80%;
+  padding: 6px 12px;
+  border: 1px solid #4a4a55;
+  border-radius: 4px;
+  background: rgba(20, 20, 24, 0.92);
+  color: #e6e6ea;
+  font-size: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+}
+.gfx-toast[hidden] {
+  display: none;
 }

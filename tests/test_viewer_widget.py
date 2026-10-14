@@ -245,6 +245,56 @@ def test_widget_ignores_a_bad_patch() -> None:
     assert viewer.state["styles"] == before
 
 
+def test_widget_writes_a_saved_image(tmp_path: Path) -> None:
+    """D14: a ``save_image`` message writes the PNG under ``save_dir``."""
+    import base64
+
+    viewer = widget.view(f1_stack(), save_dir=tmp_path)
+    payload = base64.b64encode(b"\x89PNG\r\n\x1a\nfake").decode()
+    viewer._on_msg(
+        None,
+        {"event": "save_image", "data": f"data:image/png;base64,{payload}", "filename": "shot.png"},
+        [],
+    )
+    written = Path(viewer.save_result["path"])
+    assert written.parent == tmp_path.resolve()
+    assert written.name == "shot.png"
+    assert written.read_bytes() == b"\x89PNG\r\n\x1a\nfake"
+
+
+def test_saved_image_does_not_clobber(tmp_path: Path) -> None:
+    """D14: a second save to the same name lands beside the first, not over it."""
+    import base64
+
+    viewer = widget.view(f1_stack(), save_dir=tmp_path)
+    payload = base64.b64encode(b"one").decode()
+    viewer._on_msg(
+        None,
+        {"event": "save_image", "data": f"data:image/png;base64,{payload}", "filename": "shot.png"},
+        [],
+    )
+    viewer._on_msg(
+        None,
+        {"event": "save_image", "data": f"data:image/png;base64,{payload}", "filename": "shot.png"},
+        [],
+    )
+    assert Path(viewer.save_result["path"]).name == "shot-1.png"
+
+
+def test_saved_image_reports_a_bad_payload(tmp_path: Path) -> None:
+    """D14: a malformed data URL reports an error rather than raising."""
+    viewer = widget.view(f1_stack(), save_dir=tmp_path)
+    viewer._on_msg(None, {"event": "save_image", "data": "not-a-data-url", "filename": "x.png"}, [])
+    assert "error" in viewer.save_result
+    assert not (tmp_path / "x.png").exists()
+
+
+def test_save_dir_defaults_to_cwd() -> None:
+    """D14: with no ``save_dir`` the widget writes to the process directory."""
+    viewer = widget.view(f1_stack())
+    assert viewer.save_dir == Path.cwd()
+
+
 def test_static_assets_exist() -> None:
     """The committed bundle anywidget loads exists and is non-empty (spec D6)."""
     static = Path(widget.__file__).parent / "static"

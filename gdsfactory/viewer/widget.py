@@ -15,6 +15,12 @@ The browser edits the state by sending ``{"event": "set_state", "patch": ...}``;
 result back (spec D10). A rejected patch re-syncs the state unchanged, so the
 browser cannot diverge.
 
+The save button normally downloads a PNG in the browser (spec D14). A per-viewer
+"save to" preference can route it to the **kernel** instead: the browser sends
+``{"event": "save_image", "data": <data URL>, "filename": ...}`` and the kernel
+writes the file under :attr:`Viewer.save_dir` (the process working directory by
+default), reporting the written path back in the ``save_result`` trait.
+
 The three run modes (spec R14) hang off the handle:
 
 - ``.objects`` / ``.config`` / ``.constraints`` — the mode-2 export, computed on
@@ -29,6 +35,8 @@ The three run modes (spec R14) hang off the handle:
 
 from __future__ import annotations
 
+import base64
+import binascii
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -72,15 +80,23 @@ class Viewer(anywidget.AnyWidget):
     #: the in-flight run's phase — ``"placing"``, ``"compiling"`` or
     #: ``"stepping"`` (spec D15) — or ``""`` when no run is in flight
     phase = traitlets.Unicode(default_value="").tag(sync=True)
+    #: the last kernel-side save's outcome, for the browser to confirm (spec
+    #: D14): ``{"path": str}`` on success or ``{"error": str}`` on failure
+    save_result = traitlets.Dict(default_value={}).tag(sync=True)
 
-    def __init__(self, stack: Any, **kwargs: Any) -> None:
+    def __init__(self, stack: Any, save_dir: Path | str | None = None, **kwargs: Any) -> None:
         """Builds the device's geometry and prepares the widget.
 
         Args:
             stack: a :class:`~gdsfactory.fdtdx_stack.StackDevice`.
+            save_dir: where the save button writes a PNG when the browser
+                prefers a server-side save (spec D14). Defaults to the process
+                working directory, resolved once at construction so a later
+                ``os.chdir`` does not move the target.
             **kwargs: passed to :class:`anywidget.AnyWidget`.
         """
         self._viewer_state = ViewerState(stack)
+        self.save_dir = Path(save_dir).expanduser() if save_dir is not None else Path.cwd()
         self._run_result: Any = None
         self._run_error: BaseException | None = None
         self._run_thread: threading.Thread | None = None
@@ -233,6 +249,11 @@ class Viewer(anywidget.AnyWidget):
             except RuntimeError:
                 pass
             return
+        if event == "save_image":
+            # the browser's save button, routed to the kernel (spec D14): write
+            # the PNG beside the notebook and report the path back
+            self._save_image(content)
+            return
         before = (self._viewer_state.plane, self._viewer_state.plane_position)
         try:
             if event == "set_state":
@@ -271,6 +292,46 @@ class Viewer(anywidget.AnyWidget):
         elif event == "set_settings":
             self._viewer_state.apply_patch({"simulation": content["settings"]})
 
+    def _save_image(self, content: dict[str, Any]) -> None:
+        """Writes a browser PNG under :attr:`save_dir` (spec D14).
+
+        The browser sends a ``data:image/png;base64,...`` URL and a filename;
+        the file lands in ``save_dir`` (created if missing) and ``save_result``
+        carries the absolute path, or an ``error`` string if the write failed.
+        An existing file is kept: a ``-1``, ``-2``, … suffix is appended until
+        the name is free, so repeated saves never clobber an earlier one.
+        """
+        data = content.get("data")
+        filename = content.get("filename") or "viewer.png"
+        try:
+            raw = _decode_data_url(data)
+            target = _free_path(self.save_dir / Path(filename).name)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(raw)
+        except (ValueError, OSError, binascii.Error) as exc:
+            self.save_result = {"error": str(exc)}
+        else:
+            self.save_result = {"path": str(target.resolve())}
+
+
+def _decode_data_url(data: Any) -> bytes:
+    """Decodes a base64 ``data:`` URL's payload into bytes (spec D14)."""
+    if not isinstance(data, str) or not data.startswith("data:"):
+        raise ValueError("expected a data URL")
+    _, _, encoded = data.partition(",")
+    return base64.b64decode(encoded, validate=True)
+
+
+def _free_path(path: Path) -> Path:
+    """Returns ``path``, or ``stem-1``, ``stem-2``, … if it already exists."""
+    if not path.exists():
+        return path
+    for index in range(1, 1000):
+        candidate = path.with_name(f"{path.stem}-{index}{path.suffix}")
+        if not candidate.exists():
+            return candidate
+    return path
+
 
 def _detector_names(result: Any) -> list[str]:
     """The names of the detectors in a run's result (spec R14, Q20)."""
@@ -280,13 +341,15 @@ def _detector_names(result: Any) -> list[str]:
         return []
 
 
-def view(stack: Any) -> Viewer:
+def view(stack: Any, save_dir: Path | str | None = None) -> Viewer:
     """Returns the viewer for a device (spec D7).
 
     Args:
         stack: a :class:`~gdsfactory.fdtdx_stack.StackDevice`.
+        save_dir: where a server-side save writes its PNG (spec D14). Defaults
+            to the process working directory.
 
     Returns:
         The :class:`Viewer` app-shell widget.
     """
-    return Viewer(stack)
+    return Viewer(stack, save_dir=save_dir)

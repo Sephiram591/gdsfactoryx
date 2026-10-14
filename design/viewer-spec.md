@@ -173,8 +173,10 @@ AC:
     level that a higher-`mesh_order` level covers everywhere (Q13)
   - a **camera** button (a screenshot icon) that writes a PNG (D14). It saves
     the **active viewport** by default; the settings' screenshot scope makes it
-    save the **whole widget** instead. The scope is a per-viewer preference kept
-    in the browser (localStorage), not kernel state.
+    save the **whole widget** instead, and the settings' save-to row makes it
+    write to the **browser** (download) or the **kernel** (a file beside the
+    notebook). Both are per-viewer preferences kept in the browser
+    (localStorage), not kernel state.
 
 AC:
 - Hiding `oxide` reveals the `lower` and `upper` SiN levels and their vertical offset.
@@ -702,6 +704,16 @@ Three related viewport additions made while implementing M3.
   which `parseBackgroundColor` reads before that path. The scope defaults to the
   viewport alone and is a per-viewer preference in the browser (localStorage),
   not kernel state.
+
+  A second settings row, **save to**, chooses where the image lands. The default
+  is **browser**: the PNG downloads as before. **Server** hands the image to the
+  kernel instead — the browser sends the data URL in a `save_image` message, and
+  the kernel writes the file under `Viewer.save_dir` (the process working
+  directory, or whatever `view(stack, save_dir=…)` was given), appending a
+  `-1`, `-2`, … suffix rather than overwriting an existing file. The written
+  path is synced back in the `save_result` trait and shown as a brief message
+  over the widget, so a server write is not silent. Like the scope, this is a
+  per-viewer preference in localStorage, not kernel state.
 - **Implemented in M3** (`js/viewer/scene.ts`, `section.ts`, `index.ts`;
   `gdsfactory/viewer/state.py`).
 - **Relates to R3, R4, D9, D10, Q8.**
@@ -990,3 +1002,8 @@ from that, both settled here.
     shell lives in a shadow root html2canvas cannot clone, so it is copied into
     the light DOM with its `gfx-` rules, its canvases frozen to images, and laid
     out on screen behind the page. Verified end-to-end in marimo. Updated D14.
+  - Added a **save to** setting: the camera button can write its PNG in the
+    browser (download, the default) or hand it to the kernel, which writes it
+    under `Viewer.save_dir` (`view(stack, save_dir=…)`) and syncs the path back
+    in a new `save_result` trait, shown as a brief message over the widget.
+    Updated R3 and D14.
