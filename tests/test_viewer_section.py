@@ -306,7 +306,11 @@ def test_plane_patch_switches_the_normal_axis() -> None:
     # xz's normal is y: F1's box is y in [-2, 2]
     assert (lo, hi) == pytest.approx((-2.0, 2.0))
     viewer_state.apply_patch({"plane": "yz"})
-    assert viewer_state.plane_bounds() == pytest.approx((9.5 - 11.0, 9.5 + 11.0))
+    # yz's normal is x, whose range is the box center +/- half its x size
+    half = 0.5 * viewer_state.size[0]
+    assert viewer_state.plane_bounds() == pytest.approx(
+        (viewer_state.origin[0] - half, viewer_state.origin[0] + half)
+    )
 
 
 def test_plane_position_is_clamped_and_validated() -> None:

@@ -61,7 +61,7 @@ def _load_example(name: str) -> object:
 
 def f1_stack() -> StackDevice:
     """F1: the elevator coupler (``examples/fdtdx_elevator_coupler.py``)."""
-    return _load_example("fdtdx_elevator_coupler").build_stack(1.0)
+    return _load_example("fdtdx_elevator_coupler").build_stack(5.0)
 
 
 def f2_stack() -> StackDevice:
