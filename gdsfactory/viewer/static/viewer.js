@@ -42618,11 +42618,28 @@ function render({ model, el }) {
     saveSelect.appendChild(option);
   }
   saveSelect.value = readSaveTarget();
-  saveSelect.addEventListener(
-    "change",
-    () => writeSaveTarget(saveSelect.value)
-  );
+  saveSelect.addEventListener("change", () => {
+    writeSaveTarget(saveSelect.value);
+    applySaveFolderVisibility();
+  });
   saveRow.append(saveLabel, saveSelect);
+  const folderRow = document.createElement("label");
+  folderRow.className = "gfx-settings-row";
+  folderRow.title = "folder a server-side save writes into";
+  const folderLabel = document.createElement("span");
+  folderLabel.textContent = "Save folder";
+  const folderInput = document.createElement("input");
+  folderInput.type = "text";
+  folderInput.className = "gfx-text";
+  folderInput.value = model.get("save_dir") ?? "";
+  folderInput.addEventListener(
+    "change",
+    () => send(model, { event: "set_save_dir", dir: folderInput.value })
+  );
+  folderRow.append(folderLabel, folderInput);
+  function applySaveFolderVisibility() {
+    folderRow.hidden = saveSelect.value !== "server";
+  }
   settingsPanel.append(
     settingsHeading,
     controlRow,
@@ -42630,7 +42647,8 @@ function render({ model, el }) {
     fadeRow,
     fullRow,
     shotRow,
-    saveRow
+    saveRow,
+    folderRow
   );
   viewport.appendChild(settingsPanel);
   const toast = document.createElement("div");
@@ -42845,17 +42863,27 @@ function render({ model, el }) {
     const payload = model.get("save_result");
     if (!payload || Object.keys(payload).length === 0) return;
     if (payload.error) showToast(`save failed: ${payload.error}`);
+    else if (payload.folder) showToast(`save folder: ${payload.folder}`);
     else if (payload.path) showToast(`saved ${payload.path}`);
+  };
+  const applySaveDir = () => {
+    const folder = model.get("save_dir");
+    if (typeof folder === "string" && document.activeElement !== folderInput) {
+      folderInput.value = folder;
+    }
   };
   model.on("change:state", applyState);
   model.on("change:progress", applyProgress);
   model.on("change:phase", applyPhase);
   model.on("change:section", applySection);
   model.on("change:save_result", applySaveResult);
+  model.on("change:save_dir", applySaveDir);
   applySection();
   applyState();
   applyProgress();
   applyPhase();
+  applySaveDir();
+  applySaveFolderVisibility();
   return () => {
     if (positionFrame !== 0) cancelAnimationFrame(positionFrame);
     if (toastTimer !== 0) window.clearTimeout(toastTimer);

@@ -283,10 +283,32 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
     saveSelect.appendChild(option);
   }
   saveSelect.value = readSaveTarget();
-  saveSelect.addEventListener("change", () =>
-    writeSaveTarget(saveSelect.value as SaveTarget),
-  );
+  saveSelect.addEventListener("change", () => {
+    writeSaveTarget(saveSelect.value as SaveTarget);
+    applySaveFolderVisibility();
+  });
   saveRow.append(saveLabel, saveSelect);
+
+  // the folder a server-side save writes into (spec D14). A browser cannot
+  // browse the kernel's filesystem, so this is a path string the kernel
+  // validates and creates; it shows only when saving to the server.
+  const folderRow = document.createElement("label");
+  folderRow.className = "gfx-settings-row";
+  folderRow.title = "folder a server-side save writes into";
+  const folderLabel = document.createElement("span");
+  folderLabel.textContent = "Save folder";
+  const folderInput = document.createElement("input");
+  folderInput.type = "text";
+  folderInput.className = "gfx-text";
+  folderInput.value = (model.get("save_dir") as string | undefined) ?? "";
+  folderInput.addEventListener("change", () =>
+    send(model, { event: "set_save_dir", dir: folderInput.value }),
+  );
+  folderRow.append(folderLabel, folderInput);
+  // the folder field is only meaningful for a server-side save
+  function applySaveFolderVisibility(): void {
+    folderRow.hidden = saveSelect.value !== "server";
+  }
 
   settingsPanel.append(
     settingsHeading,
@@ -296,6 +318,7 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
     fullRow,
     shotRow,
     saveRow,
+    folderRow,
   );
   viewport.appendChild(settingsPanel);
 
@@ -553,10 +576,22 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
     }, 4000);
   };
   const applySaveResult = (): void => {
-    const payload = model.get("save_result") as { path?: string; error?: string } | undefined;
+    const payload = model.get("save_result") as
+      | { path?: string; folder?: string; error?: string }
+      | undefined;
     if (!payload || Object.keys(payload).length === 0) return;
     if (payload.error) showToast(`save failed: ${payload.error}`);
+    else if (payload.folder) showToast(`save folder: ${payload.folder}`);
     else if (payload.path) showToast(`saved ${payload.path}`);
+  };
+
+  // the kernel is the authority on the save folder (it resolves and creates
+  // it), so reflect its value back into the field (spec D14)
+  const applySaveDir = (): void => {
+    const folder = model.get("save_dir") as string | undefined;
+    if (typeof folder === "string" && document.activeElement !== folderInput) {
+      folderInput.value = folder;
+    }
   };
 
   model.on("change:state", applyState);
@@ -564,10 +599,13 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   model.on("change:phase", applyPhase);
   model.on("change:section", applySection);
   model.on("change:save_result", applySaveResult);
+  model.on("change:save_dir", applySaveDir);
   applySection();
   applyState();
   applyProgress();
   applyPhase();
+  applySaveDir();
+  applySaveFolderVisibility();
 
   return () => {
     if (positionFrame !== 0) cancelAnimationFrame(positionFrame);

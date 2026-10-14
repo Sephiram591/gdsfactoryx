@@ -127,6 +127,12 @@
   gap: 8px;
 }
 
+/* a row shown only for one option (the save folder, spec D14): `display: flex`
+   above would otherwise win over the `hidden` attribute */
+.gfx-settings-row[hidden] {
+  display: none;
+}
+
 .gfx-select {
   padding: 3px 6px;
   border: 1px solid #4a4a55;

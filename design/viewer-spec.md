@@ -175,8 +175,9 @@ AC:
     the **active viewport** by default; the settings' screenshot scope makes it
     save the **whole widget** instead, and the settings' save-to row makes it
     write to the **browser** (download) or the **kernel** (a file beside the
-    notebook). Both are per-viewer preferences kept in the browser
-    (localStorage), not kernel state.
+    notebook, into a folder the save-folder field sets). The scope and the save
+    target are per-viewer preferences kept in the browser (localStorage), not
+    kernel state; the folder itself is kernel state (`save_dir`).
 
 AC:
 - Hiding `oxide` reveals the `lower` and `upper` SiN levels and their vertical offset.
@@ -708,12 +709,20 @@ Three related viewport additions made while implementing M3.
   A second settings row, **save to**, chooses where the image lands. The default
   is **browser**: the PNG downloads as before. **Server** hands the image to the
   kernel instead — the browser sends the data URL in a `save_image` message, and
-  the kernel writes the file under `Viewer.save_dir` (the process working
+  the kernel writes the file under the `save_dir` trait (the process working
   directory, or whatever `view(stack, save_dir=…)` was given), appending a
   `-1`, `-2`, … suffix rather than overwriting an existing file. The written
   path is synced back in the `save_result` trait and shown as a brief message
   over the widget, so a server write is not silent. Like the scope, this is a
   per-viewer preference in localStorage, not kernel state.
+
+  In server mode a **save folder** field sets that directory. A browser cannot
+  browse the kernel's filesystem, so the field is a path string: the kernel
+  resolves it (a relative path nests under the current folder), creates it, and
+  syncs the resolved absolute path back into the `save_dir` trait, which the
+  field reflects — so a bad or unwritable path is reported at once, not on the
+  next save. `save_dir` is the source of truth, so a kernel-side change to it is
+  picked up too.
 - **Implemented in M3** (`js/viewer/scene.ts`, `section.ts`, `index.ts`;
   `gdsfactory/viewer/state.py`).
 - **Relates to R3, R4, D9, D10, Q8.**
@@ -1007,3 +1016,6 @@ from that, both settled here.
     under `Viewer.save_dir` (`view(stack, save_dir=…)`) and syncs the path back
     in a new `save_result` trait, shown as a brief message over the widget.
     Updated R3 and D14.
+  - Added a **save folder** field for server-side saves: the kernel resolves and
+    creates the path, and syncs it back through the now-synced `save_dir` trait.
+    Updated D14.

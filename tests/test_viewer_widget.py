@@ -292,7 +292,47 @@ def test_saved_image_reports_a_bad_payload(tmp_path: Path) -> None:
 def test_save_dir_defaults_to_cwd() -> None:
     """D14: with no ``save_dir`` the widget writes to the process directory."""
     viewer = widget.view(f1_stack())
-    assert viewer.save_dir == Path.cwd()
+    assert viewer.save_dir == str(Path.cwd().resolve())
+
+
+def test_set_save_dir_from_the_browser(tmp_path: Path) -> None:
+    """D14: a ``set_save_dir`` message retargets the folder and creates it."""
+    viewer = widget.view(f1_stack(), save_dir=tmp_path)
+    target = tmp_path / "shots" / "run1"
+    viewer._on_msg(None, {"event": "set_save_dir", "dir": str(target)}, [])
+    assert viewer.save_dir == str(target.resolve())
+    assert viewer.save_result["folder"] == str(target.resolve())
+    assert target.is_dir()
+
+
+def test_set_save_dir_resolves_relative_under_the_current(tmp_path: Path) -> None:
+    """D14: a relative folder nests under the existing save directory."""
+    viewer = widget.view(f1_stack(), save_dir=tmp_path)
+    viewer._on_msg(None, {"event": "set_save_dir", "dir": "shots"}, [])
+    assert viewer.save_dir == str((tmp_path / "shots").resolve())
+
+
+def test_set_save_dir_rejects_an_empty_path(tmp_path: Path) -> None:
+    """D14: an empty folder is refused and leaves the target unchanged."""
+    viewer = widget.view(f1_stack(), save_dir=tmp_path)
+    viewer._on_msg(None, {"event": "set_save_dir", "dir": "  "}, [])
+    assert viewer.save_dir == str(tmp_path.resolve())
+    assert "error" in viewer.save_result
+
+
+def test_saved_image_honors_the_new_folder(tmp_path: Path) -> None:
+    """D14: after a retarget, the PNG lands in the new folder."""
+    import base64
+
+    viewer = widget.view(f1_stack(), save_dir=tmp_path)
+    viewer._on_msg(None, {"event": "set_save_dir", "dir": "shots"}, [])
+    payload = base64.b64encode(b"png").decode()
+    viewer._on_msg(
+        None,
+        {"event": "save_image", "data": f"data:image/png;base64,{payload}", "filename": "a.png"},
+        [],
+    )
+    assert Path(viewer.save_result["path"]) == (tmp_path / "shots" / "a.png").resolve()
 
 
 def test_static_assets_exist() -> None:

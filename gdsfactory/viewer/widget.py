@@ -81,8 +81,12 @@ class Viewer(anywidget.AnyWidget):
     #: ``"stepping"`` (spec D15) — or ``""`` when no run is in flight
     phase = traitlets.Unicode(default_value="").tag(sync=True)
     #: the last kernel-side save's outcome, for the browser to confirm (spec
-    #: D14): ``{"path": str}`` on success or ``{"error": str}`` on failure
+    #: D14): ``{"path": str}`` on success, ``{"folder": str}`` when the save
+    #: folder changed, or ``{"error": str}`` on failure
     save_result = traitlets.Dict(default_value={}).tag(sync=True)
+    #: the absolute folder a server-side save writes into (spec D14). Settable
+    #: from the browser, so the settings screen can offer a folder field.
+    save_dir = traitlets.Unicode(default_value="").tag(sync=True)
 
     def __init__(self, stack: Any, save_dir: Path | str | None = None, **kwargs: Any) -> None:
         """Builds the device's geometry and prepares the widget.
@@ -96,7 +100,7 @@ class Viewer(anywidget.AnyWidget):
             **kwargs: passed to :class:`anywidget.AnyWidget`.
         """
         self._viewer_state = ViewerState(stack)
-        self.save_dir = Path(save_dir).expanduser() if save_dir is not None else Path.cwd()
+        initial_save_dir = Path(save_dir).expanduser() if save_dir is not None else Path.cwd()
         self._run_result: Any = None
         self._run_error: BaseException | None = None
         self._run_thread: threading.Thread | None = None
@@ -109,6 +113,7 @@ class Viewer(anywidget.AnyWidget):
         self.meta = meta
         self.state = self._viewer_state.to_state()
         self.section = build_section_payload(self._viewer_state)
+        self.save_dir = str(initial_save_dir.resolve())
         self.on_msg(self._on_msg)
 
     # ------------------------------------------------------------------ handle
@@ -254,6 +259,11 @@ class Viewer(anywidget.AnyWidget):
             # the PNG beside the notebook and report the path back
             self._save_image(content)
             return
+        if event == "set_save_dir":
+            # the settings screen's folder field (spec D14): point server-side
+            # saves at a new directory, creating it if the write is legal
+            self._set_save_dir(content.get("dir"))
+            return
         before = (self._viewer_state.plane, self._viewer_state.plane_position)
         try:
             if event == "set_state":
@@ -292,6 +302,29 @@ class Viewer(anywidget.AnyWidget):
         elif event == "set_settings":
             self._viewer_state.apply_patch({"simulation": content["settings"]})
 
+    def _set_save_dir(self, folder: Any) -> None:
+        """Points server-side saves at ``folder``, creating it (spec D14).
+
+        The browser cannot browse the server's filesystem, so the folder comes
+        in as a path string. A relative path resolves against the current
+        :attr:`save_dir`, so a short name like ``shots`` nests under the
+        existing target. The directory is created here — so a typo or an
+        unwritable path is reported at once, not on the next save.
+        """
+        if not isinstance(folder, str) or not folder.strip():
+            self.save_result = {"error": "enter a folder path"}
+            return
+        try:
+            target = Path(folder).expanduser()
+            if not target.is_absolute():
+                target = Path(self.save_dir) / target
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.save_result = {"error": str(exc)}
+        else:
+            self.save_dir = str(target.resolve())
+            self.save_result = {"folder": self.save_dir}
+
     def _save_image(self, content: dict[str, Any]) -> None:
         """Writes a browser PNG under :attr:`save_dir` (spec D14).
 
@@ -305,7 +338,7 @@ class Viewer(anywidget.AnyWidget):
         filename = content.get("filename") or "viewer.png"
         try:
             raw = _decode_data_url(data)
-            target = _free_path(self.save_dir / Path(filename).name)
+            target = _free_path(Path(self.save_dir) / Path(filename).name)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(raw)
         except (ValueError, OSError, binascii.Error) as exc:
