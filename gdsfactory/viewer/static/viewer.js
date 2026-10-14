@@ -29788,7 +29788,7 @@ var Explorer = class {
       true,
       1e-15
     ), "simulation time, in fs");
-    add("boundary_offset", "box offset", this.boundaryControl(
+    add("boundary_offset", "boundary offset", this.boundaryControl(
       (value) => this.callbacks.onSettings({ boundary_offset: value })
     ), "move each box face off the geometry's bounding box, in \xB5m (positive = towards +axis); the viewports update live");
     return { rows: [fields, note], note };
@@ -34944,7 +34944,10 @@ function render({ model, el }) {
   let glyphs = new PortGlyphs(meta.ports);
   const planes = new PlaneGlyphs();
   const disposeContent = () => {
-    for (const meshes of levels.values()) meshes.dispose();
+    for (const meshes of levels.values()) {
+      meshes.dispose();
+      content.remove(meshes.group);
+    }
     glyphs.dispose();
     content.remove(glyphs.group);
   };

@@ -353,7 +353,13 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   const planes = new PlaneGlyphs();
 
   const disposeContent = (): void => {
-    for (const meshes of levels.values()) meshes.dispose();
+    for (const meshes of levels.values()) {
+      meshes.dispose();
+      // detach as well as dispose: `dispose()` frees the GPU buffers but the
+      // group stays in the scene, so a re-box would leave the old, differently
+      // sized meshes drawn over the new ones
+      content.remove(meshes.group);
+    }
     glyphs.dispose();
     content.remove(glyphs.group);
   };

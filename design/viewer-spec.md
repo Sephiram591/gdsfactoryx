@@ -1030,7 +1030,7 @@ from that, both settled here.
     creates the path, and syncs it back through the now-synced `save_dir` trait.
     Updated D14.
 - 2026-10-14: `boundary_offset` as a live Simulation setting (R13).
-  - The Simulation tab gains a **box offset** row: three signed pairs (x, y, z),
+  - The Simulation tab gains a **boundary offset** row: three signed pairs (x, y, z),
     each a `+`/`−` number, editing `boundary_offset` `(x+, x-, y+, y-, z+, z-)`.
     A value moves its face of the `StackDevice` box along the axis, positive
     towards +x/+y/+z, without changing the geometry.

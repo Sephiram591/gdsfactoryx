@@ -507,7 +507,7 @@ export class Explorer {
     ), "simulation time, in fs");
     // the box's faces, as an offset from the geometry's bounding box (spec R13):
     // three signed pairs (x, y, z), each `+`/`−` moving that face along its axis
-    add("boundary_offset", "box offset", this.boundaryControl(
+    add("boundary_offset", "boundary offset", this.boundaryControl(
       (value) => this.callbacks.onSettings({ boundary_offset: value }),
     ), "move each box face off the geometry's bounding box, in µm (positive = towards +axis); the viewports update live");
     return { rows: [fields, note], note };
