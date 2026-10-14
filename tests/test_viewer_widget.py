@@ -245,6 +245,40 @@ def test_widget_ignores_a_bad_patch() -> None:
     assert viewer.state["styles"] == before
 
 
+def test_run_installs_the_marimo_context_on_the_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D15: the run worker installs the caller's marimo context.
+
+    Under marimo, a trait set only reaches the browser if the thread setting it
+    has the runtime context installed; the context is thread-local, so the
+    worker thread must install the one captured on the cell's thread. Without
+    this the phase label and progress bar freeze on their last main-thread
+    value (the run looks stuck on "placing…").
+    """
+    installed: list[bool] = []
+
+    class FakeContext:
+        def install(self):  # type: ignore[no-untyped-def]
+            import contextlib
+
+            @contextlib.contextmanager
+            def _cm():  # type: ignore[no-untyped-def]
+                installed.append(True)
+                yield
+
+            return _cm()
+
+    monkeypatch.setattr(widget, "_marimo_runtime_context", lambda: FakeContext())
+    viewer = widget.view(f1_stack())
+    monkeypatch.setattr(widget, "_run_sim", lambda *a, **k: None)
+
+    done: list[bool] = []
+    viewer.run(on_done=lambda _r: done.append(True))
+    viewer._run_thread.join(timeout=5)
+
+    assert installed == [True], "the worker did not install the marimo context"
+    assert done == [True], "on_done did not fire"
+
+
 def test_widget_writes_a_saved_image(tmp_path: Path) -> None:
     """D14: a ``save_image`` message writes the PNG under ``save_dir``."""
     import base64

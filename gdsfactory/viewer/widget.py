@@ -58,6 +58,23 @@ _STATIC = Path(__file__).parent / "static"
 _SETUP_EVENTS = frozenset({"add_source", "add_detector", "update_spec", "remove_spec", "set_settings"})
 
 
+def _marimo_runtime_context() -> Any:
+    """The running marimo runtime context, or ``None`` outside marimo.
+
+    Under marimo, trait sync reaches the browser through a comm message that
+    resolves the runtime context from a **thread-local**. Only the cell's own
+    thread has it, so a trait set from a worker thread is silently dropped
+    unless that thread installs the context first (see :meth:`Viewer.run`).
+    The import is local so the widget still works under plain anywidget hosts
+    (e.g. Jupyter), where no marimo context exists.
+    """
+    try:
+        from marimo._runtime.context import safe_get_context
+    except ImportError:
+        return None
+    return safe_get_context()
+
+
 class Viewer(anywidget.AnyWidget):
     """The app-shell widget returned by :func:`view` (spec D7, D9)."""
 
@@ -193,6 +210,10 @@ class Viewer(anywidget.AnyWidget):
         self.progress = {}
         self.phase = "placing"
 
+        # capture the marimo runtime context here, on the cell's thread; the
+        # worker must install it or its trait updates never reach the browser
+        runtime_context = _marimo_runtime_context()
+
         def _on_progress(step: int, total: int) -> None:
             self.progress = {"step": int(step), "total": int(total)}
 
@@ -200,6 +221,13 @@ class Viewer(anywidget.AnyWidget):
             self.phase = name
 
         def _work() -> None:
+            if runtime_context is not None:
+                with runtime_context.install():
+                    _work_inner()
+            else:
+                _work_inner()
+
+        def _work_inner() -> None:
             try:
                 result = _run_sim(
                     self.stack,
