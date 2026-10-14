@@ -557,30 +557,124 @@ function writeShotWhole(whole: boolean): void {
 }
 
 /**
+ * The widget's own rules, as CSS text, read from wherever the host scoped them.
+ *
+ * A light-DOM clone is unstyled: in marimo the widget lives in a shadow root
+ * and its rules are `adoptedStyleSheets`, which the clone does not inherit. So
+ * the capture carries the rules along and keeps only the ones that mention a
+ * `gfx-` class, leaving the host's global styles behind.
+ */
+function shellStyleText(element: HTMLElement): string {
+  const root = element.getRootNode() as Document | ShadowRoot;
+  const parts: string[] = [];
+  const adopted = (root as ShadowRoot).adoptedStyleSheets;
+  if (adopted) {
+    for (const sheet of adopted) {
+      try {
+        parts.push(Array.from(sheet.cssRules).map((rule) => rule.cssText).join("\n"));
+      } catch {
+        // a cross-origin sheet has no readable rules; skip it
+      }
+    }
+  }
+  for (const node of root.querySelectorAll?.("style") ?? []) {
+    parts.push(node.textContent ?? "");
+  }
+  return parts.filter((text) => text.includes("gfx-")).join("\n");
+}
+
+/**
  * Rasterizes the whole widget shell into one PNG data URL (spec D14).
  *
- * The host notebook's own stylesheets are in the same document, and html2canvas
- * 1.4.1's color parser throws on modern color functions they use (`color()`,
- * `oklch()`, `color-mix()`, `light-dark()`), which aborts the capture. Its
- * `foreignObjectRendering` mode hands the rasterization to the browser instead,
- * sidestepping that parser, and reads the three.js canvas because the renderer
- * keeps its drawing buffer (see `Scene3D`). If html2canvas is unavailable or
- * still throws, the viewport image is returned instead, so the button always
- * produces something.
+ * html2canvas can neither clone a shadow root nor read a `<canvas>` through a
+ * clone, so the shell is first copied into the light DOM with three fixes:
+ *
+ * - the widget's `gfx-` rules are re-inserted inside the clone (see
+ *   `shellStyleText`), since the clone is otherwise unstyled;
+ * - each `<canvas>` is replaced by an `<img>` of its current pixels — the
+ *   three.js canvas keeps its drawing buffer (see `Scene3D`) and the section
+ *   canvas is a 2D surface, so both `toDataURL` cleanly;
+ * - the clone is laid out on screen at the origin behind the page
+ *   (`z-index: -1`): `foreignObjectRendering` hands rasterization to the
+ *   browser, which only paints elements it actually lays out, so an off-screen
+ *   holder captures empty.
+ *
+ * The host's stylesheets share the document, and html2canvas 1.4.1's color
+ * parser throws on the modern color functions they use (`color()`, `oklch()`,
+ * `color-mix()`, `light-dark()`). `parseBackgroundColor` parses the document's
+ * `html`/`body` backgrounds before the render branch, so `onclone` clears them;
+ * every other color is parsed by the canvas renderer, which
+ * `foreignObjectRendering` replaces with the browser's own rasterizer.
+ *
+ * If html2canvas is unavailable or still throws, the viewport image is
+ * returned instead, so the button always produces something.
  */
 async function captureShell(shell: HTMLElement, fallbackPng: string): Promise<string> {
+  let holder: HTMLDivElement | null = null;
   try {
     const { default: html2canvas } = await import("html2canvas");
-    const canvas = await html2canvas(shell, {
+    const rect = shell.getBoundingClientRect();
+
+    const clone = shell.cloneNode(true) as HTMLElement;
+    const style = document.createElement("style");
+    style.textContent = shellStyleText(shell);
+    clone.insertBefore(style, clone.firstChild);
+
+    const sources = Array.from(shell.querySelectorAll("canvas"));
+    const targets = Array.from(clone.querySelectorAll("canvas"));
+    for (let i = 0; i < sources.length; i++) {
+      const image = document.createElement("img");
+      try {
+        image.src = sources[i].toDataURL("image/png");
+      } catch {
+        continue; // tainted canvas: leave it to render blank rather than abort
+      }
+      const bounds = sources[i].getBoundingClientRect();
+      image.style.width = `${Math.round(bounds.width)}px`;
+      image.style.height = `${Math.round(bounds.height)}px`;
+      targets[i].replaceWith(image);
+    }
+
+    holder = document.createElement("div");
+    holder.style.cssText =
+      `position:fixed;left:0;top:0;width:${Math.round(rect.width)}px;z-index:-1;pointer-events:none;`;
+    holder.appendChild(clone);
+    document.body.appendChild(holder);
+
+    // let layout settle and the frozen images decode before rasterizing
+    await new Promise((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(resolve)),
+    );
+    await Promise.all(
+      Array.from(clone.querySelectorAll("img")).map((image) =>
+        image.complete
+          ? Promise.resolve()
+          : new Promise((resolve) => {
+              image.addEventListener("load", resolve, { once: true });
+              image.addEventListener("error", resolve, { once: true });
+            }),
+      ),
+    );
+
+    const canvas = await html2canvas(clone, {
       backgroundColor: null,
       // the shell is dark; keep its own colors rather than html2canvas's white
       useCORS: true,
       foreignObjectRendering: true,
+      // the document backgrounds are not part of the shell being captured, so
+      // clearing them on the clone loses nothing and keeps the parse above from
+      // reading the host's modern-syntax background (see the note above)
+      onclone: (doc: Document) => {
+        doc.documentElement.style.backgroundColor = "transparent";
+        if (doc.body) doc.body.style.backgroundColor = "transparent";
+      },
     });
     return canvas.toDataURL("image/png");
   } catch (error) {
     console.warn("whole-widget capture failed; saving the viewport instead", error);
     return fallbackPng;
+  } finally {
+    holder?.remove();
   }
 }
 

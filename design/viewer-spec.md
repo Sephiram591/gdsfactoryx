@@ -684,15 +684,24 @@ Three related viewport additions made while implementing M3.
   PNG of the active viewport: the 3D renderer's canvas or the 2D canvas. The
   settings screen's **screenshot scope** switches it to capture the **whole
   widget** instead — the menubar, explorer and viewport together — via
-  `html2canvas` over the widget root, with the viewport canvas as a fallback if
-  that capture fails. The capture uses html2canvas's `foreignObjectRendering`
-  mode: the host notebook's own stylesheets share the document, and html2canvas
-  1.4.1's color parser throws on the modern color functions they use
-  (`color()`, `oklch()`, `color-mix()`, `light-dark()`), aborting the capture —
-  the browser-native path sidesteps that parser. The scope defaults to the
+  `html2canvas`, with the viewport canvas as a fallback if that capture fails.
+  The widget root lives in a shadow root in marimo, which html2canvas cannot
+  clone, so the capture first copies the shell into the light DOM with three
+  fixes: the widget's own `gfx-` rules are re-inserted inside the clone (they
+  are `adoptedStyleSheets` the clone does not inherit); each `<canvas>` is
+  replaced by an `<img>` of its current pixels (the 3D renderer keeps its
+  drawing buffer via `preserveDrawingBuffer`, so `toDataURL` is not blank); and
+  the clone is laid out on screen at the origin behind the page
+  (`z-index: -1`), since `foreignObjectRendering` only paints elements the
+  browser actually lays out. The capture uses html2canvas's
+  `foreignObjectRendering` mode because the host notebook's own stylesheets
+  share the document and html2canvas 1.4.1's color parser throws on the modern
+  color functions they use (`color()`, `oklch()`, `color-mix()`,
+  `light-dark()`), aborting the capture — the browser-native path sidesteps that
+  parser, and an `onclone` hook clears the document's `html`/`body` backgrounds,
+  which `parseBackgroundColor` reads before that path. The scope defaults to the
   viewport alone and is a per-viewer preference in the browser (localStorage),
-  not kernel state. The 3D renderer sets `preserveDrawingBuffer` so the
-  whole-widget capture does not draw a blank canvas.
+  not kernel state.
 - **Implemented in M3** (`js/viewer/scene.ts`, `section.ts`, `index.ts`;
   `gdsfactory/viewer/state.py`).
 - **Relates to R3, R4, D9, D10, Q8.**
@@ -977,3 +986,7 @@ from that, both settled here.
   - The redundant "gdsfactory viewer" title text is gone from the menubar.
   - Menubar order is now: 3D, 2D, Fit, the shared **z multiplier**, then a
     spacer, then the run's phase label and progress bar, Run, Save and Settings.
+  - Fixed the whole-widget capture, which had been saving the viewport: the
+    shell lives in a shadow root html2canvas cannot clone, so it is copied into
+    the light DOM with its `gfx-` rules, its canvases frozen to images, and laid
+    out on screen behind the page. Verified end-to-end in marimo. Updated D14.

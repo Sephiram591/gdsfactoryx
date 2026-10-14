@@ -42841,19 +42841,80 @@ function writeShotWhole(whole) {
   } catch {
   }
 }
+function shellStyleText(element) {
+  const root = element.getRootNode();
+  const parts = [];
+  const adopted = root.adoptedStyleSheets;
+  if (adopted) {
+    for (const sheet of adopted) {
+      try {
+        parts.push(Array.from(sheet.cssRules).map((rule) => rule.cssText).join("\n"));
+      } catch {
+      }
+    }
+  }
+  for (const node of root.querySelectorAll?.("style") ?? []) {
+    parts.push(node.textContent ?? "");
+  }
+  return parts.filter((text) => text.includes("gfx-")).join("\n");
+}
 async function captureShell(shell, fallbackPng) {
+  let holder = null;
   try {
     const { default: html2canvas } = await Promise.resolve().then(() => __toESM(require_html2canvas(), 1));
-    const canvas = await html2canvas(shell, {
+    const rect = shell.getBoundingClientRect();
+    const clone = shell.cloneNode(true);
+    const style = document.createElement("style");
+    style.textContent = shellStyleText(shell);
+    clone.insertBefore(style, clone.firstChild);
+    const sources = Array.from(shell.querySelectorAll("canvas"));
+    const targets = Array.from(clone.querySelectorAll("canvas"));
+    for (let i = 0; i < sources.length; i++) {
+      const image = document.createElement("img");
+      try {
+        image.src = sources[i].toDataURL("image/png");
+      } catch {
+        continue;
+      }
+      const bounds = sources[i].getBoundingClientRect();
+      image.style.width = `${Math.round(bounds.width)}px`;
+      image.style.height = `${Math.round(bounds.height)}px`;
+      targets[i].replaceWith(image);
+    }
+    holder = document.createElement("div");
+    holder.style.cssText = `position:fixed;left:0;top:0;width:${Math.round(rect.width)}px;z-index:-1;pointer-events:none;`;
+    holder.appendChild(clone);
+    document.body.appendChild(holder);
+    await new Promise(
+      (resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))
+    );
+    await Promise.all(
+      Array.from(clone.querySelectorAll("img")).map(
+        (image) => image.complete ? Promise.resolve() : new Promise((resolve) => {
+          image.addEventListener("load", resolve, { once: true });
+          image.addEventListener("error", resolve, { once: true });
+        })
+      )
+    );
+    const canvas = await html2canvas(clone, {
       backgroundColor: null,
       // the shell is dark; keep its own colors rather than html2canvas's white
       useCORS: true,
-      foreignObjectRendering: true
+      foreignObjectRendering: true,
+      // the document backgrounds are not part of the shell being captured, so
+      // clearing them on the clone loses nothing and keeps the parse above from
+      // reading the host's modern-syntax background (see the note above)
+      onclone: (doc) => {
+        doc.documentElement.style.backgroundColor = "transparent";
+        if (doc.body) doc.body.style.backgroundColor = "transparent";
+      }
     });
     return canvas.toDataURL("image/png");
   } catch (error2) {
     console.warn("whole-widget capture failed; saving the viewport instead", error2);
     return fallbackPng;
+  } finally {
+    holder?.remove();
   }
 }
 function currentState(model) {
