@@ -119,6 +119,9 @@ export interface SimSettingsPayload {
   pml_thickness: number;
   resolution_um: number;
   time_s: number;
+  //: `(x+, x-, y+, y-, z+, z-)` in µm — how far the box's faces move off the
+  //: geometry's bounding box (spec R13). The geometry does not change.
+  boundary_offset: [number, number, number, number, number, number];
 }
 
 export interface StatePayload {

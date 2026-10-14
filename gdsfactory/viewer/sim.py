@@ -17,6 +17,7 @@ Glyphs are computed from a spec and the port frame (spec D11): the same frame
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
 
@@ -158,6 +159,12 @@ class SimSettings:
         pml_thickness: the PML thickness, in grid cells.
         resolution_um: the grid resolution, in µm.
         time_s: the simulation time, in seconds.
+        boundary_offset: ``(x+, x-, y+, y-, z+, z-)`` in µm — how far the
+            simulation box's faces move off the geometry's bounding box (the
+            ``StackDevice`` box, spec R13). Each value moves its face along the
+            axis, positive towards +x, +y or +z, so ``(1, -1, 0, 0, 0, 0)``
+            grows the box by 1 µm on each x side; the geometry itself does not
+            change.
     """
 
     wavelength_um: float = 1.55
@@ -166,6 +173,9 @@ class SimSettings:
     pml_thickness: int = 10
     resolution_um: float = 0.02
     time_s: float = 400e-15
+    boundary_offset: tuple[float, float, float, float, float, float] = (
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    )
 
     def to_wire(self) -> dict[str, Any]:
         """The settings as JSON for the browser (spec R13)."""
@@ -176,6 +186,7 @@ class SimSettings:
             "pml_thickness": int(self.pml_thickness),
             "resolution_um": float(self.resolution_um),
             "time_s": float(self.time_s),
+            "boundary_offset": [float(v) for v in self.boundary_offset],
         }
 
     @classmethod
@@ -191,6 +202,12 @@ class SimSettings:
         pml = int(data.get("pml_thickness", defaults.pml_thickness))
         if wavelength <= 0 or resolution <= 0 or time_s <= 0 or pml < 0:
             raise ValueError("Settings must be positive (wavelength, resolution, time) or non-negative (PML)")
+        offset = data.get("boundary_offset", defaults.boundary_offset)
+        if not (isinstance(offset, (list, tuple)) and len(offset) == 6):
+            raise ValueError(f"boundary_offset must be 6 numbers (x+, x-, y+, y-, z+, z-), got {offset!r}")
+        offset = tuple(float(v) for v in offset)
+        if not all(math.isfinite(v) for v in offset):
+            raise ValueError(f"boundary_offset must be finite, got {offset!r}")
         return cls(
             wavelength_um=wavelength,
             pulse_width_frac=float(data.get("pulse_width_frac", defaults.pulse_width_frac)),
@@ -198,6 +215,7 @@ class SimSettings:
             pml_thickness=pml,
             resolution_um=resolution,
             time_s=time_s,
+            boundary_offset=offset,
         )
 
 

@@ -389,6 +389,31 @@
   min-width: 0;
 }
 
+/* three signed face-offset pairs (x, y, z) on one settings row (spec R13) */
+.gfx-triple {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.gfx-triple-axis {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.gfx-triple-name {
+  flex: 0 0 10px;
+  opacity: 0.7;
+}
+
+.gfx-triple .gfx-numeric {
+  flex: 1;
+  min-width: 0;
+}
+
 /* the run's phase label, left of its progress bar (spec D15) */
 .gfx-run-phase {
   opacity: 0.8;

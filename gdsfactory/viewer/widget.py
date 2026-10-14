@@ -303,6 +303,15 @@ class Viewer(anywidget.AnyWidget):
         except (ValueError, TypeError, KeyError):
             pass  # a bad or refused message leaves the state unchanged
         self.state = self._viewer_state.to_state()
+        if self._viewer_state.geometry_changed:
+            # a boundary_offset edit re-boxed the device (spec R13): re-send the
+            # mesh buffers and metadata so the browser rebuilds its viewports
+            self._viewer_state.geometry_changed = False
+            geometry, meta = build_payload(self._viewer_state)
+            self.geometry = geometry
+            self.meta = meta
+            self.section = build_section_payload(self._viewer_state)
+            return
         after = (self._viewer_state.plane, self._viewer_state.plane_position)
         if after != before:
             self.section = build_section_payload(self._viewer_state)

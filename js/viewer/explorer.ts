@@ -100,10 +100,11 @@ export class Explorer {
   private readonly detectorAdd: HTMLButtonElement;
   private readonly simFields = new Map<string, Control>();
   private readonly simNote: HTMLElement;
+  private readonly layoutPanel: HTMLElement;
   private locked = false;
 
   constructor(
-    private readonly meta: MetaPayload,
+    private meta: MetaPayload,
     private readonly callbacks: ExplorerCallbacks,
   ) {
     this.root = document.createElement("div");
@@ -123,22 +124,16 @@ export class Explorer {
     const sim = this.buildSimForm();
     this.simNote = sim.note;
 
+    this.layoutPanel = this.panel([]);
     this.panels = [
-      this.panel([
-        this.section("Layers", this.meta.levels.map((level) => this.buildLevelRow(level))),
-        // only device ports here; the simulation-volume planes (spec R12) are a
-        // source/detector placement choice, not a port of the layout
-        this.section(
-          "Ports",
-          this.meta.ports.filter((port) => port.plane === null).map((port) => this.buildPortRow(port)),
-        ),
-      ]),
+      this.layoutPanel,
       this.panel([
         this.section("Sources", [this.sourceEmpty, this.sourceList], this.sourceAdd),
         this.section("Detectors", [this.detectorEmpty, this.detectorList], this.detectorAdd),
       ]),
       this.panel([this.section("Simulation", sim.rows)]),
     ];
+    this.buildLayout();
 
     const tabbar = this.buildTabBar();
     const body = document.createElement("div");
@@ -147,6 +142,36 @@ export class Explorer {
 
     this.root.append(tabbar, body, this.properties);
     this.setTab(0);
+  }
+
+  /** (Re)builds the Layers and Ports sections from the current metadata. */
+  private buildLayout(): void {
+    this.layoutPanel.innerHTML = "";
+    this.levelRows.clear();
+    this.portRows.clear();
+    this.layoutPanel.append(
+      this.section("Layers", this.meta.levels.map((level) => this.buildLevelRow(level))),
+      // only device ports here; the simulation-volume planes (spec R12) are a
+      // source/detector placement choice, not a port of the layout
+      this.section(
+        "Ports",
+        this.meta.ports.filter((port) => port.plane === null).map((port) => this.buildPortRow(port)),
+      ),
+    );
+  }
+
+  /**
+   * Swaps the level/port metadata and rebuilds the layout rows (spec R13).
+   *
+   * A boundary-offset edit re-boxes the device, which can add a level that was
+   * outside the old box or drop one the smaller box no longer reaches, so the
+   * Layers and Ports lists must be rebuilt from the new metadata. The spec
+   * rows and the settings controls are untouched (a boundary edit is what
+   * triggers this, so no control the user is dragging is torn down).
+   */
+  setMeta(meta: MetaPayload): void {
+    this.meta = meta;
+    this.buildLayout();
   }
 
   render(state: StatePayload): void {
@@ -480,6 +505,11 @@ export class Explorer {
     add("time_fs", "time", this.numberControl(
       400, 10, (value) => this.callbacks.onSettings({ time_s: value }), true, 1e-15,
     ), "simulation time, in fs");
+    // the box's faces, as an offset from the geometry's bounding box (spec R13):
+    // three signed pairs (x, y, z), each `+`/`−` moving that face along its axis
+    add("boundary_offset", "box offset", this.boundaryControl(
+      (value) => this.callbacks.onSettings({ boundary_offset: value }),
+    ), "move each box face off the geometry's bounding box, in µm (positive = towards +axis); the viewports update live");
     return { rows: [fields, note], note };
   }
 
@@ -493,10 +523,11 @@ export class Explorer {
       time_fs: settings.time_s,
     };
     for (const [key, control] of this.simFields) {
-      if (key === "port_size_mult") continue;
+      if (key === "port_size_mult" || key === "boundary_offset") continue;
       control.write(values[key]);
     }
     this.simFields.get("port_size_mult")?.write(settings.port_size_mult);
+    this.simFields.get("boundary_offset")?.write(settings.boundary_offset);
   }
 
   /** Enables or disables every setup control (spec D15). */
@@ -633,8 +664,65 @@ export class Explorer {
     };
   }
 
-  // ------------------------------------------------------------------- plumbing
+  /**
+   * The box's six face offsets as three signed pairs (spec R13).
+   *
+   * Each axis is a `+`/`−` input pair, so the six values read as x+, x-, y+, y-,
+   * z+, z- — the order `boundary_offset` takes. Each value moves its face along
+   * the axis, positive towards +x, +y or +z (so `(1, -1, …)` grows the box on
+   * each x side). Like the other settings controls it is live (`input` events,
+   * coalesced), so dragging a value re-boxes the device and updates both
+   * viewports without waiting for a blur.
+   */
+  private boundaryControl(
+    onChange: (value: [number, number, number, number, number, number]) => void,
+  ): Control {
+    const host = document.createElement("span");
+    host.className = "gfx-triple";
+    const axes = ["x", "y", "z"] as const;
+    const inputs: HTMLInputElement[] = [];
+    const emit = (): void => {
+      const values = inputs.map((input) => Number(input.value));
+      if (values.every((value) => Number.isFinite(value))) {
+        onChange(values as [number, number, number, number, number, number]);
+      }
+    };
+    for (const axis of axes) {
+      const group = document.createElement("span");
+      group.className = "gfx-triple-axis";
+      group.title = `the ${axis} box faces`;
+      const name = document.createElement("span");
+      name.className = "gfx-triple-name";
+      name.textContent = axis;
+      group.appendChild(name);
+      for (const sign of ["+", "−"] as const) {
+        const input = document.createElement("input");
+        input.type = "number";
+        input.step = "0.1";
+        input.className = "gfx-numeric";
+        input.title = `${axis}${sign} face offset (µm, positive = towards +${axis})`;
+        coalesce(input, emit);
+        inputs.push(input);
+        group.appendChild(input);
+      }
+      host.appendChild(group);
+    }
+    return {
+      element: host,
+      write(value) {
+        const offset = Array.isArray(value) ? (value as number[]) : [0, 0, 0, 0, 0, 0];
+        inputs.forEach((input, index) => {
+          const shown = String(displayNumber(Number(offset[index] ?? 0)));
+          if (document.activeElement !== input && input.value !== shown) input.value = shown;
+        });
+      },
+      setDisabled(value) {
+        for (const input of inputs) input.disabled = value;
+      },
+    };
+  }
 
+  // ------------------------------------------------------------------- plumbing
   private panel(children: HTMLElement[]): HTMLElement {
     const panel = document.createElement("div");
     panel.className = "gfx-tabpanel";

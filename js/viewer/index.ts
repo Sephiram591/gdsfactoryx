@@ -75,8 +75,8 @@ const RUN_ICON =
   '<path d="M7 4.5v15l13-7.5z"/></svg>';
 
 function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void {
-  const geometry = model.get("geometry") as GeometryPayload;
-  const meta = model.get("meta") as MetaPayload;
+  let geometry = model.get("geometry") as GeometryPayload;
+  let meta = model.get("meta") as MetaPayload;
 
   el.classList.add("gfx-shell");
   el.innerHTML = "";
@@ -331,7 +331,6 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   el.append(menubar, sectionControls, explorer.root, viewport, toast);
 
   const scene = new Scene3D(sceneRoot);
-  scene.setBounds(geometry.size, geometry.origin);
   controlSelect.value = scene.control; // the scene's default (spec R3)
   sensitivityInput.value = String(scene.sensitivity);
   sensitivityValue.textContent = `${scene.sensitivity.toFixed(1)}×`;
@@ -340,19 +339,42 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   }));
   viewport.appendChild(section.root);
 
-  const levels = new Map<string, LevelMeshes>();
-  for (const level of geometry.levels) {
-    const style = currentStyles(model)[level.name];
-    const meshes = new LevelMeshes(level, style?.color ?? "#cccccc", style?.opacity ?? 0.9);
-    levels.set(level.name, meshes);
-    scene.content.add(meshes.group);
-  }
-  const glyphs = new PortGlyphs(meta.ports);
-  scene.content.add(glyphs.group);
+  // -- 3D content (spec D5, R13) --------------------------------------------
+  // The levels, port glyphs and source/detector planes are built from the
+  // payload's meshes and metadata. A boundary-offset edit re-boxes the device
+  // and the kernel re-sends `geometry`/`meta`, so the whole content group is
+  // rebuilt in place; the scene and the 2D section are kept (the section just
+  // gets the new metadata).
+  const content = scene.content;
+  let levels = new Map<string, LevelMeshes>();
+  let glyphs = new PortGlyphs(meta.ports);
   // source/detector planes, drawn from their specs before anything is placed
   // (spec R12, D11); rebuilt on every setup edit
   const planes = new PlaneGlyphs();
-  scene.content.add(planes.group);
+
+  const disposeContent = (): void => {
+    for (const meshes of levels.values()) meshes.dispose();
+    glyphs.dispose();
+    content.remove(glyphs.group);
+  };
+
+  const rebuildContent = (): void => {
+    disposeContent();
+    levels = new Map<string, LevelMeshes>();
+    for (const level of geometry.levels) {
+      const style = currentStyles(model)[level.name];
+      const meshes = new LevelMeshes(level, style?.color ?? "#cccccc", style?.opacity ?? 0.9);
+      levels.set(level.name, meshes);
+      content.add(meshes.group);
+    }
+    glyphs = new PortGlyphs(meta.ports);
+    content.add(glyphs.group);
+    // re-append so the plane glyphs stay after the meshes (a rebuild adds the
+    // new meshes and glyphs to the end, which would otherwise cover them)
+    content.add(planes.group);
+    scene.setBounds(geometry.size, geometry.origin);
+  };
+  rebuildContent();
 
   // -- run (spec R14 mode 1, D15) -------------------------------------------
   run.addEventListener("click", () => {
@@ -537,6 +559,19 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
     if (payload && Object.keys(payload).length > 0) section.setPayload(payload);
   };
 
+  // a re-boxed device (spec R13): the kernel re-sends `geometry` and `meta`
+  // when a boundary-offset edit moves the box, so rebuild the 3D content, hand
+  // the section and explorer the new metadata, and re-apply the state
+  const applyGeometry = (): void => {
+    geometry = model.get("geometry") as GeometryPayload;
+    meta = model.get("meta") as MetaPayload;
+    rebuildContent();
+    section.setMeta(meta);
+    explorer.setMeta(meta);
+    applySection();
+    applyState();
+  };
+
   // the run's phase (spec D15): name it left of the bar, so placement and
   // compilation — which report no fraction — are not a bare pulsing bar
   const applyPhase = (): void => {
@@ -598,6 +633,8 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   model.on("change:progress", applyProgress);
   model.on("change:phase", applyPhase);
   model.on("change:section", applySection);
+  model.on("change:geometry", applyGeometry);
+  model.on("change:meta", applyGeometry);
   model.on("change:save_result", applySaveResult);
   model.on("change:save_dir", applySaveDir);
   applySection();
@@ -612,8 +649,7 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
     if (toastTimer !== 0) window.clearTimeout(toastTimer);
     section.dispose();
     scene.dispose();
-    for (const meshes of levels.values()) meshes.dispose();
-    glyphs.dispose();
+    disposeContent();
     planes.dispose();
   };
 }
@@ -679,125 +715,148 @@ function writeSaveTarget(target: SaveTarget): void {
   }
 }
 
+//: computed properties the inlined copy leaves out: `all` would reset the rest,
+//: `d` belongs to SVG paths, and `content` would revive pseudo-elements (the
+//: list html2canvas uses, so the capture matches what it produced)
+const UNCOPIED_PROPERTIES = new Set(["all", "d", "content"]);
+
 /**
- * The widget's own rules, as CSS text, read from wherever the host scoped them.
+ * Copies `node`'s subtree with each element's computed style written inline.
  *
- * A light-DOM clone is unstyled: in marimo the widget lives in a shadow root
- * and its rules are `adoptedStyleSheets`, which the clone does not inherit. So
- * the capture carries the rules along and keeps only the ones that mention a
- * `gfx-` class, leaving the host's global styles behind.
+ * An SVG `foreignObject` image renders in a document of its own, where neither
+ * the widget's shadow-scoped rules nor anything inherited from the host page
+ * applies, so every element carries its full computed style. Reading it from
+ * the live shell needs no stylesheet copy and no second layout. Each `<canvas>`
+ * becomes an `<img>` of its current pixels: the three.js canvas keeps its
+ * drawing buffer (see `Scene3D`) and the section canvas is a 2D surface, so
+ * both `toDataURL` cleanly; a tainted one is left as an empty canvas. Form
+ * controls keep their live state (see `copyFormState`).
  */
-function shellStyleText(element: HTMLElement): string {
-  const root = element.getRootNode() as Document | ShadowRoot;
-  const parts: string[] = [];
-  const adopted = (root as ShadowRoot).adoptedStyleSheets;
-  if (adopted) {
-    for (const sheet of adopted) {
-      try {
-        parts.push(Array.from(sheet.cssRules).map((rule) => rule.cssText).join("\n"));
-      } catch {
-        // a cross-origin sheet has no readable rules; skip it
-      }
+function inlineStyledClone(node: Node): Node | null {
+  if (node.nodeType === Node.TEXT_NODE) return document.createTextNode((node as Text).data);
+  if (node.nodeType !== Node.ELEMENT_NODE) return node.cloneNode(false);
+  const element = node as Element;
+  if (element instanceof HTMLScriptElement || element instanceof HTMLStyleElement) return null;
+  if (!(element instanceof HTMLElement || element instanceof SVGElement)) {
+    return element.cloneNode(false);
+  }
+
+  let clone: Element = element.cloneNode(false) as Element;
+  if (element instanceof HTMLCanvasElement) {
+    try {
+      const image = document.createElement("img");
+      image.src = element.toDataURL("image/png");
+      clone = image;
+    } catch {
+      // tainted canvas: keep the empty clone rather than abort the capture
     }
   }
-  for (const node of root.querySelectorAll?.("style") ?? []) {
-    parts.push(node.textContent ?? "");
+  const textValue = copyFormState(element, clone);
+
+  const style = getComputedStyle(element);
+  const declarations: string[] = [];
+  for (let i = style.length - 1; i >= 0; i--) {
+    const property = style.item(i);
+    // custom properties (marimo's design tokens alone are hundreds per
+    // element) only feed `var()`, which the computed values already resolve
+    if (property.startsWith("--") || UNCOPIED_PROPERTIES.has(property)) continue;
+    declarations.push(`${property}:${style.getPropertyValue(property)}`);
   }
-  return parts.filter((text) => text.includes("gfx-")).join("\n");
+  clone.setAttribute("style", declarations.join(";"));
+
+  if (textValue !== null) {
+    clone.textContent = textValue;
+    return clone;
+  }
+  for (let child = element.firstChild; child; child = child.nextSibling) {
+    const copy = inlineStyledClone(child);
+    if (copy) clone.appendChild(copy);
+  }
+  return clone;
+}
+
+/**
+ * Writes a form control's live state into `clone`'s attributes.
+ *
+ * The image is drawn from serialized markup, which carries attributes only. A
+ * control's current state is a property (`value`, `checked`, `selected`) that
+ * the attribute merely seeds, so without this a checked box would draw
+ * unchecked and a slider or swatch at its default. Returns a `<textarea>`'s
+ * value, which is its text content rather than an attribute, else null.
+ */
+function copyFormState(element: Element, clone: Element): string | null {
+  if (element instanceof HTMLInputElement) {
+    if (element.type === "checkbox" || element.type === "radio") {
+      clone.toggleAttribute("checked", element.checked);
+    } else if (element.type !== "file") {
+      clone.setAttribute("value", element.value);
+    }
+  } else if (element instanceof HTMLOptionElement) {
+    clone.toggleAttribute("selected", element.selected);
+  } else if (element instanceof HTMLTextAreaElement) {
+    return element.value;
+  }
+  return null;
+}
+
+/** Loads a serialized SVG as an image, ready to draw. */
+function loadSvg(svg: SVGSVGElement): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = reject;
+    image.src =
+      "data:image/svg+xml;charset=utf-8," +
+      encodeURIComponent(new XMLSerializer().serializeToString(svg));
+  });
 }
 
 /**
  * Rasterizes the whole widget shell into one PNG data URL (spec D14).
  *
- * html2canvas can neither clone a shadow root nor read a `<canvas>` through a
- * clone, so the shell is first copied into the light DOM with three fixes:
+ * The shell is copied with its computed styles inline (`inlineStyledClone`),
+ * wrapped in an SVG `foreignObject` and drawn into a canvas, so the browser's
+ * own renderer paints it, colors and all. This is the pipeline html2canvas
+ * runs with `foreignObjectRendering`, and the geometry below (canvas size, the
+ * `foreignObject` offset, the scale) is its, so the output is unchanged. Doing
+ * it here keeps the walk to the shell: html2canvas clones and style-copies the
+ * whole host document into an iframe first, which in marimo is seconds of work
+ * for a shell that takes milliseconds.
  *
- * - the widget's `gfx-` rules are re-inserted inside the clone (see
- *   `shellStyleText`), since the clone is otherwise unstyled;
- * - each `<canvas>` is replaced by an `<img>` of its current pixels — the
- *   three.js canvas keeps its drawing buffer (see `Scene3D`) and the section
- *   canvas is a 2D surface, so both `toDataURL` cleanly;
- * - the clone is laid out on screen at the origin behind the page
- *   (`z-index: -1`): `foreignObjectRendering` hands rasterization to the
- *   browser, which only paints elements it actually lays out, so an off-screen
- *   holder captures empty.
- *
- * The host's stylesheets share the document, and html2canvas 1.4.1's color
- * parser throws on the modern color functions they use (`color()`, `oklch()`,
- * `color-mix()`, `light-dark()`). `parseBackgroundColor` parses the document's
- * `html`/`body` backgrounds before the render branch, so `onclone` clears them;
- * every other color is parsed by the canvas renderer, which
- * `foreignObjectRendering` replaces with the browser's own rasterizer.
- *
- * If html2canvas is unavailable or still throws, the viewport image is
- * returned instead, so the button always produces something.
+ * If the render fails, the viewport image is returned instead, so the button
+ * always produces something.
  */
 async function captureShell(shell: HTMLElement, fallbackPng: string): Promise<string> {
-  let holder: HTMLDivElement | null = null;
   try {
-    const { default: html2canvas } = await import("html2canvas");
     const rect = shell.getBoundingClientRect();
+    const width = Math.ceil(rect.width);
+    const height = Math.ceil(rect.height);
+    const scale = window.devicePixelRatio || 1;
 
-    const clone = shell.cloneNode(true) as HTMLElement;
-    const style = document.createElement("style");
-    style.textContent = shellStyleText(shell);
-    clone.insertBefore(style, clone.firstChild);
+    const xmlns = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(xmlns, "svg");
+    svg.setAttribute("width", String(width * scale));
+    svg.setAttribute("height", String(height * scale));
+    const foreignObject = document.createElementNS(xmlns, "foreignObject");
+    foreignObject.setAttribute("width", "100%");
+    foreignObject.setAttribute("height", "100%");
+    foreignObject.setAttribute("x", String(scale));
+    foreignObject.setAttribute("y", String(scale));
+    foreignObject.setAttribute("externalResourcesRequired", "true");
+    foreignObject.appendChild(inlineStyledClone(shell)!);
+    svg.appendChild(foreignObject);
+    const image = await loadSvg(svg);
 
-    const sources = Array.from(shell.querySelectorAll("canvas"));
-    const targets = Array.from(clone.querySelectorAll("canvas"));
-    for (let i = 0; i < sources.length; i++) {
-      const image = document.createElement("img");
-      try {
-        image.src = sources[i].toDataURL("image/png");
-      } catch {
-        continue; // tainted canvas: leave it to render blank rather than abort
-      }
-      const bounds = sources[i].getBoundingClientRect();
-      image.style.width = `${Math.round(bounds.width)}px`;
-      image.style.height = `${Math.round(bounds.height)}px`;
-      targets[i].replaceWith(image);
-    }
-
-    holder = document.createElement("div");
-    holder.style.cssText =
-      `position:fixed;left:0;top:0;width:${Math.round(rect.width)}px;z-index:-1;pointer-events:none;`;
-    holder.appendChild(clone);
-    document.body.appendChild(holder);
-
-    // let layout settle and the frozen images decode before rasterizing
-    await new Promise((resolve) =>
-      requestAnimationFrame(() => requestAnimationFrame(resolve)),
-    );
-    await Promise.all(
-      Array.from(clone.querySelectorAll("img")).map((image) =>
-        image.complete
-          ? Promise.resolve()
-          : new Promise((resolve) => {
-              image.addEventListener("load", resolve, { once: true });
-              image.addEventListener("error", resolve, { once: true });
-            }),
-      ),
-    );
-
-    const canvas = await html2canvas(clone, {
-      backgroundColor: null,
-      // the shell is dark; keep its own colors rather than html2canvas's white
-      useCORS: true,
-      foreignObjectRendering: true,
-      // the document backgrounds are not part of the shell being captured, so
-      // clearing them on the clone loses nothing and keeps the parse above from
-      // reading the host's modern-syntax background (see the note above)
-      onclone: (doc: Document) => {
-        doc.documentElement.style.backgroundColor = "transparent";
-        if (doc.body) doc.body.style.backgroundColor = "transparent";
-      },
-    });
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.floor(width * scale);
+    canvas.height = Math.floor(height * scale);
+    const context = canvas.getContext("2d")!;
+    context.scale(scale, scale);
+    context.drawImage(image, 0, 0);
     return canvas.toDataURL("image/png");
   } catch (error) {
     console.warn("whole-widget capture failed; saving the viewport instead", error);
     return fallbackPng;
-  } finally {
-    holder?.remove();
   }
 }
 

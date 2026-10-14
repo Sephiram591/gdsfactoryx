@@ -280,6 +280,12 @@ editable fields:
   sources/detectors (R12, Q18).
 - **PML / boundary** — the boundary thickness (e.g. the `BoundaryConfig` the
   run would use; `fdtdx.BoundaryConfig.from_uniform_bound(thickness=...)`).
+- **`boundary_offset`** — the box's six face offsets, `(x+, x-, y+, y-, z+, z-)`
+  in µm, as three signed pairs (x, y, z). Each value moves its face of the
+  `StackDevice` box along the axis, positive towards +x, +y or +z, so
+  `(1, -1, …)` grows the box by 1 µm on each x side. The geometry does not
+  change; the viewports re-box live (see the AC below). A box that would
+  collapse (a face past its opposite) is refused.
 - **Simulation config** — the fields that affect the grid, notably resolution
   and time (`fdtdx.SimulationConfig`). These also feed Q8's slider step and
   Q18's derived defaults. A numeric field shows its value in display units and
@@ -294,6 +300,10 @@ AC:
   `wave_characters` of a subsequently added detector.
 - The PML thickness field, when set, is included in the prepared constraints on
   retrieval (D11).
+- Editing `boundary_offset` re-boxes the device in the kernel and re-sends the
+  `geometry`/`meta` payloads, so both viewports (3D meshes and the 2D
+  cross-section) update live, without a run; the section slider range follows
+  the new box and a slider parked outside it is clamped back in.
 
 ### R14. Run the simulation, three ways: *Must*
 
@@ -1019,3 +1029,19 @@ from that, both settled here.
   - Added a **save folder** field for server-side saves: the kernel resolves and
     creates the path, and syncs it back through the now-synced `save_dir` trait.
     Updated D14.
+- 2026-10-14: `boundary_offset` as a live Simulation setting (R13).
+  - The Simulation tab gains a **box offset** row: three signed pairs (x, y, z),
+    each a `+`/`−` number, editing `boundary_offset` `(x+, x-, y+, y-, z+, z-)`.
+    A value moves its face of the `StackDevice` box along the axis, positive
+    towards +x/+y/+z, without changing the geometry.
+  - Editing it re-boxes the device in the kernel: the `StackDevice` is
+    reconstructed with the moved faces (`partial_real_shape`/`center`/
+    `z_center`), and the solids, levels, ports and plane ports are rebuilt from
+    it. The widget then re-sends the `geometry` and `meta` traits (D5), which
+    the browser watches (`change:geometry`/`change:meta`) to rebuild the 3D
+    meshes, the port glyphs, the scene bounds and the 2D section live. This is
+    the first setting that re-sends the mesh payloads rather than only the small
+    state (D10).
+  - The section slider range follows the new box; a slider parked outside a
+    shrunk box is clamped back in. A box that would collapse is refused.
+  - Updated R13 (the field and its AC).

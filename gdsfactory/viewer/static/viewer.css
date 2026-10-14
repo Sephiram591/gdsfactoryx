@@ -311,6 +311,26 @@
   flex: 1;
   min-width: 0;
 }
+.gfx-triple {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+.gfx-triple-axis {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.gfx-triple-name {
+  flex: 0 0 10px;
+  opacity: 0.7;
+}
+.gfx-triple .gfx-numeric {
+  flex: 1;
+  min-width: 0;
+}
 .gfx-run-phase {
   opacity: 0.8;
   font-style: italic;

@@ -64,7 +64,7 @@ export class Section2D {
   private readonly resizeObserver: ResizeObserver;
 
   constructor(
-    private readonly meta: MetaPayload,
+    private meta: MetaPayload,
     private readonly onPortSelect: (name: string | null) => void,
   ) {
     this.root = document.createElement("div");
@@ -108,6 +108,17 @@ export class Section2D {
   setState(state: StatePayload): void {
     this.state = state;
     this.draw();
+  }
+
+  /**
+   * Swaps the level/port metadata (spec R13).
+   *
+   * A boundary-offset edit re-boxes the device, which changes each level's
+   * clipped extent and can move a port glyph, so the section must draw from the
+   * new metadata. The payload that follows re-fits the view.
+   */
+  setMeta(meta: MetaPayload): void {
+    this.meta = meta;
   }
 
   setExaggeration(factor: number): void {

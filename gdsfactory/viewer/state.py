@@ -108,6 +108,19 @@ class ViewerState:
             stack: a :class:`~gdsfactory.fdtdx_stack.StackDevice`.
         """
         self.stack = stack
+        #: the device as built and its box, kept so a ``boundary_offset`` edit
+        #: can re-box the device without rebuilding the geometry from scratch
+        #: (spec R13): the offset moves the faces off this box
+        self._base_stack = stack
+        self._base_box = (
+            tuple(float(v) for v in stack.partial_real_shape),
+            (float(stack.center[0]), float(stack.center[1])),
+            float(stack.z_center),
+        )
+        #: set when a patch re-boxed the device, so the widget re-sends the
+        #: ``geometry``/``meta`` traits and the browser rebuilds its meshes
+        #: (spec D5, R13); the widget clears it after re-sending
+        self.geometry_changed: bool = False
         solids = analytic_solids(stack)
         #: the manifolds behind the meshes; the 2D section slices these, so the
         #: geometry is built once and shared (spec D3 risk, R4)
@@ -160,6 +173,66 @@ class ViewerState:
         self.port_fade_um: float = PORT_FADE_UM
 
     # ------------------------------------------------------------------ section
+
+    def rebox(self, boundary_offset: Any) -> None:
+        """Re-boxes the device from a ``boundary_offset`` (spec R13).
+
+        ``boundary_offset`` is ``(x+, x-, y+, y-, z+, z-)`` in µm, an offset
+        from the box the device was **built** with. Each value moves its face
+        along the axis, positive towards +x, +y or +z — the same convention
+        :meth:`~gdsfactory.fdtdx_stack.StackDevice.from_layer_stack` uses, so
+        ``(1, -1, 0, 0, 0, 0)`` grows the box by 1 µm on each x side. The
+        geometry is not rebuilt — the same :class:`StackDevice` is
+        reconstructed with the moved faces (the fields it bakes the box into
+        are ``partial_real_shape``, ``center`` and ``z_center``), and the
+        solids, levels, ports and plane ports are rebuilt from it, since
+        growing the box shows more of the stack.
+
+        The slider positions are clamped to the new bounds; a plane that now
+        falls outside the box is pulled back in.
+
+        Raises:
+            ValueError: if the offset is not 6 finite numbers, or moves a face
+                past its opposite (an empty box).
+        """
+        offset = tuple(float(v) for v in boundary_offset)
+        if len(offset) != 6 or not all(math.isfinite(v) for v in offset):
+            raise ValueError(f"boundary_offset must be 6 finite numbers, got {boundary_offset!r}")
+        base_shape, base_center, base_z = self._base_box
+        # each axis' +face takes the even offset and its -face the odd one, so
+        # the box grows by ``offset[even] - offset[odd]`` and shifts by their
+        # mean (the same faces ``from_layer_stack`` builds the box from). The
+        # offset is in µm; ``partial_real_shape`` is in metres, the centers µm.
+        shape = (
+            base_shape[0] + (offset[0] - offset[1]) * 1e-6,
+            base_shape[1] + (offset[2] - offset[3]) * 1e-6,
+            base_shape[2] + (offset[4] - offset[5]) * 1e-6,
+        )
+        if min(shape) <= 0:
+            raise ValueError(f"boundary_offset collapses the box to {shape} m")
+        center = (
+            base_center[0] + 0.5 * (offset[0] + offset[1]),
+            base_center[1] + 0.5 * (offset[2] + offset[3]),
+        )
+        z_center = base_z + 0.5 * (offset[4] + offset[5])
+        stack = _rebox_stack(self._base_stack, shape, center, z_center)
+        solids = analytic_solids(stack)
+        self.stack = stack
+        self.solids = solids
+        self.origin = solids.origin
+        self.size = solids.size
+        self.levels = level_solids(stack, solids)
+        self.background = background_mesh(solids)
+        self.ports = solids.ports
+        self.plane_ports = plane_ports(stack, solids.origin)
+        # a re-boxed device may drop or add a port (a level no longer reaches
+        # the box), so keep the visibility map in step with the glyphs
+        names = {port.name for port in (*self.ports, *self.plane_ports)}
+        self.port_visible = {name: self.port_visible.get(name, True) for name in names}
+        for plane in PLANES:
+            lo, hi = self.plane_bounds(plane)
+            self.plane_positions[plane] = min(hi, max(lo, self.plane_positions[plane]))
+        self.geometry_changed = True
 
     def plane_bounds(self, plane: str | None = None) -> tuple[float, float]:
         """The section slider's ``(min, max)`` along ``plane``'s normal (spec R4).
@@ -337,7 +410,13 @@ class ViewerState:
         if "detectors" in patch:
             _apply_spec_patch(self, "detector", patch["detectors"])
         if "simulation" in patch:
-            self.settings = SimSettings.from_wire({**self.settings.to_wire(), **patch["simulation"]})
+            previous = self.settings.boundary_offset
+            settings = SimSettings.from_wire({**self.settings.to_wire(), **patch["simulation"]})
+            # re-box before committing the settings: a rejected offset (an empty
+            # box) must leave both the settings and the geometry untouched
+            if settings.boundary_offset != previous:
+                self.rebox(settings.boundary_offset)
+            self.settings = settings
         if {"sources", "detectors", "simulation"} & set(patch):
             self.revision += 1
 
@@ -364,6 +443,26 @@ class ViewerState:
             "simulation": self.settings.to_wire(),
             "running": self.running,
         }
+
+
+def _rebox_stack(device: Any, shape: tuple[float, float, float], center: tuple[float, float], z_center: float) -> Any:
+    """A copy of ``device`` with its box fields replaced (spec R13).
+
+    :class:`~gdsfactory.fdtdx_stack.StackDevice` is an immutable pytreeclass
+    tree, so the box fields cannot be set in place. Its generated ``__init__``
+    takes every field as a keyword, though, so the device is reconstructed with
+    each field read back from the original and the three box fields overridden.
+    The polygons, levels and materials are shared, not rebuilt — only the box
+    the viewer draws and clips to changes.
+    """
+    import inspect
+
+    names = [p for p in inspect.signature(type(device).__init__).parameters if p != "self"]
+    kwargs = {name: getattr(device, name) for name in names}
+    kwargs["partial_real_shape"] = tuple(shape)
+    kwargs["center"] = tuple(center)
+    kwargs["z_center"] = float(z_center)
+    return type(device)(**kwargs)
 
 
 def _opacity(value: Any) -> float:

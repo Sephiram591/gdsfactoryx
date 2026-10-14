@@ -218,6 +218,90 @@ def test_state_edit_carries_no_geometry() -> None:
     }
 
 
+# ------------------------------------------------- R13: boundary offset re-box
+
+
+def test_boundary_offset_defaults_to_zero() -> None:
+    """R13: the box starts at the geometry's own bounding box (no offset)."""
+    viewer_state = state.ViewerState(f1_stack())
+    assert viewer_state.settings.boundary_offset == (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    assert viewer_state.to_state()["simulation"]["boundary_offset"] == [0.0] * 6
+
+
+def test_boundary_offset_grows_the_box() -> None:
+    """R13: a symmetric offset grows the box and keeps its center (spec R13)."""
+    viewer_state = state.ViewerState(f1_stack())
+    before = viewer_state.size
+    viewer_state.apply_patch({"simulation": {"boundary_offset": [1, -1, 1, -1, 1, -1]}})
+    assert viewer_state.size == (before[0] + 2, before[1] + 2, before[2] + 2)
+    # symmetric offsets leave the center where it was
+    assert viewer_state.origin == state.ViewerState(f1_stack()).origin
+    assert viewer_state.geometry_changed is True
+    assert viewer_state.revision == 1
+
+
+def test_boundary_offset_moves_one_face() -> None:
+    """R13: an asymmetric offset moves the box's center by half the offset."""
+    viewer_state = state.ViewerState(f1_stack())
+    base = state.ViewerState(f1_stack())
+    viewer_state.apply_patch({"simulation": {"boundary_offset": [2, 0, 0, 0, 0, 0]}})
+    assert viewer_state.size[0] == base.size[0] + 2
+    assert viewer_state.origin[0] == base.origin[0] + 1
+    assert viewer_state.size[1:] == base.size[1:]
+
+
+def test_boundary_offset_clamps_the_plane_positions() -> None:
+    """R13: a smaller box pulls the section sliders back inside it."""
+    viewer_state = state.ViewerState(f1_stack())
+    # the yz plane's normal is x, so an x-face offset moves its slider range
+    lo, hi = viewer_state.plane_bounds("yz")
+    viewer_state.apply_patch({"plane": "yz"})
+    viewer_state.apply_patch({"plane_position": hi})
+    assert viewer_state.plane_positions["yz"] == hi
+    # moving the x+ face inward (a negative x+ offset) pulls the yz plane's
+    # upper bound in, so the slider parked at the old max must be clamped
+    viewer_state.apply_patch({"simulation": {"boundary_offset": [-3, 0, 0, 0, 0, 0]}})
+    new_lo, new_hi = viewer_state.plane_bounds("yz")
+    assert new_hi < hi
+    assert viewer_state.plane_positions["yz"] <= new_hi
+
+
+def test_boundary_offset_is_validated() -> None:
+    """R13: a malformed or box-collapsing offset is refused, leaving the state."""
+    viewer_state = state.ViewerState(f1_stack())
+    before = viewer_state.size
+    for bad in ([1, 2, 3], [0, 0, 0, 0, 0], ["x", 0, 0, 0, 0, 0], [-100, 100, 0, 0, 0, 0]):
+        with pytest.raises(ValueError):
+            viewer_state.apply_patch({"simulation": {"boundary_offset": bad}})
+    assert viewer_state.size == before
+    assert viewer_state.settings.boundary_offset == (0.0,) * 6
+
+
+def test_boundary_offset_round_trips_through_the_wire() -> None:
+    """R13: the offset survives to_wire/from_wire."""
+    settings = state.SimSettings.from_wire({"boundary_offset": [1, -2, 3, -4, 5, -6]})
+    assert settings.boundary_offset == (1.0, -2.0, 3.0, -4.0, 5.0, -6.0)
+    assert settings.to_wire()["boundary_offset"] == [1.0, -2.0, 3.0, -4.0, 5.0, -6.0]
+
+
+def test_widget_resends_geometry_on_a_boundary_offset_edit() -> None:
+    """R13: a boundary edit re-sends the meshes so the browser rebuilds (D5)."""
+    viewer = widget.view(f1_stack())
+    before = viewer.geometry["size"]
+    viewer._on_msg(None, {"event": "set_settings", "settings": {"boundary_offset": [1, -1, 0, 0, 0, 0]}}, [])
+    assert viewer.geometry["size"][0] == before[0] + 2
+    assert viewer.state["simulation"]["boundary_offset"] == [1.0, -1.0, 0.0, 0.0, 0.0, 0.0]
+
+
+def test_widget_does_not_resend_geometry_for_a_plain_setting() -> None:
+    """D5: a non-box setting edit leaves the meshes alone (only state re-sends)."""
+    viewer = widget.view(f1_stack())
+    before = viewer.geometry
+    viewer._on_msg(None, {"event": "set_settings", "settings": {"resolution_um": 0.05}}, [])
+    assert viewer.geometry is before
+    assert viewer.state["simulation"]["resolution_um"] == 0.05
+
+
 # ------------------------------------------------------------------ the widget
 
 
