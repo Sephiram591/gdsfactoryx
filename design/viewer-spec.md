@@ -1,6 +1,6 @@
 # gdsfactoryx viewer: spec
 
-**Status:** drafting · **Owner:** floresh2 · **Last updated:** 2026-10-12
+**Status:** drafting · **Owner:** floresh2 · **Last updated:** 2026-10-14
 
 How to use this file: we workshop it, then distill only the **Accepted** items
 into an implementation brief for an agent. IDs (G#, C#, R#, D#, Q#, F#, M#) are
@@ -344,6 +344,87 @@ AC:
   `progress` trait, along with the run's phase into the `phase` trait (both
   checked in a test).
 
+### R15. Detector field overlays: *Must* (promoted from R8, 2026-10-14)
+
+A detector that recorded a field can shade its plane in both viewports from the
+last result. The overlay is drawn **on the detector's own plane**, in the plane's
+(u, v) frame, so it lines up with the glyph the pre-placement view already draws
+(R12). A detector with no result yet, or whose result has no field, keeps its
+plain translucent glyph.
+
+- **Where the field comes from.** The last run's
+  `result.arrays.detector_states[name]` (R14 mode 1), or a result the user
+  supplies (see *Supplying a result* below). Each detector's own array is shaded
+  on its own plane — no cross-detector interpolation.
+- **Per-detector display settings, editable in the explorer.** Each detector row
+  on the **Detectors** tab gains a **display** group, one value each:
+  - **`field_component`** — which component of the recorded field to plot, from
+    the detector's own `components` (a `PhasorDetector` records the subset the
+    user asked for; a `ModeOverlapDetector` always records all six `Ex, Ey, Ez,
+    Hx, Hy, Hz`). Default: the first component the detector recorded.
+  - **`field_transform`** — one of **`real`, `imag`, `abs`, `phase`, `logabs`**.
+    Default `abs`. `logabs` is `log10(abs(...))` (see *Log and the value floor*).
+  - **`field_colormap`** — the colormap name. Default `viridis`.
+  - **`field_opacity`** — the overlay's opacity, 0–1. Default 1 (fully opaque
+    where the field is at its maximum; see *Transparency*).
+  - **`field_visible`** — whether the overlay is drawn at all, separate from the
+    detector glyph's own visibility (R12). Default on once a result exists.
+- **Display settings are per-detector, per-session.** They live in the detector
+  spec's params alongside `port_offset` and the rest, are carried on the wire
+  like the other params, and are **never** passed to `create_*_at` (they are
+  display-only, like `visible`, R12). They survive a re-run: they belong to the
+  detector, not to the result.
+- **Transparency encodes magnitude, when asked.** The overlay's alpha is a
+  function of the local |field| relative to the plane's maximum, so a low-amplitude
+  region fades toward the geometry behind it. See *Transparency* below for the
+  exact function and why it is what it is.
+- **Two viewports.**
+  - **3D:** the detector's plane rectangle (already built, `PlaneGlyphs`) carries
+    a texture of the transformed field, with a small colorbar beside the
+    viewport naming the transform and component.
+  - **2D:** when the section plane **matches** the detector's plane, the field is
+    drawn over the detector's (u, v) rectangle in the section canvas, under the
+    region outline and ticks. A detector whose plane does not match the current
+    section is not shaded in 2D (its field is a plane, and there is nothing to
+    show off that plane); the 3D viewport still shows it.
+- **Scale is per-plane.** `max` (the normalizer) is the maximum of the
+  transformed value over that detector's plane, so two detectors with very
+  different amplitudes are each readable. The colorbar shows the plane's own
+  range. A **shared** scale across detectors is Q21.
+
+**Supplying a result.** The widget exposes a setter — `viewer.show_result(result)`
+— that takes a result the user produced themselves (a `RunResult`, R14, or any
+object with the same shape: `.arrays.detector_states`, `.objects`, `.config`) and
+makes it the widget's current result, exactly as a mode-1 run would (R14). After
+it returns, every detector's overlay redraws from it, with no re-run and no
+re-send of the geometry.
+
+- **What it accepts.** The last result of a run the user launched outside the
+  widget (R14 mode 3, or their own script): the common case is a user who ran
+  under `srun` and wants to look at the fields in the widget.
+- **What it validates.** The result's detectors must correspond to the widget's
+  current setup, by name and shape, or the setter raises (see the AC below). It
+  does **not** re-place or re-run anything; it only adopts the arrays.
+- **What it does not do.** It does not adopt the result's geometry or its
+  `objects` as the widget's setup — the widget's own stack and specs stay
+  authoritative. A result recorded on a different device is refused rather than
+  silently mis-shaded.
+
+AC:
+- With a result present (from a mode-1 run or `show_result`), a detector's plane
+  is shaded in 3D from `result.arrays.detector_states[name]`, and the colorbar
+  names the component and transform.
+- Changing a detector's `field_component` / `field_transform` / `field_colormap`
+  / `field_opacity` re-shades its plane live, with no re-run and no kernel
+  round-trip beyond the state patch (D10).
+- Switching the 2D section to a detector's plane shades the field there; a
+  section on any other plane does not.
+- `show_result` with a result whose detector names/shapes match the setup makes
+  it the current result and redraws the overlays; a mismatched result raises and
+  leaves the previous result and the overlays unchanged (checked in a test).
+- A detector with no result, and a result with no field for a detector, both
+  leave that detector's plain glyph (no blank texture, no error).
+
 ### Later candidates (not v1 unless promoted; see Q9)
 
 - **R5.** Parameter explorer: sliders generated from a cell's signature, with a
@@ -352,8 +433,9 @@ AC:
   and `dJ/dp` bars per parameter.
 - **R7.** Solver view: voxelized permittivity / material weights from the placed
   fdtdx grid, as an alternative 2D mode (D4b).
-- **R8.** Field overlays from fdtdx detectors (F1's `field` detector records the
-  xz plane through the taper axis).
+- **R8.** Field overlays from fdtdx detectors. *Promoted 2026-10-14:* built as
+  **R15**, in M4. (F1's `field` detector records the xz plane through the taper
+  axis; R15 shades any detector's plane from the field it recorded.)
 - **R9.** Optimization history playback (scrub logged parameters per iteration).
 - **R10.** Full-chip 2D via `kweb` (already the `cad` extra).
 - **R11.** Simulation volume display (PML thickness is set on the Simulation
@@ -772,6 +854,63 @@ from that, both settled here.
 
 ---
 
+### D16. The field overlay's transparency is normalized linear magnitude: *Accepted* (2026-10-14)
+
+R15 draws a detector's field on its plane. The color already encodes the value;
+**alpha** is the second channel, and the question is what it should encode.
+
+- **Decision.** Alpha is the **local |field| divided by the plane's maximum**,
+  scaled by the detector's `field_opacity`:
+
+  ```
+  alpha(u, v) = field_opacity * |local(u, v)| / max|field|
+  ```
+
+  `local` is the **raw recorded component** — the same complex value the
+  transform is applied to for the color — so alpha is always the *magnitude*
+  regardless of the selected transform. It does **not** depend on the transform,
+  the colormap, or the log setting.
+- **Why magnitude, not the transformed value.** The transform (`real`, `imag`,
+  `abs`, `phase`, `logabs`) is a *display* choice for the color channel; the
+  underlying physical quantity is complex. Alpha should say "how much field is
+  here", which is `|field|` for every transform. Deriving alpha from the
+  transformed value instead makes it jump when the user switches `real` → `imag`
+  (a component can be near zero on one and large on the other), which reads as a
+  rendering bug rather than a display choice. One rule, stable under every
+  transform.
+- **Why `|local| / max|field|` and not the log form.** The alternative you
+  floated — `10^(log10|local| − log10 max)`, i.e. alpha in dB relative to the
+  maximum — is mathematically the *same* ratio (`10^(log a − log b) = a/b`), so
+  it is not a different function, only a different route to the same number. The
+  ratio is the simpler statement of it, so that is what the spec says. Alpha
+  therefore stays in [0, 1] and needs no clamping beyond the natural one at the
+  maximum.
+- **`logabs` is a transform, not an alpha mode.** Since alpha is transform-
+  independent, "plot the log of the value" is exactly the **`logabs` transform**
+  on the color channel: `log10(|field|)`, normalized over the plane's own
+  `log10(|field|)` range. Alpha is unchanged by it. This keeps one transparency
+  rule and one log switch, and they do not interact.
+- **The zero of the log.** `log10(0)` is `−∞`, and a real field can be exactly
+  zero on a plane. `logabs` floors at a **dynamic range** below the plane's
+  maximum — `log10(|field|)` is clamped at `log10(max|field|) − range`, with
+  `range = 6` decades (a fixed v1 constant, Q22) — so a true zero maps to the
+  floor rather than to `−∞`. The same floor is what `alpha` approaches: a cell
+  whose `|field|` is below `max·10^−6` is effectively transparent.
+- **Per-plane normalization.** `max|field|` is over that detector's plane only
+  (R15), so alpha is a statement about *this* plane. A plane whose field is
+  everywhere tiny is still fully drawn where it is brightest; comparing
+  amplitudes *between* detectors is the colorbar's job, not alpha's, and a shared
+  scale is Q21.
+- **What alpha does not do.** It is not depth cueing, not a selection highlight,
+  and not the detector glyph's own opacity (R12) — those are separate. The
+  overlay's `field_opacity` multiplies alpha so the user can fade the whole
+  overlay without touching the per-cell ratio.
+
+**Implemented in M4** (`js/viewer/section.ts`, `glyphs.ts`, `index.ts`;
+`gdsfactory/viewer/payload.py`). **Relates to R15, R12, Q21, Q22.**
+
+---
+
 ## 8. Open questions
 
 - **Q1.** *Resolved 2026-10-12:* an `anywidget` is the v1 host (D2). The
@@ -835,6 +974,23 @@ from that, both settled here.
   whether it writes results to a file (and in what format). *Resolved
   2026-10-12:* the widget emits only the script's tail and assumes `stack` is in
   scope; no device rebuild or serialization.
+- **Q20.** *Resolved 2026-10-14:* the widget's result surface (R14, R15). A
+  run's outcome is the `RunResult` on `viewer.last_result` (the fdtdx
+  `objects`/`arrays`/`config`), and `viewer.last_error` holds its exception;
+  detector fields are read from `arrays.detector_states[name]`. R15 adds
+  `viewer.show_result(result)`, which adopts a result the user produced
+  elsewhere under the same surface. The `run_result`/`progress`/`phase` traits
+  are the browser's summary of a mode-1 run, not the data.
+- **Q21.** Field overlay scale: per-plane (R15's default) or one shared scale
+  across every detector's plane? Per-plane is more readable per detector but
+  makes two planes hard to compare; a shared scale needs a rule for which planes
+  it covers and what happens when one is added or removed.
+- **Q22.** `logabs`'s dynamic range (D16): the fixed 6 decades is a v1 constant.
+  Open: make it a per-detector field, a global setting, or leave it fixed?
+- **Q23.** `show_result` validation (R15): how strict is "correspond to the
+  current setup"? Name and per-component grid shape is the proposed minimum;
+  open: also check the grid *spacing* and the plane's position, which would
+  catch a result recorded on a re-boxed device (R13)?
 
 ---
 
@@ -851,8 +1007,9 @@ from that, both settled here.
 - **M2. Explorer and 3D viewport.** R1, R2, R3. Exit: their AC.
 - **M3. Cross-section.** R4 (D4), plus D14's region ticks, settings screen,
   per-plane section state and save-image button. Exit: R4's AC.
-- **M4. Sources and detectors and running.** R12, R13, D11; R14 modes 1 and 2.
-  Exit: R12 and R13 AC, and R14's mode-2 AC.
+- **M4. Sources and detectors, running, and field overlays.** R12, R13, D11;
+  R14 modes 1 and 2; R15 (promoted from R8, D16).
+  Exit: R12 and R13 AC, R14's mode-2 AC, and R15's AC.
 - **M5. Launch code and polish.** R14 mode 3 (the tail emitter), then *Should*
   items from R1–R4 and R12.
 
@@ -1049,3 +1206,22 @@ from that, both settled here.
 - 2026-10-14: F1's fixture overlap raised from 1 µm to 5 µm (§10). The shorter
   overlap shortens the box (x 22 µm → 18 µm), so the spec's F1 box note and the
   yz slider-range test now derive from the stack rather than a fixed value.
+- 2026-10-14: field overlays promoted into M4 (R8 → R15, D16).
+  - **R15** shades a detector's plane from the field it recorded, in both
+    viewports. Per-detector display settings on the Detectors tab: the field
+    component (from the detector's own `components`), the transform (`real`,
+    `imag`, `abs`, `phase`, `logabs`), the colormap, the overlay opacity and a
+    visibility toggle. Display settings are display-only spec params (D11), so
+    they never reach `create_*_at` and survive a re-run.
+  - **`viewer.show_result(result)`** adopts a result the user produced
+    elsewhere (their own `srun` run) as the widget's current result, redrawing
+    the overlays with no re-run. It validates the result's detectors against the
+    setup and raises on a mismatch (Q23).
+  - **D16** fixes the transparency rule: `alpha = field_opacity · |field| /
+    max|field|`, magnitude only, independent of the transform. The log option is
+    the `logabs` transform on the color channel, not an alpha mode; the two do
+    not interact. `logabs` floors at 6 decades below the plane's maximum (Q22).
+  - **Q20** (referenced since D15 but never written) now defines the widget's
+    result surface: `last_result`, `last_error`, and `show_result`.
+  - M4's exit criterion gains R15's AC. R8 is superseded; Q9's promotion of R8
+    is answered.
