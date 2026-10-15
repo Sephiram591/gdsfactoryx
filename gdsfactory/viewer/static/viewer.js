@@ -29935,6 +29935,7 @@ var Explorer = class {
       collapsed,
       name,
       visible,
+      remove,
       fields: controls,
       display,
       displayGroup,
@@ -30101,8 +30102,7 @@ var Explorer = class {
       for (const control of row2.fields.values()) control.setDisabled(locked);
       for (const control of row2.display.values()) control.setDisabled(locked);
       row2.visible.disabled = locked;
-      const remove = row2.root.querySelector("button");
-      if (remove) remove.disabled = locked;
+      row2.remove.disabled = locked;
     }
     if (!locked) {
       for (const [id, row2] of this.detectorRows) {

@@ -80,6 +80,8 @@ interface SpecRow {
   collapsed: boolean;
   name: HTMLElement;
   visible: HTMLInputElement;
+  /** the remove button, disabled while a run is in flight (spec D15) */
+  remove: HTMLButtonElement;
   fields: Map<string, Control>;
   /** the field-display controls (spec R15); empty for a source */
   display: Map<string, Control>;
@@ -523,7 +525,7 @@ export class Explorer {
     }
 
     const row: SpecRow = {
-      root, type: spec.type, twisty, collapsed, name, visible, fields: controls,
+      root, type: spec.type, twisty, collapsed, name, visible, remove, fields: controls,
       display, displayGroup, componentSelect, transformSelect,
     };
     // collapsing is view-only, so it lives in the row, not the kernel state: a
@@ -688,8 +690,9 @@ export class Explorer {
       for (const control of row.fields.values()) control.setDisabled(locked);
       for (const control of row.display.values()) control.setDisabled(locked);
       row.visible.disabled = locked;
-      const remove = row.root.querySelector("button");
-      if (remove) (remove as HTMLButtonElement).disabled = locked;
+      // the remove button, not ``row.root.querySelector("button")`` — that
+      // would hit the twisty first and freeze collapse while a run is in flight
+      row.remove.disabled = locked;
     }
     // a locked detector's component select stays disabled even after unlock if
     // the last result recorded no components (spec R15); re-apply that rule

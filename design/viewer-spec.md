@@ -896,7 +896,9 @@ from that, both settled here.
   works. The setup is **locked** for the duration — `state['running']` is true
   and the kernel rejects setup edits (`sources`, `detectors`, `simulation`),
   since the run has already captured its `objects`/`config`/`constraints`. Read-
-  only edits (viewport, styling, tab switches, plane position) stay live.
+  only edits (viewport, styling, tab switches, plane position) stay live, and so
+  does **collapsing and expanding a source/detector row** — the twisty is view
+  state, not a setup edit.
 - **Progress is streamed.** fdtdx's `run_fdtd` takes a `progress_callback(step,
   total)`, so the widget passes one and mirrors it into a synced `progress`
   trait (`{"step", "total"}`, `{}` when idle). The browser draws it as a
@@ -1390,3 +1392,8 @@ R15 draws a detector's field on its plane. Two questions were open: what the
     in solid.
   - **The region outline is drawn under the glyphs**, so a full-volume `xy`
     detector is no longer hidden by the simulation boundary in the `xy` view.
+- 2026-10-15: the source/detector collapse arrow stays live during a run.
+  - `setLocked` disabled the **first** button in a spec row, which is the
+    collapse twisty rather than the remove button, so collapsing and expanding
+    a source/detector row froze while a run was in flight. The lock now targets
+    the remove button directly (D15, R12).
