@@ -149,6 +149,7 @@ PortDirection = Literal["in", "out"]  # into the component through the port, or 
 
 __all__ = [
     "PLANE_PORTS",
+    "Z_CENTER_LEVEL",
     "StackDevice",
     "StackDiagnostic",
     "StackDiagnosticWarning",
@@ -233,6 +234,12 @@ class _Port(NamedTuple):
 #: ports: the plane through the box center parallel to the named faces, mapped
 #: to its normal axis (0 = x, 1 = y, 2 = z). They are not device ports.
 PLANE_PORTS: dict[str, int] = {"yz": 0, "xz": 1, "xy": 2}
+
+#: The ``level`` value naming the simulation volume's own z center, offered
+#: alongside the level names so a source or detector can be pinned to the
+#: volume's mid-height instead of a level's span (spec R12). ``None`` means the
+#: same for a plane port, and a port's own level union otherwise.
+Z_CENTER_LEVEL: str = "z_center"
 
 #: The two in-plane axes of each normal axis (0 = x, 1 = y, 2 = z), in the
 #: order a plane's ``port_size_mult`` and its two extents use: (u, v).
@@ -4865,9 +4872,9 @@ class StackDevice(StaticMultiMaterialObject):
         raise KeyError(f"Unknown port {port!r}; {self.name!r} has ports {[p.name for p in self.ports]}")
 
     def _plane_frame(
-        self, plane: str, port_offset: float
+        self, plane: str, port_offset: float, level: str | None = None
     ) -> tuple[_Port, int, int, list[float], float]:
-        """Frame of a plane through the simulation volume's center.
+        """Frame of a plane through the simulation volume.
 
         The three :data:`PLANE_PORTS` give the plane sources and detectors a
         frame without a component port: a plane parallel to the volume's faces,
@@ -4878,10 +4885,18 @@ class StackDevice(StaticMultiMaterialObject):
         ports run along x / y — so it uses the same synthetic frame, with the
         two in-plane extents as width and height.
 
+        ``level`` sets the plane's height: a level name puts the plane at the
+        middle of that level's z span, and :data:`Z_CENTER_LEVEL` (or ``None``)
+        at the volume's own mid-height. For the ``"xy"`` plane, whose normal is
+        z, that *is* the plane's position; for ``"xz"`` / ``"yz"`` it moves the
+        plane's in-plane vertical center.
+
         Args:
             plane: ``"xy"``, ``"xz"`` or ``"yz"``.
             port_offset: shift (um) along the normal; positive moves toward the
                 outward direction (+normal).
+            level: a level name, :data:`Z_CENTER_LEVEL`, or ``None`` for the
+                volume's mid-height.
 
         Returns:
             A synthetic port whose ``width`` / ``height`` are the volume's
@@ -4891,6 +4906,7 @@ class StackDevice(StaticMultiMaterialObject):
         Raises:
             ValueError: the device has no box (``partial_real_shape``), so the
                 volume's extent is unknown.
+            KeyError: ``level`` is not a level of this device.
         """
         axis = PLANE_PORTS[plane]
         if self.partial_real_shape is None or None in tuple(self.partial_real_shape):
@@ -4898,7 +4914,14 @@ class StackDevice(StaticMultiMaterialObject):
         size = tuple(float(s) * 1e6 for s in self.partial_real_shape)
         u_axis, v_axis = _IN_PLANE[axis]
         width, height = size[u_axis], size[v_axis]
-        center = [float(self.center[0]), float(self.center[1]), float(self.z_center)]
+        z = float(self.z_center)
+        if level is not None and level != Z_CENTER_LEVEL:
+            match = [lv for lv in self.levels if lv.name == level]
+            if not match:
+                raise KeyError(f"Level {level!r} is not in {self.name!r}: {[lv.name for lv in self.levels]}")
+            spans = [_span(lv) for lv in match]
+            z = 0.5 * (min(a for a, _ in spans) + max(b for _, b in spans))
+        center = [float(self.center[0]), float(self.center[1]), z]
         center[axis] += port_offset
         port = _Port(name=plane, x=center[0], y=center[1], orientation=None, width=width, layer=-1)
         return port, axis, 1, center, height
@@ -4911,7 +4934,9 @@ class StackDevice(StaticMultiMaterialObject):
         Args:
             port: port name.
             level: level whose z span is used (default: the union of the levels
-                that draw the port's layer).
+                that draw the port's layer). For a :data:`PLANE_PORTS` name it
+                sets the plane's height: a level's span middle, or
+                :data:`Z_CENTER_LEVEL` / ``None`` for the volume's mid-height.
             port_offset: shift (um) along the port's injection direction (into
                 the component); negative moves out of it.
 
@@ -4932,7 +4957,7 @@ class StackDevice(StaticMultiMaterialObject):
                 layer that no level draws.
         """
         if port in PLANE_PORTS:
-            return self._plane_frame(port, port_offset)
+            return self._plane_frame(port, port_offset, level)
         p = self._port(port)
         if p.orientation is None:
             raise ValueError(f"Port {port!r} has no orientation")
@@ -4941,7 +4966,7 @@ class StackDevice(StaticMultiMaterialObject):
             raise ValueError(f"Port {port!r} points at {p.orientation} deg; fdtdx planes need 0, 90, 180 or 270")
         quarter %= 4
         axis, sign = quarter % 2, (1 if quarter < 2 else -1)
-        if level is not None:
+        if level is not None and level != Z_CENTER_LEVEL:
             match = [lv for lv in self.levels if lv.name == level]
             if not match:
                 raise KeyError(f"Level {level!r} is not in {self.name!r}: {[lv.name for lv in self.levels]}")
@@ -4951,7 +4976,10 @@ class StackDevice(StaticMultiMaterialObject):
                 raise ValueError(f"No level of {self.name!r} draws the layer of port {port!r}; pass level=...")
         spans = [_span(lv) for lv in match]
         lo, hi = min(a for a, _ in spans), max(b for _, b in spans)
-        center = [p.x, p.y, 0.5 * (lo + hi)]
+        # Z_CENTER_LEVEL pins the plane to the volume's mid-height while keeping
+        # the port's own span height; otherwise the span's middle sets z.
+        z = float(self.z_center) if level == Z_CENTER_LEVEL else 0.5 * (lo + hi)
+        center = [p.x, p.y, z]
         center[axis] -= sign * port_offset  # sign: the port's outward orientation
         return p, axis, sign, center, hi - lo
 

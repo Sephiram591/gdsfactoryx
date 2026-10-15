@@ -161,9 +161,9 @@ export interface StatePayload {
   plane: "xy" | "xz" | "yz";
   plane_position: number;
   plane_bounds: [number, number];
-  //: gaussian 1/e distance (µm) for the 2D port fade vs. the plane's distance
-  //: from the port (spec R4)
-  port_fade_um: number;
+  //: gaussian 1/e distance for the 2D plane fade, as a fraction of the box
+  //: size along the section's normal (spec R4)
+  plane_fade_frac: number;
   sources: SpecPayload[];
   detectors: SpecPayload[];
   glyphs: GlyphPayload[];

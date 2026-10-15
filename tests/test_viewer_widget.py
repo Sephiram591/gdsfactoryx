@@ -146,14 +146,14 @@ def test_show_full_toggle() -> None:
     assert viewer_state.to_state()["show_full"] is True
 
 
-def test_port_fade_defaults_and_patches() -> None:
-    """R4: the port fade's 1/e distance defaults to 0.5 um and is editable."""
+def test_plane_fade_defaults_and_patches() -> None:
+    """R4: the plane fade defaults to a 0.05 fraction and is editable."""
     viewer_state = state.ViewerState(f1_stack())
-    assert viewer_state.to_state()["port_fade_um"] == state.PORT_FADE_UM
-    viewer_state.apply_patch({"port_fade_um": 1.25})
-    assert viewer_state.to_state()["port_fade_um"] == 1.25
+    assert viewer_state.to_state()["plane_fade_frac"] == state.PLANE_FADE_FRAC
+    viewer_state.apply_patch({"plane_fade_frac": 0.12})
+    assert viewer_state.to_state()["plane_fade_frac"] == 0.12
     with pytest.raises(ValueError):
-        viewer_state.apply_patch({"port_fade_um": 0.0})
+        viewer_state.apply_patch({"plane_fade_frac": 0.0})
 
 
 # ------------------------------------------------------------------ wire format
@@ -208,7 +208,7 @@ def test_state_edit_carries_no_geometry() -> None:
         "plane",
         "plane_position",
         "plane_bounds",
-        "port_fade_um",
+        "plane_fade_frac",
         # M4 adds the setup and the run flag (spec R12, R13, D15)
         "sources",
         "detectors",

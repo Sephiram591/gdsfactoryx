@@ -208,6 +208,11 @@ AC:
   - outlines of ports that cut the plane
   - a hover readout of coordinates and the level/material under the cursor
   - a "save image" button that writes the canvas to a PNG (D14)
+  - a **plane fade** setting: the gaussian 1/e distance with which ports,
+    source/detector glyphs and field overlays fade with distance from the
+    section plane, as a **fraction of the box size along the section's normal**
+    (`plane_fade_frac`, default 0.05). The same fraction serves every plane,
+    since each plane's normal size scales it.
 
 AC:
 - An xz section through the overlap region of F1 shows:
@@ -244,8 +249,16 @@ setup; it is not a run launcher (see §2).
   properties are editable: the port, the object type, `port_offset`,
   `port_size_mult`, the wavelength(s), `direction`, `level` and `name`.
   Changing `port_offset` moves the object's glyph in the viewports live.
-  A spec on a plane has no meaningful `level` (a plane spans the whole volume),
-  so `level` is ignored for it.
+- **`level` sets the object's height, on a plane as well as a port.** A level
+  name puts the plane at the **middle** of that level's z span (a port uses the
+  union of the levels that draw its layer; a plane uses the one level named).
+  The `level` list also offers **`z_center`**, the simulation volume's own
+  mid-height: on a plane it pins the plane to the volume's center rather than a
+  level's span, and on a port it moves the plane's z to the volume's center
+  while keeping the level's height. The empty choice is `z_center` for a plane
+  and the layer union for a port. On the `xy` plane, whose normal is z, `level`
+  is the plane's position; on `xz` / `yz` it is the plane's in-plane vertical
+  center.
 - **Declarative, not eager.** The widget stores each object as a *spec* (its
   type, port and parameters). It does **not** call `stack.create_*_at` when the
   object is added or edited. `create_*_at` is called only when the user
@@ -268,6 +281,14 @@ AC:
 - The port list offers `xy`, `xz` and `yz`; `StackDevice.ports` is unchanged
   (checked in a test). Adding a source on `xy` with the default size yields a
   plane spanning the whole simulation volume, and `place_objects` accepts it.
+- A plane's `level` moves it: `level=lower` on F1 puts the `xy` plane at
+  z = −0.17 µm and `level=upper` at +0.10 µm; `z_center` and the empty choice
+  put it at the volume's mid-height (checked in a test).
+- In 2D, a source/detector glyph whose plane is **parallel** to the section
+  fades with the same gaussian as the ports (R4), and one whose plane **crosses**
+  the section is drawn only where the section's position lies within the glyph's
+  own extent along the section normal — a mode plane source on `o1` does not
+  appear at every z in the `xy` view.
 
 ### R13. Simulation settings: *Must*
 
@@ -411,7 +432,7 @@ plain translucent glyph; once a field is shown, the glyph's translucent fill is
     field is drawn over the detector's (u, v) rectangle in the section canvas,
     under the region outline and ticks, and it **fades with the same gaussian as
     the ports** (R4): the overlay's alpha falls off with the section plane's
-    distance from the detector's plane, over `port_fade_um`, so a field fades in
+    distance from the detector's plane, over `plane_fade_frac`, so a field fades in
     as its plane is approached rather than popping in. A detector whose plane is
     perpendicular to the section is not shaded in 2D (its field is a plane, and
     there is nothing to show off that plane); the 3D viewport still shows it.
@@ -971,7 +992,8 @@ R15 draws a detector's field on its plane. Two questions were open: what the
 - **2D fades like the ports.** In the section canvas the overlay's alpha is
   multiplied by the same gaussian the ports use (R4): `exp(-½ (d / fade)²)` with
   `d` the section plane's distance from the detector's plane and `fade` the
-  state's `port_fade_um`. A field therefore fades in as its plane is approached,
+  1/e distance derived from the state's `plane_fade_frac`. A field therefore
+  fades in as its plane is approached,
   matching how a port outline fades — one fade rule for the 2D viewport.
 - **What alpha does not do.** It is not depth cueing and not a selection
   highlight; those are separate. The detector glyph's own opacity (R12) is
@@ -1344,3 +1366,27 @@ R15 draws a detector's field on its plane. Two questions were open: what the
     `grid = [len(v), len(u)]`; `field_payload` drops the plane's normal axis and
     transposes the rest. Both viewports read it that way and the 2D blit flips
     the raster, so an xz plane's field no longer renders transposed.
+- 2026-10-15: plane `level`, `z_center`, and two 2D glyph fixes.
+  - **A plane honors its `level`** (it was ignored): the level's span middle
+    sets the plane's height — the plane's position for `xy`, its in-plane
+    vertical center for `xz` / `yz`. R12's earlier "a plane has no meaningful
+    `level`" is reversed.
+  - **`z_center` joins the `level` list**: it pins an object to the simulation
+    volume's mid-height, on a plane or a port. On a port it keeps the level's
+    height and only moves z.
+  - **A crossing glyph is culled outside its own extent** along the section
+    normal, so a mode plane source on `o1` no longer appears at every z in the
+    `xy` view.
+  - **A parallel glyph fades** with the same gaussian as the ports (R4) rather
+    than popping in at a fixed coincidence tolerance.
+- 2026-10-15: the plane fade and 2D draw-order fixes.
+  - **"Port fade" is now "plane fade"** and is a **fraction, not a distance**:
+    `plane_fade_frac` (default 0.05) scales the box size along the section's
+    normal to give the gaussian 1/e distance, so the same setting suits every
+    simulation size and plane. It governs ports, source/detector glyphs and
+    field overlays alike (R4).
+  - **A crossing glyph fades too**: a plane seen edge-on (a mode-plane source
+    on `o1` in the `xy` view) fades with the same gaussian instead of popping
+    in solid.
+  - **The region outline is drawn under the glyphs**, so a full-volume `xy`
+    detector is no longer hidden by the simulation boundary in the `xy` view.

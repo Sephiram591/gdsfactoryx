@@ -24,6 +24,11 @@ import type {
 } from "./wire";
 import { TOTAL_COMPONENT } from "./fieldramp";
 
+//: The ``level`` value naming the simulation volume's own mid-height, offered
+//: alongside the level names (spec R12). Mirrors ``Z_CENTER_LEVEL`` in
+//: ``gdsfactory.fdtdx_stack``.
+export const Z_CENTER_LEVEL = "z_center";
+
 export interface ExplorerCallbacks {
   onPatch(patch: Record<string, unknown>): void;
   onSelect(
@@ -444,10 +449,12 @@ export class Explorer {
         (value) => setParam("wavelengths", parseWavelengths(value)),
       ));
     }
-    // level (spec R12)
+    // level (spec R12). The empty choice is the port's own level union (a port)
+    // or the volume's mid-height (a plane); z_center pins either to the
+    // volume's mid-height explicitly, so a plane can be moved off a level.
     if (this.meta.levels.length > 0) {
       controls.set("level", this.selectControl(
-        ["", ...this.meta.levels.map((l) => l.name)], "",
+        ["", ...this.meta.levels.map((l) => l.name), Z_CENTER_LEVEL], "",
         (value) => setParam("level", value || null),
       ));
     }

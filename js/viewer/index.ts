@@ -227,20 +227,21 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   fullHint.textContent = "unpainted";
   fullRow.append(fullLabel, fullInput, fullHint);
 
-  // the 2D port fade's 1/e distance (spec R4): larger keeps ports visible across
-  // more planes, smaller restricts them to their own plane
+  // the 2D plane fade (spec R4): a fraction of the box size along the section's
+  // normal; larger keeps planes and ports visible across more slices, smaller
+  // restricts them to their own
   const fadeRow = document.createElement("label");
   fadeRow.className = "gfx-settings-row";
-  fadeRow.title = "2D port fade: distance (µm) at which a port's outline falls to 1/e";
+  fadeRow.title = "Plane fade: 1/e distance as a fraction of the box size along the plane's normal";
   const fadeLabel = document.createElement("span");
-  fadeLabel.textContent = "Port fade (µm)";
+  fadeLabel.textContent = "Plane fade";
   const fadeInput = document.createElement("input");
   fadeInput.type = "range";
   fadeInput.className = "gfx-fade";
-  fadeInput.min = "0.05";
-  fadeInput.max = "5";
-  fadeInput.step = "0.05";
-  fadeInput.value = "0.5";
+  fadeInput.min = "0.01";
+  fadeInput.max = "0.25";
+  fadeInput.step = "0.01";
+  fadeInput.value = "0.05";
   const fadeValue = document.createElement("span");
   fadeValue.className = "gfx-settings-value";
   fadeRow.append(fadeLabel, fadeInput, fadeValue);
@@ -463,8 +464,8 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   );
   fadeInput.addEventListener("input", () => {
     const value = Number(fadeInput.value);
-    fadeValue.textContent = `${value.toFixed(2)} µm`;
-    sendPatch(model, { port_fade_um: value });
+    fadeValue.textContent = `${value.toFixed(2)}×`;
+    sendPatch(model, { plane_fade_frac: value });
   });
   to3d.addEventListener("click", () => {
     closeSettings();
@@ -640,8 +641,8 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
       applyProgress();
     }
     fullInput.checked = state.show_full;
-    if (document.activeElement !== fadeInput) fadeInput.value = String(state.port_fade_um);
-    fadeValue.textContent = `${state.port_fade_um.toFixed(2)} µm`;
+    if (document.activeElement !== fadeInput) fadeInput.value = String(state.plane_fade_frac);
+    fadeValue.textContent = `${state.plane_fade_frac.toFixed(2)}×`;
     section.setState(state);
     explorer.render(state);
   };

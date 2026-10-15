@@ -33,12 +33,9 @@ const LABEL_GAP = (4 * (2 / 3)) / 3;
 //: the axis name is drawn larger than the tick values it sits among
 const AXIS_NAME_PX = 16;
 
-//: Default gaussian 1/e distance (µm) for the port fade; the state's
-//: ``port_fade_um`` overrides it (spec R4).
-const PORT_FADE_UM = 0.5;
-//: A port's outline is not drawn beyond this many 1/e distances from its plane
+//: An outline is not drawn beyond this many 1/e distances from its plane
 //: (the gaussian has decayed to ~1% there, so it reads as gone, spec R4).
-const PORT_FADE_CUTOFF = 3;
+const PLANE_FADE_CUTOFF = 3;
 //: A box outline (the plane lies in the port's face) is filled at this fraction
 //: of the outline's own alpha, so the face reads as a translucent plate.
 const PORT_FILL_ALPHA = 0.25;
@@ -122,6 +119,18 @@ export class Section2D {
   setState(state: StatePayload): void {
     this.state = state;
     this.draw();
+  }
+
+  /** The gaussian 1/e distance (µm) for the plane fade (spec R4).
+   *
+   * The state's fraction applies to the box size along the section's normal,
+   * taken from the state's `plane_bounds` (the slider's own range).
+   */
+  private fade(): number {
+    const state = this.state;
+    if (!state) return 0;
+    const size = state.plane_bounds[1] - state.plane_bounds[0];
+    return state.plane_fade_frac * size;
   }
 
   /** The last result's per-detector fields (spec R15); re-draws the overlay. */
@@ -250,8 +259,8 @@ export class Section2D {
 
     this.drawPorts(ctx, payload);
     this.drawFields(ctx, payload);
-    this.drawGlyphs(ctx, payload);
     this.drawRegion(ctx, payload);
+    this.drawGlyphs(ctx, payload);
     this.drawTicks(ctx, payload);
   }
 
@@ -271,7 +280,7 @@ export class Section2D {
     const [ox, oy, oz] = payload.origin;
     const origin = [ox, oy, oz];
     const normalStack = { xy: 2, xz: 1, yz: 0 }[payload.plane];
-    const fade = state.port_fade_um > 0 ? state.port_fade_um : PORT_FADE_UM;
+    const fade = this.fade();
     for (const glyph of state.glyphs ?? []) {
       if (!glyph.visible || glyph.kind !== "detector") continue;
       if (glyph.u_half <= 0 || glyph.v_half <= 0) continue;
@@ -285,7 +294,7 @@ export class Section2D {
       // the gaussian the ports use, from the section plane to the detector's
       // plane (both in the local frame) (spec D16, R4)
       const distance = glyph.center[glyph.axis] - (payload.position - origin[normalStack]);
-      if (Math.abs(distance) > PORT_FADE_CUTOFF * fade) continue;
+      if (Math.abs(distance) > PLANE_FADE_CUTOFF * fade) continue;
       const alpha = Math.exp(-0.5 * (distance / fade) ** 2);
       if (alpha < 0.01) continue;
       const values = transformValues(data.real, data.imag, settings.field_transform);
@@ -356,13 +365,37 @@ export class Section2D {
   private drawGlyphs(ctx: CanvasRenderingContext2D, payload: SectionPayload): void {
     const state = this.state;
     if (!state) return;
+    const [ox, oy, oz] = payload.origin;
+    const origin = [ox, oy, oz];
+    const normalStack = { xy: 2, xz: 1, yz: 0 }[payload.plane];
+    const fade = this.fade();
     for (const glyph of state.glyphs ?? []) {
       if (!glyph.visible) continue;
       const cut = this.glyphCut(glyph, payload);
       if (!cut) continue;
+      // any glyph fades with the same gaussian as the ports (spec R4): a
+      // parallel plane fades in as its plane is approached, and a plane seen
+      // edge-on (a crossing glyph) is solid while the section cuts it and fades
+      // out over the last `fade` µm before the glyph's edge along the section
+      // normal — neither pops in or out
+      let alpha: number;
+      if (glyph.axis === normalStack) {
+        const distance = glyph.center[normalStack] - (payload.position - origin[normalStack]);
+        alpha = Math.exp(-0.5 * (distance / fade) ** 2);
+      } else {
+        const d = Math.abs(glyph.center[normalStack] - (payload.position - origin[normalStack]));
+        const e = this.glyphExtent(glyph, normalStack);
+        // inside the extent minus one fade distance the line is solid; the last
+        // fade distance is the gaussian's outer tail (0.01 at the edge, like the
+        // ports' 3-cutoff); a patch narrower than the fade fades across it all
+        const x = fade < e ? Math.max(0, (d - (e - fade)) / fade) : d / Math.max(e, 1e-9);
+        alpha = x >= 1 ? 0 : Math.exp(-0.5 * (3 * x) ** 2);
+      }
+      if (alpha < 0.01) continue;
       const selected =
         (state.selection?.kind === "source" || state.selection?.kind === "detector") &&
         state.selection.name === glyph.id;
+      ctx.globalAlpha = alpha;
       ctx.strokeStyle = selected ? SELECTED_COLOR : glyph.kind === "source" ? SOURCE_COLOR : DETECTOR_COLOR;
       ctx.lineWidth = 2;
       if (cut.kind === "segment") {
@@ -384,6 +417,7 @@ export class Section2D {
         ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
       }
     }
+    ctx.globalAlpha = 1;
   }
 
   /**
@@ -394,6 +428,17 @@ export class Section2D {
    * :meth:`portCut` does for a port. The two planes either cross in a segment
    * or are parallel (then shown only where they coincide).
    */
+  /** A glyph's half-extent along a stack axis (spec D11).
+   *
+   * The glyph's own normal is not a spanning axis; a dipole (no plane) has a
+   * marker's half-extent on every axis.
+   */
+  private glyphExtent(glyph: GlyphPayload, axis: number): number {
+    if (glyph.u_half === 0 && glyph.v_half === 0) return GLYPH_CUT_HALF;
+    const spans = [0, 1, 2].filter((a) => a !== glyph.axis);
+    return axis === spans[0] ? glyph.u_half : glyph.v_half;
+  }
+
   private glyphCut(
     glyph: GlyphPayload,
     payload: SectionPayload,
@@ -417,7 +462,12 @@ export class Section2D {
 
     if (glyph.axis === normalStack) {
       // parallel planes: show the rectangle only where the two coincide
-      if (Math.abs(center[glyph.axis] - (payload.position - origin[normalStack])) > half) return null;
+      if (
+        Math.abs(center[glyph.axis] - (payload.position - origin[normalStack])) >
+        PLANE_FADE_CUTOFF * this.fade()
+      ) {
+        return null;
+      }
       return {
         kind: "rect",
         u0: center[au] - extent(au),
@@ -429,7 +479,13 @@ export class Section2D {
 
     // the planes cross: the glyph normal is one of the section's in-plane axes
     // and fixes that coordinate; the segment runs along the other in-plane axis,
-    // which is the glyph spanning axis that lies in the section
+    // which is the glyph spanning axis that lies in the section. The glyph also
+    // spans the section's normal axis, so it is cut only while the section's
+    // position lies within that extent — otherwise the glyph is off the plane
+    // and must not be drawn (a mode plane source does not fill all z, spec R12).
+    if (Math.abs(center[normalStack] - (payload.position - origin[normalStack])) > extent(normalStack)) {
+      return null;
+    }
     const fixed = glyph.axis;
     const vary = fixed === au ? av : au;
     const reach = extent(vary);
@@ -442,7 +498,7 @@ export class Section2D {
   private drawPorts(ctx: CanvasRenderingContext2D, payload: SectionPayload): void {
     const state = this.state;
     if (!state) return;
-    const fade = state.port_fade_um > 0 ? state.port_fade_um : PORT_FADE_UM;
+    const fade = this.fade();
     for (const port of this.meta.ports) {
       if (!(state.port_visible[port.name] ?? true)) continue;
       const distance = this.portDistance(port, payload);
@@ -504,7 +560,7 @@ export class Section2D {
     // whole volume; its width bar in 2D would be meaningless, so it is drawn
     // only in 3D (as the plane's rectangle)
     if (port.plane !== null) return null;
-    const half = PORT_FADE_CUTOFF * (this.state?.port_fade_um ?? PORT_FADE_UM);
+    const half = PLANE_FADE_CUTOFF * this.fade();
     const [ox, oy, oz] = payload.origin;
     const angle = ((port.orientation ?? 0) * Math.PI) / 180;
     // the port's normal (orientation) as a stack-axis unit vector; a port with no

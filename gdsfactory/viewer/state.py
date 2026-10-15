@@ -46,8 +46,9 @@ __all__ = ["LayerStyle", "ViewerState", "spec_glyphs"]
 FILL_OPACITY = 0.15
 LEVEL_OPACITY = 0.9
 
-#: Default gaussian 1/e distance (um) for the 2D port fade vs. plane distance (spec R4).
-PORT_FADE_UM = 0.5
+#: Default plane fade as a fraction of the box size along the section's normal
+#: (spec R4). The 1/e distance is this fraction times that size.
+PLANE_FADE_FRAC = 0.05
 
 #: The section planes the 2D viewport can show (spec R4).
 PLANES = ("xy", "xz", "yz")
@@ -174,8 +175,9 @@ class ViewerState:
         self.plane_positions: dict[str, float] = {
             plane: 0.5 * sum(self.plane_bounds(plane)) for plane in PLANES
         }
-        #: the 2D port fade's gaussian 1/e distance (um), editable in settings (spec R4)
-        self.port_fade_um: float = PORT_FADE_UM
+        #: the plane fade as a fraction of the box size along the section's
+        #: normal; the 1/e distance is that fraction of the size (spec R4)
+        self.plane_fade_frac: float = PLANE_FADE_FRAC
 
     # ------------------------------------------------------------------ section
 
@@ -353,7 +355,7 @@ class ViewerState:
             "show_full",
             "plane",
             "plane_position",
-            "port_fade_um",
+            "plane_fade_frac",
             "sources",
             "detectors",
             "simulation",
@@ -405,11 +407,11 @@ class ViewerState:
             lo, hi = self.plane_bounds()
             self.plane_positions[self.plane] = min(hi, max(lo, position))
 
-        if "port_fade_um" in patch:
-            fade = float(patch["port_fade_um"])
+        if "plane_fade_frac" in patch:
+            fade = float(patch["plane_fade_frac"])
             if not math.isfinite(fade) or fade <= 0:
-                raise ValueError(f"Non-positive port fade {patch['port_fade_um']!r}")
-            self.port_fade_um = fade
+                raise ValueError(f"Non-positive plane fade {patch['plane_fade_frac']!r}")
+            self.plane_fade_frac = fade
 
         if "sources" in patch:
             _apply_spec_patch(self, "source", patch["sources"])
@@ -442,7 +444,7 @@ class ViewerState:
             "plane": self.plane,
             "plane_position": self.plane_position,
             "plane_bounds": list(self.plane_bounds()),
-            "port_fade_um": self.port_fade_um,
+            "plane_fade_frac": self.plane_fade_frac,
             "sources": [s.to_wire() for s in self.specs if s.category == "source"],
             "detectors": [s.to_wire() for s in self.specs if s.category == "detector"],
             "field_settings": {

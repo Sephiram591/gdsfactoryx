@@ -29543,6 +29543,7 @@ function decodeFloat32(buffer, offset, count) {
 }
 
 // viewer/explorer.ts
+var Z_CENTER_LEVEL = "z_center";
 var TABS = ["Layout / Ports", "Sources / Detectors", "Simulation"];
 var SOURCE_TYPES = [
   "ModePlaneSource",
@@ -29855,7 +29856,7 @@ var Explorer = class {
     }
     if (this.meta.levels.length > 0) {
       controls.set("level", this.selectControl(
-        ["", ...this.meta.levels.map((l) => l.name)],
+        ["", ...this.meta.levels.map((l) => l.name), Z_CENTER_LEVEL],
         "",
         (value) => setParam("level", value || null)
       ));
@@ -34609,8 +34610,7 @@ var TICK_LABEL_PX = 11;
 var TICK_PX = 5 * (2 / 3);
 var LABEL_GAP = 4 * (2 / 3) / 3;
 var AXIS_NAME_PX = 16;
-var PORT_FADE_UM = 0.5;
-var PORT_FADE_CUTOFF = 3;
+var PLANE_FADE_CUTOFF = 3;
 var PORT_FILL_ALPHA = 0.25;
 var GLYPH_CUT_HALF = 0.5;
 var Section2D = class {
@@ -34668,6 +34668,17 @@ var Section2D = class {
   setState(state) {
     this.state = state;
     this.draw();
+  }
+  /** The gaussian 1/e distance (µm) for the plane fade (spec R4).
+   *
+   * The state's fraction applies to the box size along the section's normal,
+   * taken from the state's `plane_bounds` (the slider's own range).
+   */
+  fade() {
+    const state = this.state;
+    if (!state) return 0;
+    const size = state.plane_bounds[1] - state.plane_bounds[0];
+    return state.plane_fade_frac * size;
   }
   /** The last result's per-detector fields (spec R15); re-draws the overlay. */
   setFields(fields) {
@@ -34780,8 +34791,8 @@ var Section2D = class {
     }
     this.drawPorts(ctx, payload);
     this.drawFields(ctx, payload);
-    this.drawGlyphs(ctx, payload);
     this.drawRegion(ctx, payload);
+    this.drawGlyphs(ctx, payload);
     this.drawTicks(ctx, payload);
   }
   /**
@@ -34800,7 +34811,7 @@ var Section2D = class {
     const [ox, oy, oz] = payload.origin;
     const origin = [ox, oy, oz];
     const normalStack = { xy: 2, xz: 1, yz: 0 }[payload.plane];
-    const fade = state.port_fade_um > 0 ? state.port_fade_um : PORT_FADE_UM;
+    const fade = this.fade();
     for (const glyph of state.glyphs ?? []) {
       if (!glyph.visible || glyph.kind !== "detector") continue;
       if (glyph.u_half <= 0 || glyph.v_half <= 0) continue;
@@ -34811,7 +34822,7 @@ var Section2D = class {
       const data = componentData(field, settings.field_component);
       if (!data) continue;
       const distance = glyph.center[glyph.axis] - (payload.position - origin[normalStack]);
-      if (Math.abs(distance) > PORT_FADE_CUTOFF * fade) continue;
+      if (Math.abs(distance) > PLANE_FADE_CUTOFF * fade) continue;
       const alpha = Math.exp(-0.5 * (distance / fade) ** 2);
       if (alpha < 0.01) continue;
       const values = transformValues(data.real, data.imag, settings.field_transform);
@@ -34866,11 +34877,27 @@ var Section2D = class {
   drawGlyphs(ctx, payload) {
     const state = this.state;
     if (!state) return;
+    const [ox, oy, oz] = payload.origin;
+    const origin = [ox, oy, oz];
+    const normalStack = { xy: 2, xz: 1, yz: 0 }[payload.plane];
+    const fade = this.fade();
     for (const glyph of state.glyphs ?? []) {
       if (!glyph.visible) continue;
       const cut = this.glyphCut(glyph, payload);
       if (!cut) continue;
+      let alpha;
+      if (glyph.axis === normalStack) {
+        const distance = glyph.center[normalStack] - (payload.position - origin[normalStack]);
+        alpha = Math.exp(-0.5 * (distance / fade) ** 2);
+      } else {
+        const d = Math.abs(glyph.center[normalStack] - (payload.position - origin[normalStack]));
+        const e = this.glyphExtent(glyph, normalStack);
+        const x = fade < e ? Math.max(0, (d - (e - fade)) / fade) : d / Math.max(e, 1e-9);
+        alpha = x >= 1 ? 0 : Math.exp(-0.5 * (3 * x) ** 2);
+      }
+      if (alpha < 0.01) continue;
       const selected = (state.selection?.kind === "source" || state.selection?.kind === "detector") && state.selection.name === glyph.id;
+      ctx.globalAlpha = alpha;
       ctx.strokeStyle = selected ? SELECTED_COLOR2 : glyph.kind === "source" ? SOURCE_COLOR2 : DETECTOR_COLOR2;
       ctx.lineWidth = 2;
       if (cut.kind === "segment") {
@@ -34891,6 +34918,7 @@ var Section2D = class {
         ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
       }
     }
+    ctx.globalAlpha = 1;
   }
   /**
    * A source/detector's cut in the section's local (u, v), or null.
@@ -34900,6 +34928,16 @@ var Section2D = class {
    * :meth:`portCut` does for a port. The two planes either cross in a segment
    * or are parallel (then shown only where they coincide).
    */
+  /** A glyph's half-extent along a stack axis (spec D11).
+   *
+   * The glyph's own normal is not a spanning axis; a dipole (no plane) has a
+   * marker's half-extent on every axis.
+   */
+  glyphExtent(glyph, axis) {
+    if (glyph.u_half === 0 && glyph.v_half === 0) return GLYPH_CUT_HALF;
+    const spans = [0, 1, 2].filter((a) => a !== glyph.axis);
+    return axis === spans[0] ? glyph.u_half : glyph.v_half;
+  }
   glyphCut(glyph, payload) {
     const half = GLYPH_CUT_HALF;
     const [ox, oy, oz] = payload.origin;
@@ -34913,7 +34951,9 @@ var Section2D = class {
       return axis === spans[0] ? glyph.u_half : glyph.v_half;
     };
     if (glyph.axis === normalStack) {
-      if (Math.abs(center[glyph.axis] - (payload.position - origin[normalStack])) > half) return null;
+      if (Math.abs(center[glyph.axis] - (payload.position - origin[normalStack])) > PLANE_FADE_CUTOFF * this.fade()) {
+        return null;
+      }
       return {
         kind: "rect",
         u0: center[au] - extent(au),
@@ -34921,6 +34961,9 @@ var Section2D = class {
         v0: center[av] - extent(av),
         v1: center[av] + extent(av)
       };
+    }
+    if (Math.abs(center[normalStack] - (payload.position - origin[normalStack])) > extent(normalStack)) {
+      return null;
     }
     const fixed = glyph.axis;
     const vary = fixed === au ? av : au;
@@ -34933,7 +34976,7 @@ var Section2D = class {
   drawPorts(ctx, payload) {
     const state = this.state;
     if (!state) return;
-    const fade = state.port_fade_um > 0 ? state.port_fade_um : PORT_FADE_UM;
+    const fade = this.fade();
     for (const port of this.meta.ports) {
       if (!(state.port_visible[port.name] ?? true)) continue;
       const distance = this.portDistance(port, payload);
@@ -34988,7 +35031,7 @@ var Section2D = class {
    */
   portOutline(port, payload) {
     if (port.plane !== null) return null;
-    const half = PORT_FADE_CUTOFF * (this.state?.port_fade_um ?? PORT_FADE_UM);
+    const half = PLANE_FADE_CUTOFF * this.fade();
     const [ox, oy, oz] = payload.origin;
     const angle = (port.orientation ?? 0) * Math.PI / 180;
     const nx = Math.cos(angle);
@@ -35338,16 +35381,16 @@ function render({ model, el }) {
   fullRow.append(fullLabel, fullInput, fullHint);
   const fadeRow = document.createElement("label");
   fadeRow.className = "gfx-settings-row";
-  fadeRow.title = "2D port fade: distance (\xB5m) at which a port's outline falls to 1/e";
+  fadeRow.title = "Plane fade: 1/e distance as a fraction of the box size along the plane's normal";
   const fadeLabel = document.createElement("span");
-  fadeLabel.textContent = "Port fade (\xB5m)";
+  fadeLabel.textContent = "Plane fade";
   const fadeInput = document.createElement("input");
   fadeInput.type = "range";
   fadeInput.className = "gfx-fade";
-  fadeInput.min = "0.05";
-  fadeInput.max = "5";
-  fadeInput.step = "0.05";
-  fadeInput.value = "0.5";
+  fadeInput.min = "0.01";
+  fadeInput.max = "0.25";
+  fadeInput.step = "0.01";
+  fadeInput.value = "0.05";
   const fadeValue = document.createElement("span");
   fadeValue.className = "gfx-settings-value";
   fadeRow.append(fadeLabel, fadeInput, fadeValue);
@@ -35520,8 +35563,8 @@ function render({ model, el }) {
   );
   fadeInput.addEventListener("input", () => {
     const value = Number(fadeInput.value);
-    fadeValue.textContent = `${value.toFixed(2)} \xB5m`;
-    sendPatch(model, { port_fade_um: value });
+    fadeValue.textContent = `${value.toFixed(2)}\xD7`;
+    sendPatch(model, { plane_fade_frac: value });
   });
   to3d.addEventListener("click", () => {
     closeSettings();
@@ -35657,8 +35700,8 @@ function render({ model, el }) {
       applyProgress();
     }
     fullInput.checked = state.show_full;
-    if (document.activeElement !== fadeInput) fadeInput.value = String(state.port_fade_um);
-    fadeValue.textContent = `${state.port_fade_um.toFixed(2)} \xB5m`;
+    if (document.activeElement !== fadeInput) fadeInput.value = String(state.plane_fade_frac);
+    fadeValue.textContent = `${state.plane_fade_frac.toFixed(2)}\xD7`;
     section.setState(state);
     explorer.render(state);
   };
