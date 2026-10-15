@@ -374,6 +374,10 @@ plain translucent glyph.
   like the other params, and are **never** passed to `create_*_at` (they are
   display-only, like `visible`, R12). They survive a re-run: they belong to the
   detector, not to the result.
+- **One view-wide field setting.** `log_range` (default 6 decades) is the bottom
+  of the `logabs` color ramp, shared by every detector's overlay (Q22). It is a
+  view setting, not a detector field, and lives with the other view-wide controls
+  rather than in a detector row. See *Log and the value floor* (D16).
 - **Transparency encodes magnitude, when asked.** The overlay's alpha is a
   function of the local |field| relative to the plane's maximum, so a low-amplitude
   region fades toward the geometry behind it. See *Transparency* below for the
@@ -895,9 +899,10 @@ R15 draws a detector's field on its plane. The color already encodes the value;
 - **The zero of the log.** `log10(0)` is `−∞`, and a real field can be exactly
   zero on a plane. `logabs` floors at a **dynamic range** below the plane's
   maximum — `log10(|field|)` is clamped at `log10(max|field|) − range`, with
-  `range = 6` decades (a fixed v1 constant, Q22) — so a true zero maps to the
-  floor rather than to `−∞`. The same floor is what `alpha` approaches: a cell
-  whose `|field|` is below `max·10^−6` is effectively transparent.
+  `range` a **global** setting (Q22, resolved; default 6 decades) — so a true
+  zero maps to the floor rather than to `−∞`. The same floor is what `alpha`
+  approaches: a cell whose `|field|` is below `max·10^−range` is effectively
+  transparent.
 - **Per-plane normalization** (Q21, resolved). `max|field|` is over that
   detector's plane only (R15), so alpha is a statement about *this* plane. A
   plane whose field is everywhere tiny is still fully drawn where it is
@@ -989,17 +994,12 @@ R15 draws a detector's field on its plane. The color already encodes the value;
   the others. The colorbar carries each plane's own range; comparing amplitudes
   *between* detectors is the user's read of the two colorbars, not a shared
   scale. There is no cross-detector shared-scale mode.
-- **Q22.** The `logabs` value floor (D16). `logabs` is `log10(|field|)`, which is
-  `−∞` at an exact zero, so the color range is clamped at some number of decades
-  below the plane's maximum. **What the constant does:** it is *only* the bottom
-  of the color ramp. With `range = 6`, the color scale runs from `log10(max)` at
-  the top to `log10(max) − 6` at the bottom, so anything `10⁶×` weaker than the
-  plane's peak (including an exact zero) paints as the floor color rather than
-  stretching the scale to `−∞`. It is not a physical threshold and changes
-  nothing about the field — a larger range shows fainter detail at the cost of a
-  washed-out high end. **The question:** fixed at 6, or user-settable? If
-  settable, per-detector (a field alongside `field_transform`) or one global
-  setting for all overlays? v1 default is fixed 6.
+- **Q22.** *Resolved 2026-10-14:* **one global setting.** The `logabs` value
+  floor (D16) is a single number for the whole widget, not a per-detector field.
+  It is a color-ramp floor — the bottom of the `logabs` scale, `log10(max) −
+  range` — so one value reads consistently across every detector's plane and the
+  user sets it once. The control lives with the other view-wide settings, not in
+  a detector row. v1 default: 6 decades.
 - **Q23.** *Resolved 2026-10-14:* **strict.** `show_result` (R15) checks the
   result's detectors against the widget's current setup by **name, per-component
   grid shape, grid spacing, and the plane's position** — not just name and
@@ -1248,6 +1248,7 @@ R15 draws a detector's field on its plane. The color already encodes the value;
   - **Q23 — strict `show_result` validation.** It checks detector names, grid
     shape, grid spacing and the plane's position, not name and shape alone, so a
     result recorded on a re-boxed device (R13) is refused rather than mis-placed.
-  - **Q22** reworded to spell out that the 6-decade constant is only the floor of
-    the `logabs` color ramp (not a physical threshold) and to pose the fixed vs
-    user-settable choice concretely. Still open.
+  - **Q22 — the `logabs` floor is a global setting.** One widget-wide number for
+    the bottom of the `logabs` color ramp (default 6 decades), not a per-detector
+    field, so the scale reads consistently across every detector's plane. It
+    lives with the other view-wide settings, not in a detector row.
