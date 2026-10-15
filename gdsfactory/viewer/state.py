@@ -20,6 +20,8 @@ from typing import Any, NamedTuple
 
 from gdsfactory.viewer.palette import fallback_color
 from gdsfactory.viewer.sim import (
+    _FIELD_PARAMS,
+    FIELD_TRANSFORMS,
     TYPES,
     ObjectSpec,
     SimSettings,
@@ -51,9 +53,12 @@ PORT_FADE_UM = 0.5
 PLANES = ("xy", "xz", "yz")
 
 #: Every parameter name a source/detector spec may carry (spec R12): the common
-#: fields plus each type's extras. ``type`` and ``port`` are separate.
+#: fields plus each type's extras. ``type`` and ``port`` are separate. The
+#: detector display settings (spec R15) are included, so a detector spec may
+#: carry them; a source never uses them.
 _SPEC_PARAM_KEYS = frozenset(
     {"port_offset", "level", "direction", "name", "wavelengths", "port_size_mult", "visible"}
+    | set(_FIELD_PARAMS)
     | {key for kind in TYPES.values() for key in kind.extra}
 )
 
@@ -303,6 +308,7 @@ class ViewerState:
             unknown = set(data["params"]) - set(_SPEC_PARAM_KEYS)
             if unknown:
                 raise ValueError(f"Unknown parameters: {sorted(unknown)}")
+            _validate_field_params(spec, data["params"])
             spec.params.update(data["params"])
         return spec
 
@@ -439,6 +445,9 @@ class ViewerState:
             "port_fade_um": self.port_fade_um,
             "sources": [s.to_wire() for s in self.specs if s.category == "source"],
             "detectors": [s.to_wire() for s in self.specs if s.category == "detector"],
+            "field_settings": {
+                s.id: s.field_params() for s in self.specs if s.category == "detector"
+            },
             "glyphs": spec_glyphs(self),
             "simulation": self.settings.to_wire(),
             "running": self.running,
@@ -488,6 +497,30 @@ def _selection(selection: Any, state: ViewerState) -> dict[str, str] | None:
     if kind in ("source", "detector") and any(s.id == name for s in state.specs):
         return {"kind": kind, "name": name}
     raise ValueError(f"Unknown selection {selection!r}")
+
+
+def _validate_field_params(spec: ObjectSpec, params: dict[str, Any]) -> None:
+    """Refuses a bad detector display setting (spec R15, D16).
+
+    A source carries none of these, so any of them on a source is refused. A
+    detector's ``field_transform`` must be one of the known transforms and
+    ``field_opacity`` must be a number in [0, 1]; the colors are accepted as
+    strings (the browser validates the CSS).
+    """
+    given = set(params) & set(_FIELD_PARAMS)
+    if not given:
+        return
+    if spec.category != "detector":
+        raise ValueError(f"a {spec.category} has no field display settings: {sorted(given)}")
+    if "field_transform" in params and params["field_transform"] not in FIELD_TRANSFORMS:
+        raise ValueError(
+            f"unknown field transform {params['field_transform']!r}; "
+            f"expected one of {sorted(FIELD_TRANSFORMS)}"
+        )
+    if "field_opacity" in params:
+        opacity = float(params["field_opacity"])
+        if not math.isfinite(opacity) or not 0.0 <= opacity <= 1.0:
+            raise ValueError(f"field_opacity must be in [0, 1], got {params['field_opacity']!r}")
 
 
 def _apply_spec_patch(state: ViewerState, category: str, ops: Any) -> None:

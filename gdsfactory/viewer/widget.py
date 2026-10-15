@@ -45,7 +45,8 @@ from typing import Any
 import anywidget
 import traitlets
 
-from gdsfactory.viewer.payload import build_payload, build_section_payload
+from gdsfactory.viewer.fields import validate_result
+from gdsfactory.viewer.payload import build_field_payload, build_payload, build_section_payload
 from gdsfactory.viewer.sim import build_objects
 from gdsfactory.viewer.sim import run as _run_sim
 from gdsfactory.viewer.state import ViewerState
@@ -91,6 +92,10 @@ class Viewer(anywidget.AnyWidget):
     section = traitlets.Dict(default_value={}).tag(sync=True)
     #: the last run's outcome summary, for the browser to show (spec R14, Q20)
     run_result = traitlets.Dict(default_value={}).tag(sync=True)
+    #: every detector's recorded field from the current result, keyed by spec id
+    #: (spec R15, D16): the raw complex field as float32 buffers, so a transform
+    #: or color edit re-shades in the browser with no kernel round-trip
+    fields = traitlets.Dict(default_value={}).tag(sync=True)
     #: the in-flight run's progress as ``{"step": int, "total": int}`` (spec D15);
     #: ``{}`` when no run is in flight or the total is not yet known
     progress = traitlets.Dict(default_value={}).tag(sync=True)
@@ -238,6 +243,8 @@ class Viewer(anywidget.AnyWidget):
                 )
                 self._run_result = result
                 self.run_result = {"status": "done", "detectors": _detector_names(result)}
+                # the field buffers ride the same worker-thread context install
+                self.fields = build_field_payload(self._viewer_state, result)
             except BaseException as exc:
                 self._run_error = exc
                 self.run_result = {"status": "error", "message": str(exc)}
@@ -261,6 +268,31 @@ class Viewer(anywidget.AnyWidget):
     def last_error(self) -> BaseException | None:
         """The last run's exception, if it failed (spec Q20)."""
         return self._run_error
+
+    def show_result(self, result: Any) -> None:
+        """Adopts a result the user produced elsewhere as the current result (R15).
+
+        The common case is a user who ran the simulation under ``srun`` and
+        wants to look at the fields in the widget: this adopts that result's
+        detector arrays and redraws every overlay, with no re-run and no
+        re-send of the geometry. It does **not** adopt the result's geometry or
+        objects — the widget's own stack and specs stay authoritative.
+
+        Args:
+            result: a :class:`~gdsfactory.viewer.sim.RunResult`, or any object
+                with ``.arrays.detector_states``, ``.objects`` and ``.config``.
+
+        Raises:
+            ValueError: if the result's detectors do not correspond to the
+                widget's current setup by name, grid shape, grid spacing and
+                plane position (spec Q23). The previous result and its overlays
+                are left untouched.
+        """
+        validate_result(self._viewer_state, result)
+        self._run_result = result
+        self._run_error = None
+        self.run_result = {"status": "done", "detectors": _detector_names(result)}
+        self.fields = build_field_payload(self._viewer_state, result)
 
     # ------------------------------------------------------------------ messages
 

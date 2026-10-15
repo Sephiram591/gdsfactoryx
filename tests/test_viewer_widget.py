@@ -215,6 +215,8 @@ def test_state_edit_carries_no_geometry() -> None:
         "glyphs",
         "simulation",
         "running",
+        # R15 adds the detector field display settings (spec R15, D16)
+        "field_settings",
     }
 
 

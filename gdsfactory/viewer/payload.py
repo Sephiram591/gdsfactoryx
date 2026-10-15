@@ -21,6 +21,7 @@ from typing import Any
 
 import numpy as np
 
+from gdsfactory.viewer.fields import field_payload
 from gdsfactory.viewer.section import (
     section,
     section_axis_names,
@@ -31,7 +32,7 @@ from gdsfactory.viewer.sim import TYPES
 from gdsfactory.viewer.solids import SolidMesh
 from gdsfactory.viewer.state import ViewerState
 
-__all__ = ["build_payload", "build_section_payload"]
+__all__ = ["build_field_payload", "build_payload", "build_section_payload"]
 
 
 def _mesh_payload(mesh: SolidMesh) -> dict[str, Any]:
@@ -140,6 +141,33 @@ def _types_meta() -> dict[str, Any]:
 def _rings(rings: tuple[np.ndarray, ...]) -> list[list[list[float]]]:
     """A section's rings as nested JSON lists (spec R4, C5)."""
     return [[[float(x), float(y)] for x, y in ring] for ring in rings]
+
+
+def build_field_payload(viewer_state: ViewerState, result: Any) -> dict[str, Any]:
+    """Every detector's recorded field, keyed by spec id (spec R15, D16).
+
+    Sends the raw complex field (real and imaginary parts as float32 buffers),
+    so the browser applies the transform, the map and the opacity without a
+    further kernel round-trip. A detector with no field in ``result`` is absent,
+    so it keeps its plain glyph. An empty dict means no detector has a field.
+
+    Args:
+        viewer_state: the state holding the specs (for each detector's id).
+        result: the current :class:`~gdsfactory.viewer.sim.RunResult`, or None.
+
+    Returns:
+        ``{spec_id: {name, components, grid, real, imag}}``.
+    """
+    if result is None:
+        return {}
+    fields: dict[str, Any] = {}
+    for spec in viewer_state.specs:
+        if spec.category != "detector":
+            continue
+        entry = field_payload(result, spec.name, spec.id)
+        if entry is not None:
+            fields[spec.id] = entry
+    return fields
 
 
 def build_section_payload(viewer_state: ViewerState) -> dict[str, Any]:

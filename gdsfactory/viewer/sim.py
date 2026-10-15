@@ -96,6 +96,25 @@ DEFAULT_DETECTOR = "ModeOverlapDetector"
 #: and is never passed to ``create_*_at``.
 _COMMON = ("port_offset", "level", "direction", "name", "wavelengths", "port_size_mult", "visible")
 
+#: The detector display parameters (spec R15, D16). Display-only, like
+#: ``visible``: they style the field overlay and are never passed to
+#: ``create_*_at``. Only detectors carry them.
+_FIELD_PARAMS = (
+    "field_component",
+    "field_transform",
+    "field_color_low",
+    "field_color_high",
+    "field_opacity",
+    "field_visible",
+)
+
+#: The display transforms a detector's field can take (spec R15).
+FIELD_TRANSFORMS = ("real", "imag", "abs", "phase", "logabs")
+
+#: The default field-overlay colors (spec D16): a cool blue and a warm red.
+FIELD_COLOR_LOW = "#3b6fd6"
+FIELD_COLOR_HIGH = "#d64b3b"
+
 
 @dataclass
 class ObjectSpec:
@@ -125,6 +144,23 @@ class ObjectSpec:
     def name(self) -> str:
         """The object's name (``params['name']`` or ``<port>_<type>``)."""
         return str(self.params.get("name") or f"{self.port}_{self.type}")
+
+    def field_params(self) -> dict[str, Any]:
+        """The detector's display settings with defaults filled in (spec R15).
+
+        Only a detector has these; a source returns an empty dict. Absent keys
+        fall back to the defaults, so the browser always gets a complete set.
+        """
+        if self.category != "detector":
+            return {}
+        return {
+            "field_component": self.params.get("field_component"),
+            "field_transform": str(self.params.get("field_transform") or "abs"),
+            "field_color_low": str(self.params.get("field_color_low") or FIELD_COLOR_LOW),
+            "field_color_high": str(self.params.get("field_color_high") or FIELD_COLOR_HIGH),
+            "field_opacity": _field_opacity(self.params.get("field_opacity", 1.0)),
+            "field_visible": bool(self.params.get("field_visible", True)),
+        }
 
     def to_wire(self) -> dict[str, Any]:
         """The spec as JSON for the browser (spec D5)."""
@@ -176,6 +212,10 @@ class SimSettings:
     boundary_offset: tuple[float, float, float, float, float, float] = (
         0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
     )
+    #: the number of decades below a plane's maximum that ``logabs`` floors at
+    #: (spec D16, Q22). One value for every detector's overlay; the bottom of the
+    #: ``logabs`` color ramp, so a true zero maps to the floor, not to ``-inf``.
+    log_range: float = 6.0
 
     def to_wire(self) -> dict[str, Any]:
         """The settings as JSON for the browser (spec R13)."""
@@ -187,6 +227,7 @@ class SimSettings:
             "resolution_um": float(self.resolution_um),
             "time_s": float(self.time_s),
             "boundary_offset": [float(v) for v in self.boundary_offset],
+            "log_range": float(self.log_range),
         }
 
     @classmethod
@@ -208,6 +249,9 @@ class SimSettings:
         offset = tuple(float(v) for v in offset)
         if not all(math.isfinite(v) for v in offset):
             raise ValueError(f"boundary_offset must be finite, got {offset!r}")
+        log_range = float(data.get("log_range", defaults.log_range))
+        if not math.isfinite(log_range) or log_range <= 0:
+            raise ValueError(f"log_range must be a positive number of decades, got {log_range!r}")
         return cls(
             wavelength_um=wavelength,
             pulse_width_frac=float(data.get("pulse_width_frac", defaults.pulse_width_frac)),
@@ -216,6 +260,7 @@ class SimSettings:
             resolution_um=resolution,
             time_s=time_s,
             boundary_offset=offset,
+            log_range=log_range,
         )
 
 
@@ -234,6 +279,11 @@ class RunResult(NamedTuple):
 
 
 # ------------------------------------------------------------------- defaults
+
+def _field_opacity(value: Any) -> float:
+    """A clamped field-overlay opacity in [0, 1] (spec R15)."""
+    return min(1.0, max(0.0, float(value)))
+
 
 def default_source_spec(port: str, settings: SimSettings) -> ObjectSpec:
     """The default source added by the "New source" control (spec R12)."""
