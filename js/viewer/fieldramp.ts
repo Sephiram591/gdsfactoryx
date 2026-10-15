@@ -14,6 +14,12 @@ import type { FieldPayload, FieldSettings } from "./wire";
 
 export type Transform = FieldSettings["field_transform"];
 
+//: A pseudo-component: the total electric-field magnitude, ``|E|`` (spec R15).
+//: The result records ``Ex``/``Ey``/``Ez`` as separate complex planes; this
+//: offers their magnitude ``sqrt(|Ex|^2 + |Ey|^2 + |Ez|^2)`` as one choice, so a
+//: detector can be shaded by the field's strength rather than one polarization.
+export const TOTAL_COMPONENT = "|E|";
+
 //: the three transforms whose values straddle zero (spec D16)
 const SIGNED_TRANSFORMS: ReadonlySet<Transform> = new Set(["real", "imag", "phase"]);
 
@@ -21,15 +27,32 @@ export function isSigned(transform: Transform): boolean {
   return SIGNED_TRANSFORMS.has(transform);
 }
 
-/** One component's complex values, or null if the component is not recorded. */
+/**
+ * One component's complex values, or null if the component is not recorded.
+ *
+ * ``TOTAL_COMPONENT`` returns the total electric-field magnitude as a real
+ * value (imaginary part zero): the Cartesian components are orthogonal, so
+ * ``|E|^2 = |Ex|^2 + |Ey|^2 + |Ez|^2``. Only the ``E`` components contribute.
+ */
 export function componentData(
   field: FieldPayload,
   component: string,
 ): { real: Float32Array; imag: Float32Array } | null {
-  const index = field.components.indexOf(component);
-  if (index < 0) return null;
   const [rows, cols] = field.grid;
   const count = rows * cols;
+  if (component === TOTAL_COMPONENT) {
+    const real = new Float32Array(count);
+    for (let i = 0; i < field.components.length; i += 1) {
+      if (!field.components[i].startsWith("E")) continue;
+      const re = decodeFloat32(field.real, i * count, count);
+      const im = decodeFloat32(field.imag, i * count, count);
+      for (let k = 0; k < count; k += 1) real[k] += re[k] * re[k] + im[k] * im[k];
+    }
+    for (let k = 0; k < count; k += 1) real[k] = Math.sqrt(real[k]);
+    return { real, imag: new Float32Array(count) };
+  }
+  const index = field.components.indexOf(component);
+  if (index < 0) return null;
   return {
     real: decodeFloat32(field.real, index * count, count),
     imag: decodeFloat32(field.imag, index * count, count),

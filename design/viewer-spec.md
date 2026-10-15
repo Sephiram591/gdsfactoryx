@@ -357,12 +357,25 @@ plain translucent glyph; once a field is shown, the glyph's translucent fill is
   `result.arrays.detector_states[name]` (R14 mode 1), or a result the user
   supplies (see *Supplying a result* below). Each detector's own array is shaded
   on its own plane — no cross-detector interpolation.
+- **The payload's axis order is (v, u).** `field_payload` drops the detector
+  plane's normal axis (whichever axis has extent 1) and sends the remaining two
+  transposed so the buffer is **row-major in (v, u)** — v is the plane's own
+  second axis (the vertical screen axis: `z` for an `xz` plane) and u its first
+  (`x`). `grid` is `[rows = len(v), cols = len(u)]`, so a wide xz plane sends
+  `[75, 450]` for a 450×75 phasor. Both viewports index the buffer row-major in
+  (v, u), and the 2D blit flips the raster so v row 0 lands at the low-v screen
+  edge; a u-major payload would render the field transposed.
 - **Per-detector display settings, editable in the explorer.** Each detector row
   on the **Detectors** tab gains a **display** group, one value each:
   - **`field_component`** — which component of the recorded field to plot, from
     the detector's own `components` (a `PhasorDetector` records the subset the
     user asked for; a `ModeOverlapDetector` always records all six `Ex, Ey, Ez,
-    Hx, Hy, Hz`). Default: the first component the detector recorded.
+    Hx, Hy, Hz`). Default: the first component the detector recorded. The list
+    also offers **`|E|`**, a pseudo-component: the total electric-field
+    magnitude, `sqrt(|Ex|² + |Ey|² + |Ez|²)`, computed from the recorded `E`
+    components (it is offered only when the result recorded any). It is derived
+    in the browser, not sent as a component of its own, and it composes with
+    every transform and ramp like any other component.
   - **`field_transform`** — one of **`real`, `imag`, `abs`, `phase`, `logabs`**.
     Default `abs`. `logabs` is `log10(abs(...))` (see *Log and the value floor*).
   - **`field_color_low`** / **`field_color_high`** — the two endpoint colors of
@@ -433,6 +446,13 @@ AC:
 - Changing a detector's `field_component` / `field_transform` /
   `field_color_low` / `field_color_high` / `field_opacity` re-shades its plane
   live, with no re-run and no kernel round-trip beyond the state patch (D10).
+- Selecting `|E|` shades the plane with `sqrt(|Ex|² + |Ey|² + |Ez|²)` from the
+  detector's recorded `E` components, through the same transforms and ramps as a
+  real component (checked in a test); it is offered only when the result
+  recorded at least one `E` component.
+- The payload's buffer is row-major in (v, u) with `grid = [len(v), len(u)]`, so
+  an xz plane's `grid` is taller-than-wide only if the plane is (checked in a
+  test): a transposed payload would draw the field rotated.
 - The overlay's alpha comes from the map alone, not from the field's intensity:
   a signed transform's value at the plane's midpoint is transparent at full
   `field_opacity`, and an `abs`/`logabs` value at the plane's low end is
@@ -1315,3 +1335,12 @@ R15 draws a detector's field on its plane. Two questions were open: what the
     the rectangle, the outline remains.
   - The 2D overlay **fades with the same gaussian as the ports** (R4), so a
     field fades in as its plane is approached.
+- 2026-10-14: R15 gains `|E|` and pins the payload's axis order.
+  - **`|E|`** joins `field_component` as a pseudo-component —
+    `sqrt(|Ex|² + |Ey|² + |Ez|²)` over the detector's recorded `E` components,
+    derived in the browser. It is offered only when the result recorded any `E`
+    component, and composes with every transform and ramp like a real component.
+  - The field payload's buffer is **row-major in (v, u)** with
+    `grid = [len(v), len(u)]`; `field_payload` drops the plane's normal axis and
+    transposes the rest. Both viewports read it that way and the 2D blit flips
+    the raster, so an xz plane's field no longer renders transposed.

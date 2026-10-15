@@ -118,20 +118,29 @@ def field_payload(result: Any, name: str, spec_id: str) -> dict[str, Any] | None
     if not components or phasor.shape[0] != len(components):
         # fall back to generic names so the field is still plottable
         components = [f"c{i}" for i in range(phasor.shape[0])]
-    # the grid axes, with the detector's normal axis (a singleton) dropped: the
-    # two in-plane extents are what the browser textures. The normal is not
-    # always last — an xz detector's is the middle axis — so the singleton is
-    # removed by value, not position.
-    in_plane = [int(v) for v in phasor.shape[1:] if v > 1]
+    # the two in-plane axes, with the detector's normal axis (a singleton)
+    # dropped. The normal is not always last — an xz detector's is the middle
+    # axis — so the singleton is found by value, not position. The axes run in
+    # stack order (x, y, z), which is (u, v) for every plane: the glyph's u is
+    # the lower of the two in-plane stack axes and v the higher (spec D11).
+    in_plane = [i for i in range(1, phasor.ndim) if phasor.shape[i] > 1]
     if len(in_plane) != 2:
         return None
-    real = np.ascontiguousarray(phasor.real, dtype=np.float32)
-    imag = np.ascontiguousarray(phasor.imag, dtype=np.float32)
+    # drop the normal axis, leaving (components, u, v) in stack order
+    plane = np.squeeze(phasor, axis=tuple(i for i in range(1, phasor.ndim) if i not in in_plane))
+    # The browser textures a plane row-major with the rows as v and the columns
+    # as u (the same order the 2D blit and the 3D ``DataTexture`` use), so the
+    # field is transposed to (components, v, u). Sending it in stack order would
+    # swap the axes of any non-square plane — a 450x75 xz plane would read as
+    # 75x450.
+    ordered = np.ascontiguousarray(np.swapaxes(plane, 1, 2))
+    real = np.ascontiguousarray(ordered.real, dtype=np.float32)
+    imag = np.ascontiguousarray(ordered.imag, dtype=np.float32)
     return {
         "id": spec_id,
         "name": name,
         "components": components,
-        "grid": [in_plane[0], in_plane[1]],
+        "grid": [int(ordered.shape[1]), int(ordered.shape[2])],
         "real": real.data,
         "imag": imag.data,
     }

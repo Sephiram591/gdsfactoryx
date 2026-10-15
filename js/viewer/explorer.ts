@@ -22,6 +22,7 @@ import type {
   StatePayload,
   TypeMeta,
 } from "./wire";
+import { TOTAL_COMPONENT } from "./fieldramp";
 
 export interface ExplorerCallbacks {
   onPatch(patch: Record<string, unknown>): void;
@@ -578,7 +579,10 @@ export class Explorer {
     const components = this.fieldComponents.get(row.root.dataset.name ?? "") ?? [];
     if (row.componentSelect) {
       const wanted = settings.field_component ?? "";
-      const options = ["", ...components];
+      // the recorded components plus |E|, the total electric-field magnitude
+      // (spec R15); it needs no separate result, just the E components
+      const hasE = components.some((name) => name.startsWith("E"));
+      const options = ["", ...components, ...(hasE ? [TOTAL_COMPONENT] : [])];
       if (row.componentSelect.options.length !== options.length) {
         row.componentSelect.replaceChildren(
           ...options.map((value) => {

@@ -29416,6 +29416,132 @@ var WebGLRenderer = class {
   }
 };
 
+// viewer/fieldramp.ts
+var TOTAL_COMPONENT = "|E|";
+var SIGNED_TRANSFORMS = /* @__PURE__ */ new Set(["real", "imag", "phase"]);
+function isSigned(transform) {
+  return SIGNED_TRANSFORMS.has(transform);
+}
+function componentData(field, component) {
+  const [rows, cols] = field.grid;
+  const count = rows * cols;
+  if (component === TOTAL_COMPONENT) {
+    const real = new Float32Array(count);
+    for (let i = 0; i < field.components.length; i += 1) {
+      if (!field.components[i].startsWith("E")) continue;
+      const re = decodeFloat32(field.real, i * count, count);
+      const im = decodeFloat32(field.imag, i * count, count);
+      for (let k = 0; k < count; k += 1) real[k] += re[k] * re[k] + im[k] * im[k];
+    }
+    for (let k = 0; k < count; k += 1) real[k] = Math.sqrt(real[k]);
+    return { real, imag: new Float32Array(count) };
+  }
+  const index = field.components.indexOf(component);
+  if (index < 0) return null;
+  return {
+    real: decodeFloat32(field.real, index * count, count),
+    imag: decodeFloat32(field.imag, index * count, count)
+  };
+}
+function transformValues(real, imag, transform) {
+  const out = new Float32Array(real.length);
+  for (let i = 0; i < real.length; i += 1) {
+    const re = real[i];
+    const im = imag[i];
+    switch (transform) {
+      case "real":
+        out[i] = re;
+        break;
+      case "imag":
+        out[i] = im;
+        break;
+      case "phase":
+        out[i] = Math.atan2(im, re);
+        break;
+      case "logabs":
+        out[i] = Math.log10(Math.hypot(re, im) + Number.MIN_VALUE);
+        break;
+      default:
+        out[i] = Math.hypot(re, im);
+    }
+  }
+  return out;
+}
+function valueRange(values, transform, logRange) {
+  let min = Infinity;
+  let max = -Infinity;
+  for (const value of values) {
+    if (value < min) min = value;
+    if (value > max) max = value;
+  }
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return [0, 1];
+  if (transform === "logabs") {
+    const floor = max - Math.abs(logRange);
+    if (min < floor) min = floor;
+  }
+  if (max <= min) max = min + 1e-12;
+  return [min, max];
+}
+function rampTexture(values, range, transform, low, high, opacity) {
+  const [min, max] = range;
+  const span = max - min;
+  const signed = isSigned(transform);
+  const bytes = new Uint8Array(values.length * 4);
+  for (let i = 0; i < values.length; i += 1) {
+    let t = span > 0 ? (values[i] - min) / span : 0;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    let r;
+    let g;
+    let b;
+    let a;
+    if (signed) {
+      r = mix(low[0], high[0], t);
+      g = mix(low[1], high[1], t);
+      b = mix(low[2], high[2], t);
+      a = Math.abs(2 * t - 1);
+    } else {
+      r = high[0];
+      g = high[1];
+      b = high[2];
+      a = t;
+    }
+    const alpha = a * opacity;
+    bytes[i * 4] = r;
+    bytes[i * 4 + 1] = g;
+    bytes[i * 4 + 2] = b;
+    bytes[i * 4 + 3] = Math.round(alpha * 255);
+  }
+  return bytes;
+}
+function parseColor(text) {
+  const match = /^#?([0-9a-f]{6})$/i.exec(text.trim());
+  if (!match) return [128, 128, 128];
+  const value = parseInt(match[1], 16);
+  return [value >> 16 & 255, value >> 8 & 255, value & 255];
+}
+function rampColor(t, transform, low, high) {
+  const clamped = t < 0 ? 0 : t > 1 ? 1 : t;
+  if (isSigned(transform)) {
+    return [
+      mix(low[0], high[0], clamped),
+      mix(low[1], high[1], clamped),
+      mix(low[2], high[2], clamped),
+      Math.abs(2 * clamped - 1)
+    ];
+  }
+  return [high[0], high[1], high[2], clamped];
+}
+function mix(from, to, t) {
+  return from + (to - from) * t;
+}
+function decodeFloat32(buffer, offset, count) {
+  const source = buffer instanceof ArrayBuffer ? buffer : buffer.buffer;
+  const base = buffer instanceof ArrayBuffer ? 0 : buffer.byteOffset;
+  const start = base + offset * 4;
+  if (start % 4 === 0) return new Float32Array(source, start, count);
+  return new Float32Array(source.slice(start, start + count * 4));
+}
+
 // viewer/explorer.ts
 var TABS = ["Layout / Ports", "Sources / Detectors", "Simulation"];
 var SOURCE_TYPES = [
@@ -29867,7 +29993,8 @@ var Explorer = class {
     const components = this.fieldComponents.get(row2.root.dataset.name ?? "") ?? [];
     if (row2.componentSelect) {
       const wanted = settings.field_component ?? "";
-      const options = ["", ...components];
+      const hasE = components.some((name) => name.startsWith("E"));
+      const options = ["", ...components, ...hasE ? [TOTAL_COMPONENT] : []];
       if (row2.componentSelect.options.length !== options.length) {
         row2.componentSelect.replaceChildren(
           ...options.map((value) => {
@@ -30335,120 +30462,6 @@ function emptyNote(text) {
   div.className = "gfx-note";
   div.textContent = text;
   return div;
-}
-
-// viewer/fieldramp.ts
-var SIGNED_TRANSFORMS = /* @__PURE__ */ new Set(["real", "imag", "phase"]);
-function isSigned(transform) {
-  return SIGNED_TRANSFORMS.has(transform);
-}
-function componentData(field, component) {
-  const index = field.components.indexOf(component);
-  if (index < 0) return null;
-  const [rows, cols] = field.grid;
-  const count = rows * cols;
-  return {
-    real: decodeFloat32(field.real, index * count, count),
-    imag: decodeFloat32(field.imag, index * count, count)
-  };
-}
-function transformValues(real, imag, transform) {
-  const out = new Float32Array(real.length);
-  for (let i = 0; i < real.length; i += 1) {
-    const re = real[i];
-    const im = imag[i];
-    switch (transform) {
-      case "real":
-        out[i] = re;
-        break;
-      case "imag":
-        out[i] = im;
-        break;
-      case "phase":
-        out[i] = Math.atan2(im, re);
-        break;
-      case "logabs":
-        out[i] = Math.log10(Math.hypot(re, im) + Number.MIN_VALUE);
-        break;
-      default:
-        out[i] = Math.hypot(re, im);
-    }
-  }
-  return out;
-}
-function valueRange(values, transform, logRange) {
-  let min = Infinity;
-  let max = -Infinity;
-  for (const value of values) {
-    if (value < min) min = value;
-    if (value > max) max = value;
-  }
-  if (!Number.isFinite(min) || !Number.isFinite(max)) return [0, 1];
-  if (transform === "logabs") {
-    const floor = max - Math.abs(logRange);
-    if (min < floor) min = floor;
-  }
-  if (max <= min) max = min + 1e-12;
-  return [min, max];
-}
-function rampTexture(values, range, transform, low, high, opacity) {
-  const [min, max] = range;
-  const span = max - min;
-  const signed = isSigned(transform);
-  const bytes = new Uint8Array(values.length * 4);
-  for (let i = 0; i < values.length; i += 1) {
-    let t = span > 0 ? (values[i] - min) / span : 0;
-    t = t < 0 ? 0 : t > 1 ? 1 : t;
-    let r;
-    let g;
-    let b;
-    let a;
-    if (signed) {
-      r = mix(low[0], high[0], t);
-      g = mix(low[1], high[1], t);
-      b = mix(low[2], high[2], t);
-      a = Math.abs(2 * t - 1);
-    } else {
-      r = high[0];
-      g = high[1];
-      b = high[2];
-      a = t;
-    }
-    const alpha = a * opacity;
-    bytes[i * 4] = r;
-    bytes[i * 4 + 1] = g;
-    bytes[i * 4 + 2] = b;
-    bytes[i * 4 + 3] = Math.round(alpha * 255);
-  }
-  return bytes;
-}
-function parseColor(text) {
-  const match = /^#?([0-9a-f]{6})$/i.exec(text.trim());
-  if (!match) return [128, 128, 128];
-  const value = parseInt(match[1], 16);
-  return [value >> 16 & 255, value >> 8 & 255, value & 255];
-}
-function rampColor(t, transform, low, high) {
-  const clamped = t < 0 ? 0 : t > 1 ? 1 : t;
-  if (isSigned(transform)) {
-    return [
-      mix(low[0], high[0], clamped),
-      mix(low[1], high[1], clamped),
-      mix(low[2], high[2], clamped),
-      Math.abs(2 * clamped - 1)
-    ];
-  }
-  return [high[0], high[1], high[2], clamped];
-}
-function mix(from, to, t) {
-  return from + (to - from) * t;
-}
-function decodeFloat32(buffer, offset, count) {
-  const source = buffer instanceof ArrayBuffer ? buffer : buffer.buffer;
-  const base = buffer instanceof ArrayBuffer ? 0 : buffer.byteOffset;
-  const start = base + offset * 4;
-  if (start % 4 === 0) return new Float32Array(source, start, count);
-  return new Float32Array(source.slice(start, start + count * 4));
 }
 
 // viewer/glyphs.ts
@@ -34831,7 +34844,7 @@ var Section2D = class {
     ctx.save();
     ctx.globalAlpha = alpha * settings.field_opacity;
     ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(image, x0, y0, x1 - x0, y1 - y0);
+    ctx.drawImage(image, x0, y1, x1 - x0, y0 - y1);
     ctx.restore();
   }
   fieldCanvas(cols, rows) {

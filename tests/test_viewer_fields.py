@@ -107,6 +107,10 @@ def test_field_payload_drops_the_normal_axis_wherever_it_sits() -> None:
     # the xz plane is the full volume cross-section (18 x 3 um at 0.2 um), and
     # neither in-plane extent is a singleton
     assert rows > 1 and cols > 1
+    # the axes are (v, u) = (z, x), not stack order: the plane is far wider in x
+    # than tall in z, so the column count (u = x) must exceed the row count
+    # (v = z). Sending stack order would swap them and stretch the raster.
+    assert cols > rows
     real = np.frombuffer(entry["real"], dtype=np.float32)
     assert real.size == rows * cols * len(entry["components"])
 

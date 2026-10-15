@@ -63,6 +63,44 @@ test("logabs floors the range log_range decades below the plane's maximum", () =
   assert.equal(min, -6, "the floor is 6 decades below the maximum");
 });
 
+test("|E| is the total E magnitude over the recorded E components", () => {
+  // one cell, Ex = 3, Ey = 4 (real), Ez = 0: |E| = 5. Hx is recorded too and
+  // must not contribute.
+  const components = ["Ex", "Ey", "Ez", "Hx"];
+  const real = new Float32Array([3, 4, 0, 100]);
+  const imag = new Float32Array([0, 0, 0, 0]);
+  const field = {
+    id: "d", name: "d", components,
+    grid: [1, 1],
+    real: real.buffer, imag: imag.buffer,
+  };
+  const total = ramp.componentData(field, ramp.TOTAL_COMPONENT);
+  assert.equal(total.real[0], 5, "sqrt(3^2 + 4^2) = 5");
+  assert.equal(total.imag[0], 0, "the magnitude is real");
+});
+
+test("|E| carries the imaginary part of each component", () => {
+  // Ex = 3j, Ey = 4 (real), Ez = 0: |E| = 5
+  const real = new Float32Array([0, 4, 0]);
+  const imag = new Float32Array([3, 0, 0]);
+  const field = {
+    id: "d", name: "d", components: ["Ex", "Ey", "Ez"],
+    grid: [1, 1],
+    real: real.buffer, imag: imag.buffer,
+  };
+  const total = ramp.componentData(field, ramp.TOTAL_COMPONENT);
+  assert.equal(total.real[0], 5);
+});
+
+test("a component the detector did not record is null", () => {
+  const field = {
+    id: "d", name: "d", components: ["Ex"],
+    grid: [1, 1],
+    real: new Float32Array([1]).buffer, imag: new Float32Array([0]).buffer,
+  };
+  assert.equal(ramp.componentData(field, "Ey"), null);
+});
+
 test("rampTexture honors the map's alpha, scaled by opacity", () => {
   const values = new Float32Array([0, 0.5, 1]);
   const range = [0, 1];

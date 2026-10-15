@@ -320,7 +320,10 @@ export class Section2D {
     }
     image.getContext("2d")!.putImageData(pixels, 0, 0);
 
-    // the rectangle's two corners in the section's local (u, v)
+    // the rectangle's two corners in the section's local (u, v). The raster is
+    // row-major with rows as v and columns as u (spec R15), and the plane's v=0
+    // edge is its bottom, so the image is drawn with row 0 at ``y1`` (the low-v
+    // screen edge) and a negative height to flip it upright.
     const [au, av] = { xy: [0, 1], xz: [0, 2], yz: [1, 2] }[this.payload!.plane];
     const cu = glyph.center[au];
     const cv = glyph.center[av];
@@ -329,7 +332,7 @@ export class Section2D {
     ctx.save();
     ctx.globalAlpha = alpha * settings.field_opacity;
     ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(image, x0, y0, x1 - x0, y1 - y0);
+    ctx.drawImage(image, x0, y1, x1 - x0, y0 - y1);
     ctx.restore();
   }
 
