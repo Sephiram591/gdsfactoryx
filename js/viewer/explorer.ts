@@ -624,7 +624,10 @@ export class Explorer {
   // ------------------------------------------------------------------ settings
 
   private buildSimForm(): { rows: HTMLElement[]; note: HTMLElement } {
-    const note = emptyNote("No progress or cancel; the run ends on its own (§2).");
+    const note = emptyNote(
+      "A run streams its progress here; press the run button again to stop it "
+      + "(spec R14, D17).",
+    );
     const fields = document.createElement("div");
     fields.className = "gfx-spec-fields";
     // short labels; the descriptor and units ride along as tooltips (spec R13)
@@ -661,6 +664,10 @@ export class Explorer {
     add("log_range", "log range", this.numberControl(
       6, 1, (value) => this.callbacks.onSettings({ log_range: value }), true,
     ), "the logabs color ramp's floor, in decades below the plane's maximum");
+    add("keep_partial", "keep partial run", this.boolControl(
+      false, (value) => this.callbacks.onSettings({ keep_partial: value }),
+    ), "when a stopped run keeps the fields its detectors recorded so far, "
+      + "instead of discarding them (spec D17)");
     return { rows: [fields, note], note };
   }
 
@@ -673,6 +680,7 @@ export class Explorer {
       // the control's write() divides by its scale, so pass kernel units here
       time_fs: settings.time_s,
       log_range: settings.log_range,
+      keep_partial: settings.keep_partial,
     };
     for (const [key, control] of this.simFields) {
       if (key === "port_size_mult" || key === "boundary_offset") continue;
@@ -767,6 +775,21 @@ export class Explorer {
         const shown =
           value === null || value === undefined ? "" : String(displayNumber(Number(value) / scale));
         if (document.activeElement !== input && input.value !== shown) input.value = shown;
+      },
+      setDisabled(value) {
+        input.disabled = value;
+      },
+    };
+  }
+
+  /** A checkbox (spec R13): a boolean simulation setting. */
+  private boolControl(initial: boolean, onChange: (value: boolean) => void): Control {
+    const input = checkbox(initial, onChange);
+    return {
+      element: input,
+      write(value) {
+        const next = Boolean(value);
+        if (input.checked !== next) input.checked = next;
       },
       setDisabled(value) {
         input.disabled = value;

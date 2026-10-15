@@ -17,14 +17,17 @@ Glyphs are computed from a spec and the port frame (spec D11): the same frame
 
 from __future__ import annotations
 
+import functools
 import math
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
 
 __all__ = [
     "TYPES",
+    "CancelCondition",
     "ObjectSpec",
     "RunResult",
+    "RunStopped",
     "SimSettings",
     "build_objects",
     "default_detector_spec",
@@ -216,6 +219,10 @@ class SimSettings:
     #: (spec D16, Q22). One value for every detector's overlay; the bottom of the
     #: ``logabs`` color ramp, so a true zero maps to the floor, not to ``-inf``.
     log_range: float = 6.0
+    #: whether a run the user stops keeps its partial result (spec D17). When
+    #: False (the default) a stopped run is discarded and the previous result
+    #: stays on screen; when True its detectors' partial fields are shown.
+    keep_partial: bool = False
 
     def to_wire(self) -> dict[str, Any]:
         """The settings as JSON for the browser (spec R13)."""
@@ -228,6 +235,7 @@ class SimSettings:
             "time_s": float(self.time_s),
             "boundary_offset": [float(v) for v in self.boundary_offset],
             "log_range": float(self.log_range),
+            "keep_partial": bool(self.keep_partial),
         }
 
     @classmethod
@@ -261,6 +269,7 @@ class SimSettings:
             time_s=time_s,
             boundary_offset=offset,
             log_range=log_range,
+            keep_partial=bool(data.get("keep_partial", defaults.keep_partial)),
         )
 
 
@@ -276,6 +285,93 @@ class RunResult(NamedTuple):
     objects: Any
     arrays: Any
     config: Any
+
+
+class RunStopped(Exception):
+    """A mode-1 run ended because the user asked it to stop (spec D17).
+
+    Raised when a cancelled run's partial result is being *discarded* (the
+    default). When the settings say to keep the partial run, :func:`run` returns
+    its :class:`RunResult` instead, and the widget adopts the partial fields.
+    """
+
+
+def _stopping_condition_type() -> Any:
+    """The fdtdx ``StoppingCondition`` base, imported lazily (spec C3).
+
+    ``fdtdx`` is an optional, heavy import, so the condition's base class is
+    resolved only when a cancellable run is actually set up.
+    """
+    from fdtdx.fdtd.stop_conditions import StoppingCondition
+
+    return StoppingCondition
+
+
+@functools.lru_cache(maxsize=1)
+def _cancel_condition_class() -> Any:
+    """The ``CancelCondition`` class, built once (spec D17).
+
+    Defining it lazily keeps ``fdtdx`` off this module's import path (spec C3);
+    caching the class keeps its identity stable across runs, so JAX sees the same
+    traced computation and does not recompile.
+    """
+    import jax
+    import jax.numpy as jnp
+    from fdtdx.core.jax.pytrees import autoinit, frozen_field
+
+    base = _stopping_condition_type()
+
+    @autoinit
+    class CancelCondition(base):  # type: ignore[misc, valid-type]
+        """Time limit plus a cooperative host-flag stop (spec D17)."""
+
+        max_steps: int = frozen_field(default=0)
+        cancel_flag: Any = frozen_field(default=None)
+
+        def setup(self, state: Any, config: Any, objects: Any) -> Any:
+            return self.aset("max_steps", config.time_steps_total, create_new_ok=True)
+
+        def _validate(self, state: Any, config: Any, objects: Any) -> None:
+            pass
+
+        def __call__(self, state: Any, config: Any, objects: Any) -> jax.Array:
+            curr, _ = state
+
+            def _host_read(step: Any) -> Any:
+                flag_ = self.cancel_flag
+                return bool(flag_ is not None and flag_.is_set())
+
+            stop = jax.experimental.io_callback(
+                _host_read,
+                result_shape_dtypes=jax.ShapeDtypeStruct((), jnp.bool_),
+                step=curr,
+                ordered=True,
+            )
+            return jnp.logical_and(self.max_steps > curr, jnp.logical_not(stop))
+
+    return CancelCondition
+
+
+def make_cancel_condition(flag: Any) -> Any:
+    """A ``StoppingCondition`` that ends the loop when ``flag`` is set (spec D17).
+
+    The loop's own condition is the only place a stop can be applied *exactly*
+    and still return the arrays: raising out of the ``progress_callback``
+    unwinds ``run_fdtd`` before it returns, so no partial result survives. The
+    condition therefore reproduces ``TimeStepCondition``'s time limit itself
+    (a custom condition *replaces* the default, so the run would otherwise never
+    end) and ANDs in a per-step read of the host flag via ``io_callback``. fdtdx
+    only ever uses ``io_callback`` in the loop's body; using it in the condition
+    is legal and makes the stop land on the exact requested step.
+
+    Args:
+        flag: a ``threading.Event`` (or anything with ``is_set()``); it is read
+            on the host, never traced, so it may be any Python object.
+
+    Returns:
+        A ``StoppingCondition`` instance, ready to pass to ``fdtdx.run_fdtd``.
+    """
+    return _cancel_condition_class()(cancel_flag=flag)
 
 
 # ------------------------------------------------------------------- defaults
@@ -428,7 +524,14 @@ def export(stack: Any, state: Any) -> tuple[list[Any], Any, list[Any]]:
 
 
 def run(
-    stack: Any, state: Any, *, key: Any = None, progress: Any = None, phase: Any = None
+    stack: Any,
+    state: Any,
+    *,
+    key: Any = None,
+    progress: Any = None,
+    phase: Any = None,
+    cancel: Any = None,
+    keep_partial: bool = False,
 ) -> RunResult:
     """Places and runs the simulation in the kernel (spec R14 mode 1).
 
@@ -456,21 +559,40 @@ def run(
             advances (spec D15). When given, fdtdx's own tqdm bar is turned off,
             since the caller is drawing the progress instead.
         phase: an optional ``callable(name)`` called once per phase above.
+        cancel: an optional ``threading.Event``; when set, the run stops at the
+            next step (spec D17). Stopping through the loop's own condition
+            means ``run_fdtd`` returns normally, so the detectors' partial
+            readings survive — see ``keep_partial``.
+        keep_partial: when True, a cancelled run returns its partial
+            :class:`RunResult` instead of raising :class:`RunStopped`. When
+            False (the default), a cancelled run raises :class:`RunStopped`, so
+            the caller discards it.
+
+    Raises:
+        RunStopped: a cancelled run whose partial result is not kept.
     """
     import fdtdx
     import jax
 
     from gdsfactory.fdtdx_stack import apply_stack, init_stack_params
 
+    def _check_cancel() -> None:
+        # a stop can land between phases too, not just between steps (spec D17)
+        if cancel is not None and cancel.is_set():
+            raise RunStopped("the run was stopped")
+
     def _phase(name: str) -> None:
         if phase is not None:
             phase(name)
 
+    _check_cancel()
     _phase("placing")
     objects, config, constraints = build_objects(stack, state)
+    _check_cancel()
     key = jax.random.PRNGKey(0) if key is None else key
     objects, arrays, params, config, _ = fdtdx.place_objects(objects, config, constraints, key)
     arrays, objects, _ = apply_stack(arrays, objects, {**params, **init_stack_params(objects)}, key)
+    _check_cancel()
 
     # the first time step implies compilation is done, so the phase flips there
     stepping = False
@@ -487,6 +609,13 @@ def run(
     # to see the flip into "stepping" even when nobody draws a fraction
     use_callback = progress is not None or phase is not None
 
+    stopping_condition = None
+    if cancel is not None:
+        stopping_condition = make_cancel_condition(cancel).setup(
+            (jax.numpy.asarray(0, dtype=jax.numpy.int32), arrays), config, objects
+        )
+
+    _check_cancel()
     _phase("compiling")
     _, arrays = fdtdx.run_fdtd(
         arrays=arrays,
@@ -495,7 +624,12 @@ def run(
         key=key,
         show_progress=progress is None,
         progress_callback=_progress if use_callback else None,
+        stopping_condition=stopping_condition,
     )
+    # a cancelled run exits the loop early, so the arrays hold the detectors'
+    # partial readings; honour ``keep_partial`` (spec D17)
+    if cancel is not None and cancel.is_set() and not keep_partial:
+        raise RunStopped("the run was stopped")
     return RunResult(objects=objects, arrays=arrays, config=config)
 
 

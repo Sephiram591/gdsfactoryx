@@ -25,9 +25,6 @@ stable: never renumber, only add. Item status is one of *Proposed*, *Accepted*,
 - Full-chip GDS viewing (KLayout / kweb already do this).
 - The solver's voxelized / subpixel-averaged view (deferred to R7).
 - Any sampled or voxelized geometry in the viewer itself (C2).
-- Cancelling a run from the widget; a run started from the widget (R14 mode 1)
-  blocks until it returns. It *does* show a progress bar (D15), but it is not
-  cancellable.
 - _TBD_
 
 ## 3. Workflows
@@ -333,7 +330,8 @@ increasing in separation from the session:
 
 1. **In the widget.** A "Run" action places and runs in the kernel the widget
    already occupies (C1: on the compute node) and returns the results. It
-   **blocks** until done; there is no cancel (§2). It **does** report progress:
+   **blocks** the worker thread until done, and the same button **stops** it
+   while it is in flight (D17). It **does** report progress:
    fdtdx's `run_fdtd` is driven with a `progress_callback`, and the widget shows
    a progress bar (D15) beside a label naming the current phase. The kernel's
    allocation must be sized for the run — a
@@ -364,6 +362,9 @@ AC:
   the setup while in flight, and mirrors fdtdx's `progress_callback` into the
   `progress` trait, along with the run's phase into the `phase` trait (both
   checked in a test).
+- Mode 1's run can be stopped (D17): a stop ends the run, unlocks the setup, and
+  either discards the partial result (the default) or keeps it, according to the
+  settings (checked in a test).
 
 ### R15. Detector field overlays: *Must* (promoted from R8, 2026-10-14)
 
@@ -757,7 +758,8 @@ by returning launch code. All three come from one prepared setup, so the design
 question is only how the setup travels to the run.
 
 - **Mode 1 (in the widget).** Run in the kernel the widget occupies (D10), on the
-  compute node (C1). Blocks; no cancel. Progress is streamed from fdtdx's
+  compute node (C1). Blocks the worker thread; the Run button toggles to Stop
+  while it is in flight (D17). Progress is streamed from fdtdx's
   `progress_callback` (D15), along with the run's phase.
 - **Mode 2 (export).** Return the prepared `objects`, `config` and `constraints`
   as Python values.
@@ -915,9 +917,15 @@ from that, both settled here.
   inside the same callback on its first call). The widget mirrors it into a
   synced `phase` trait (`""` when idle) and the browser shows it as a short
   label **to the left of the bar**.
+- **The run can be stopped.** Run **becomes** Stop while a run is in flight (the
+  icon and title swap in place). Pressing it sets a cancel flag the worker
+  watches; the button disables and the phase label reads **"stopping…"** until
+  the worker unwinds and clears `running`. The stop lands at the next time step
+  or, if the run is still placing or compiling, at the next phase boundary — see
+  D17 for the mechanism and the partial-result setting.
 - **Implemented in M4** (`gdsfactory/viewer/widget.py`, `sim.py`;
   `js/viewer/index.ts`, `style.css`).
-- **Relates to R14, D10, D12, Q20.**
+- **Relates to R14, D10, D12, D17, Q20.**
 
 ---
 
@@ -1003,6 +1011,63 @@ R15 draws a detector's field on its plane. Two questions were open: what the
 
 **Implemented in M4** (`js/viewer/section.ts`, `glyphs.ts`, `index.ts`;
 `gdsfactory/viewer/fields.py`, `payload.py`). **Relates to R15, R12, R4, Q21, Q22.**
+
+---
+
+### D17. Stopping is a cooperative loop-condition exit: *Accepted* (2026-10-15)
+
+D15 streams progress from inside the run; the natural place to *abort* one is the
+same callback, by raising from it. That works — the raise propagates out of the
+traced JAX loop — but it **cannot produce a partial result**: the raise unwinds
+the loop *before* `run_fdtd` returns, so no arrays come back. Since the user
+wants a setting to *keep* a stopped run's partial fields (below), the stop goes
+through fdtdx's own loop condition instead.
+
+- **Decision — stop via `stopping_condition`, not `progress_callback`.** fdtdx's
+  `run_fdtd(..., stopping_condition=...)` takes a `StoppingCondition` whose
+  `__call__(state, config, objects)` returns whether to keep looping. That is the
+  `eqxi.while_loop`'s own condition, so ending it is a **normal loop exit**:
+  `run_fdtd` returns the arrays, and the detectors' readings survive up to the
+  stopping step. This is what makes `keep_partial` meaningful.
+- **Exact, at one host read per step.** `CancelCondition` ANDs in
+  `jax.experimental.io_callback(lambda step: flag.is_set(), ...)` with
+  `ordered=True`. fdtdx only ever uses `io_callback` in the loop's *body*; using
+  it in the *condition* is legal and makes the stop land on the exact requested
+  step, with no coarse polling latency. **Verified by probe** on CPU (a flag set
+  mid-run at step 5 stopped the loop at step 12; pre-set flags at 0 and 7 stopped
+  at those exact steps). **Benchmarked** on F1 on an L40S (10 490 steps, best of
+  3): the subclass itself costs nothing (−0.0%), and the per-step host read costs
+  **+0.6%** (271.5 s → 272.1 s), so no coarse-modulus gating is needed.
+- **A custom condition replaces the default, so it reproduces the time limit.**
+  `setup()` fills `max_steps` from `config.time_steps_total` (as fdtdx's own
+  `EnergyThresholdCondition` does) and `__call__` returns
+  `max_steps > curr and not stop`. Without this the run would never end.
+  `run_fdtd` raises `NotImplementedError` if a custom condition is combined with
+  `config.gradient_config`; the viewer's config leaves it unset, so this is safe.
+- **Stops between phases too.** The condition covers `stepping`. For `placing`
+  and `compiling`, `sim.run` checks the flag at each boundary inside placement
+  (top of the run, after `build_objects`, after `apply_stack`) and just before
+  `run_fdtd`, raising `RunStopped`. So a stop lands promptly in any phase.
+- **The flag is a `threading.Event`, read on the host.** It is a frozen field on
+  the condition and is never traced, so it may be any Python object with
+  `is_set()`. `_cancel_condition_class()` builds and caches the class once, so
+  JAX sees the same traced computation across runs and does not recompile.
+- **`RunStopped` is the discard contract.** `sim.run(..., cancel=flag,
+  keep_partial=False)` raises `RunStopped` after `run_fdtd` returns; the widget
+  restores the *previous* `last_result` (snapshotted before the run cleared it),
+  so its field overlays stay on screen, and reports `{"status": "stopped"}`.
+  With `keep_partial=True` the run returns its `RunResult` normally and the
+  widget adopts the partial fields as a `"done"` result.
+- **The stop is a trait, and the button is a toggle.** A synced `stopping` bool
+  drives the button: disabled and reading "stopping…" while true. `stop()` is
+  idempotent, a no-op when no run is in flight, and never clears `running` — the
+  worker's `finally` owns that, so the widget never claims a run has ended before
+  it has. A new run gets a fresh `Event`.
+- **The partial-result setting** is `SimSettings.keep_partial` (default `False`),
+  exposed in the Simulation tab as "keep partial run".
+- **Implemented in M4** (`gdsfactory/viewer/sim.py`, `widget.py`;
+  `js/viewer/index.ts`, `explorer.ts`, `wire.ts`).
+- **Relates to R14, D12, D15, R13.**
 
 ---
 
@@ -1397,3 +1462,21 @@ R15 draws a detector's field on its plane. Two questions were open: what the
     collapse twisty rather than the remove button, so collapsing and expanding
     a source/detector row froze while a run was in flight. The lock now targets
     the remove button directly (D15, R12).
+- 2026-10-15: the 2D field blit's vertical mirror, and the stop button.
+  - The 2D detector field was drawn with a **negative** `drawImage` height, which
+    Chromium does not treat as a flip: it normalises the rect and draws the raster
+    unflipped, so row 0 (the low-`v` row) landed at the high-`v` screen edge and
+    every field in the 2D panels was mirrored vertically. The blit now translates
+    to the rect's low-`v` corner and flips `y` in the transform, drawing with a
+    positive height. 3D was unaffected (`DataTexture.flipY = false` with
+    `PlaneGeometry`'s `uv.y = 0` at the low-`v` edge). Guarded by
+    `js/viewer/sectionblit.test.mjs` (R15, D16).
+  - Added **D17**: a mode-1 run can be stopped, via fdtdx's `stopping_condition`
+    rather than by raising from `progress_callback` — only a normal loop exit
+    returns the arrays, which is what lets a stopped run keep its partial fields.
+    The Run button toggles to Stop in place, greys out and reads "stopping…" until
+    the worker unwinds, and the stop lands at the next time step or phase
+    boundary. Added the `keep_partial` simulation setting (default: discard, and
+    the previous result's overlays stay on screen) and the `stopping` trait.
+    Dropped §2's "Cancelling a run from the widget" non-goal, and updated R14
+    mode 1, its AC, D12 and D15 (R13, R14, D15).

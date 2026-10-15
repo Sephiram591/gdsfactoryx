@@ -377,6 +377,8 @@ def _slow_run(monkeypatch: pytest.MonkeyPatch, seconds: float = 0.6) -> None:
         key: Any = None,
         progress: Any = None,
         phase: Any = None,
+        cancel: Any = None,
+        keep_partial: bool = False,
     ) -> Any:
         time.sleep(seconds)
         return _FakeResult()
@@ -466,6 +468,8 @@ def test_run_reports_a_failure(monkeypatch: pytest.MonkeyPatch) -> None:
         key: Any = None,
         progress: Any = None,
         phase: Any = None,
+        cancel: Any = None,
+        keep_partial: bool = False,
     ) -> Any:
         raise RuntimeError("no GPU")
 
@@ -522,6 +526,8 @@ def test_run_forwards_fdtdx_progress(monkeypatch: pytest.MonkeyPatch) -> None:
         key: Any = None,
         progress: Any = None,
         phase: Any = None,
+        cancel: Any = None,
+        keep_partial: bool = False,
     ) -> Any:
         assert progress is not None, "the widget must pass a progress callback (spec D15)"
         progress(1, 4)
@@ -614,6 +620,8 @@ def test_run_mirrors_the_phase_into_the_trait(monkeypatch: pytest.MonkeyPatch) -
         key: Any = None,
         progress: Any = None,
         phase: Any = None,
+        cancel: Any = None,
+        keep_partial: bool = False,
     ) -> Any:
         assert phase is not None, "the widget must pass a phase callback (spec D15)"
         phase("compiling")
@@ -631,6 +639,121 @@ def test_run_mirrors_the_phase_into_the_trait(monkeypatch: pytest.MonkeyPatch) -
     assert seen == ["compiling", "stepping"]
     # ...and it is cleared once the run finishes
     assert viewer.phase == ""
+
+
+# --------------------------------------------------------- D17: stopping a run
+
+
+def _stub_pipeline(monkeypatch: pytest.MonkeyPatch, *, on_step: Any = None) -> dict[str, Any]:
+    """Stubs the placement pipeline, leaving ``run_fdtd``'s kwargs observable.
+
+    Returns a dict that ``run_fdtd``'s replacement fills with the kwargs it was
+    called with, so a test can assert on the stopping condition.
+    """
+    import fdtdx
+
+    captured: dict[str, Any] = {}
+
+    def fake_run_fdtd(*, arrays: Any, objects: Any, config: Any, key: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        if on_step is not None:
+            on_step()
+        return None, arrays
+
+    monkeypatch.setattr(fdtdx, "run_fdtd", fake_run_fdtd)
+    monkeypatch.setattr(sim, "build_objects", lambda _stack, _state: ([], _TimeConfig(), []))
+    monkeypatch.setattr(
+        fdtdx, "place_objects", lambda *_a, **_k: (None, None, {}, _TimeConfig(), None)
+    )
+
+    from gdsfactory import fdtdx_stack
+
+    monkeypatch.setattr(
+        fdtdx_stack, "apply_stack", lambda _arrays, _objects, _params, _key: (None, None, None)
+    )
+    monkeypatch.setattr(fdtdx_stack, "init_stack_params", lambda _objects: {})
+    return captured
+
+
+def test_cancel_condition_stops_at_the_flag() -> None:
+    """D17: the condition keeps going until the flag is set, then stops."""
+    import jax.numpy as jnp
+
+    flag = threading.Event()
+    condition = sim.make_cancel_condition(flag).setup((jnp.asarray(0), None), _TimeConfig(), None)
+
+    def running(step: int) -> bool:
+        return bool(condition((jnp.asarray(step, dtype=jnp.int32), None), _TimeConfig(), None))
+
+    assert running(0) is True
+    flag.set()
+    assert running(1) is False
+
+
+def test_cancel_condition_reproduces_the_time_limit() -> None:
+    """D17: a custom condition replaces the default, so it must end the run itself."""
+    import jax.numpy as jnp
+
+    flag = threading.Event()
+    condition = sim.make_cancel_condition(flag).setup((jnp.asarray(0), None), _TimeConfig(), None)
+
+    def running(step: int) -> bool:
+        return bool(condition((jnp.asarray(step, dtype=jnp.int32), None), _TimeConfig(), None))
+
+    assert running(_TimeConfig.time_steps_total - 1) is True
+    assert running(_TimeConfig.time_steps_total) is False
+
+
+def test_run_passes_no_condition_when_not_cancellable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D17: an ordinary run is unchanged — no condition, so no per-step host read."""
+    captured = _stub_pipeline(monkeypatch)
+    sim.run(object(), object())
+    assert captured["stopping_condition"] is None
+
+
+def test_run_passes_a_condition_when_cancellable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D17: a cancellable run hands fdtdx the flag-reading condition."""
+    captured = _stub_pipeline(monkeypatch)
+    flag = threading.Event()
+    sim.run(object(), object(), cancel=flag)
+    condition = captured["stopping_condition"]
+    assert condition is not None
+    assert condition.cancel_flag is flag
+
+
+def test_a_stop_during_placing_raises_at_the_next_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D17: a stop lands between phases, not only between time steps."""
+    flag = threading.Event()
+
+    def stop_during_build(_stack: Any, _state: Any) -> Any:
+        flag.set()
+        return [], object(), []
+
+    monkeypatch.setattr(sim, "build_objects", stop_during_build)
+
+    with pytest.raises(sim.RunStopped):
+        sim.run(object(), object(), cancel=flag)
+
+
+def test_a_discarded_stop_raises_and_a_kept_one_returns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D17: ``keep_partial`` decides between raising and returning the arrays."""
+    flag = threading.Event()
+    captured = _stub_pipeline(monkeypatch, on_step=flag.set)
+
+    with pytest.raises(sim.RunStopped):
+        sim.run(object(), object(), cancel=flag)
+
+    flag.clear()
+    result = sim.run(object(), object(), cancel=flag, keep_partial=True)
+    assert isinstance(result, sim.RunResult)
+
+
+class _TimeConfig:
+    """The two ``config`` fields the cancel condition reads (spec D17)."""
+
+    time_steps_total = 10
 
 
 # ------------------------------------------------------------------- helpers

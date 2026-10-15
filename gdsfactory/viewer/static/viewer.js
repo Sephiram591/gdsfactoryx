@@ -30025,7 +30025,9 @@ var Explorer = class {
   }
   // ------------------------------------------------------------------ settings
   buildSimForm() {
-    const note = emptyNote("No progress or cancel; the run ends on its own (\xA72).");
+    const note = emptyNote(
+      "A run streams its progress here; press the run button again to stop it (spec R14, D17)."
+    );
     const fields = document.createElement("div");
     fields.className = "gfx-spec-fields";
     const add = (key, labelText, control, hint) => {
@@ -30075,6 +30077,10 @@ var Explorer = class {
       (value) => this.callbacks.onSettings({ log_range: value }),
       true
     ), "the logabs color ramp's floor, in decades below the plane's maximum");
+    add("keep_partial", "keep partial run", this.boolControl(
+      false,
+      (value) => this.callbacks.onSettings({ keep_partial: value })
+    ), "when a stopped run keeps the fields its detectors recorded so far, instead of discarding them (spec D17)");
     return { rows: [fields, note], note };
   }
   renderSettings(settings) {
@@ -30085,7 +30091,8 @@ var Explorer = class {
       resolution_um: settings.resolution_um,
       // the control's write() divides by its scale, so pass kernel units here
       time_fs: settings.time_s,
-      log_range: settings.log_range
+      log_range: settings.log_range,
+      keep_partial: settings.keep_partial
     };
     for (const [key, control] of this.simFields) {
       if (key === "port_size_mult" || key === "boundary_offset") continue;
@@ -30161,6 +30168,20 @@ var Explorer = class {
       write(value) {
         const shown = value === null || value === void 0 ? "" : String(displayNumber(Number(value) / scale));
         if (document.activeElement !== input && input.value !== shown) input.value = shown;
+      },
+      setDisabled(value) {
+        input.disabled = value;
+      }
+    };
+  }
+  /** A checkbox (spec R13): a boolean simulation setting. */
+  boolControl(initial, onChange) {
+    const input = checkbox(initial, onChange);
+    return {
+      element: input,
+      write(value) {
+        const next = Boolean(value);
+        if (input.checked !== next) input.checked = next;
       },
       setDisabled(value) {
         input.disabled = value;
@@ -34613,6 +34634,9 @@ var AXIS_NAME_PX = 16;
 var PLANE_FADE_CUTOFF = 3;
 var PORT_FILL_ALPHA = 0.25;
 var GLYPH_CUT_HALF = 0.5;
+function fieldBlit(x0, y1, x1, y0) {
+  return { translate: [x0, y1], scale: [1, -1], dest: [0, 0, x1 - x0, y1 - y0] };
+}
 var Section2D = class {
   constructor(meta, onPortSelect) {
     this.meta = meta;
@@ -34852,10 +34876,13 @@ var Section2D = class {
     const cv = glyph.center[av];
     const [x0, y1] = this.project(cu - glyph.u_half, cv - glyph.v_half);
     const [x1, y0] = this.project(cu + glyph.u_half, cv + glyph.v_half);
+    const blit = fieldBlit(x0, y1, x1, y0);
     ctx.save();
     ctx.globalAlpha = alpha * settings.field_opacity;
     ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(image, x0, y1, x1 - x0, y0 - y1);
+    ctx.translate(blit.translate[0], blit.translate[1]);
+    ctx.scale(blit.scale[0], blit.scale[1]);
+    ctx.drawImage(image, blit.dest[0], blit.dest[1], blit.dest[2], blit.dest[3]);
     ctx.restore();
   }
   fieldCanvas(cols, rows) {
@@ -35242,7 +35269,8 @@ var PLANES = ["xy", "xz", "yz"];
 var PHASE_LABELS = {
   placing: "placing\u2026",
   compiling: "compiling\u2026",
-  stepping: "stepping\u2026"
+  stepping: "stepping\u2026",
+  stopping: "stopping\u2026"
 };
 var CONTROL_LABELS = {
   trackball: "Trackball (free roll)",
@@ -35253,6 +35281,9 @@ var SAVE_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" str
 var GEAR_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
 var FIT_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><polyline points="21 15 21 21 15 21"/><polyline points="3 9 3 3 9 3"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/><line x1="21" y1="21" x2="14" y2="14"/><line x1="3" y1="3" x2="10" y2="10"/></svg>';
 var RUN_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1" stroke-linejoin="round" aria-hidden="true"><path d="M7 4.5v15l13-7.5z"/></svg>';
+var STOP_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>';
+var RUN_TITLE = "run the simulation in the kernel (spec R14 mode 1)";
+var STOP_TITLE = "stop the running simulation (spec D17)";
 function render({ model, el }) {
   let geometry = model.get("geometry");
   let meta = model.get("meta");
@@ -35506,7 +35537,8 @@ function render({ model, el }) {
   rebuildContent();
   run.addEventListener("click", () => {
     if (run.disabled) return;
-    send(model, { event: "run" });
+    if (currentState(model)?.running) send(model, { event: "stop" });
+    else send(model, { event: "run" });
   });
   const raycaster = new Raycaster();
   scene.renderer.domElement.addEventListener("dblclick", (event) => {
@@ -35692,13 +35724,7 @@ function render({ model, el }) {
       state.selection && (state.selection.kind === "source" || state.selection.kind === "detector") ? state.selection.name : null
     );
     applyFields();
-    run.disabled = state.running;
-    runPhase.hidden = !state.running;
-    runProgress.hidden = !state.running;
-    if (!state.running) {
-      applyPhase();
-      applyProgress();
-    }
+    applyRunControls();
     fullInput.checked = state.show_full;
     if (document.activeElement !== fadeInput) fadeInput.value = String(state.plane_fade_frac);
     fadeValue.textContent = `${state.plane_fade_frac.toFixed(2)}\xD7`;
@@ -35721,6 +35747,23 @@ function render({ model, el }) {
   const applyPhase = () => {
     const name = model.get("phase") ?? "";
     runPhase.textContent = PHASE_LABELS[name] ?? "";
+  };
+  const applyRunControls = () => {
+    const state = currentState(model);
+    const running = state?.running ?? false;
+    const stopping = model.get("stopping") ?? false;
+    run.innerHTML = running ? STOP_ICON : RUN_ICON;
+    run.title = running ? STOP_TITLE : RUN_TITLE;
+    run.disabled = running && stopping;
+    runPhase.hidden = !running;
+    runProgress.hidden = !running;
+    if (running && stopping) {
+      runPhase.textContent = PHASE_LABELS.stopping;
+      runProgress.hidden = true;
+    } else if (!running) {
+      applyPhase();
+      applyProgress();
+    }
   };
   const applyProgress = () => {
     const payload = model.get("progress");
@@ -35765,6 +35808,7 @@ function render({ model, el }) {
   model.on("change:fields", applyFields);
   model.on("change:progress", applyProgress);
   model.on("change:phase", applyPhase);
+  model.on("change:stopping", applyRunControls);
   model.on("change:section", applySection);
   model.on("change:geometry", applyGeometry);
   model.on("change:meta", applyGeometry);

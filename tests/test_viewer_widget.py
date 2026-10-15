@@ -25,7 +25,7 @@ pytest.importorskip("manifold3d")
 
 from test_viewer_geometry import f1_stack, f2_stack, f3_stack
 
-from gdsfactory.viewer import palette, payload, state, widget
+from gdsfactory.viewer import palette, payload, sim, state, widget
 from gdsfactory.viewer.solids import build
 
 FIXTURES = {"F1": f1_stack, "F2": f2_stack, "F3": f3_stack}
@@ -363,6 +363,146 @@ def test_run_installs_the_marimo_context_on_the_worker(monkeypatch: pytest.Monke
 
     assert installed == [True], "the worker did not install the marimo context"
     assert done == [True], "on_done did not fire"
+
+
+class _StubResult:
+    """A stand-in for :class:`sim.RunResult` with the shape the widget reads."""
+
+    class _Arrays:
+        detector_states: dict[str, object] = {}
+
+    arrays = _Arrays()
+
+
+def _stoppable_run(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    """Replaces the kernel's run with one that honours the cancel flag (D17).
+
+    Returns a dict that records the ``cancel``/``keep_partial`` the widget
+    passed, so a test can assert on them.
+    """
+    seen: dict[str, object] = {}
+
+    def fake(
+        stack: object,
+        viewer_state: object,
+        *,
+        key: object = None,
+        progress: object = None,
+        phase: object = None,
+        cancel: object = None,
+        keep_partial: bool = False,
+    ) -> object:
+        seen["cancel"] = cancel
+        seen["keep_partial"] = keep_partial
+        assert cancel is not None, "the widget must pass a cancel flag (spec D17)"
+        if phase is not None:
+            phase("stepping")
+        cancel.wait(5)  # block until the stop lands
+        if not keep_partial:
+            raise sim.RunStopped("the run was stopped")
+        return _StubResult()
+
+    monkeypatch.setattr(widget, "_run_sim", fake)
+    return seen
+
+
+def test_stop_ends_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D17: the stop message unwinds the run and clears the traits."""
+    seen = _stoppable_run(monkeypatch)
+    viewer = widget.view(f1_stack())
+    viewer._on_msg(None, {"event": "run"}, [])
+    assert viewer.running and viewer.stopping is False
+
+    viewer._on_msg(None, {"event": "stop"}, [])
+    assert viewer.stopping is True, "the stopping trait must show immediately"
+    viewer._run_thread.join(timeout=5)
+
+    assert viewer.run_result == {"status": "stopped"}
+    assert viewer.running is False and viewer.stopping is False
+    assert viewer.phase == ""
+    assert viewer.last_error is None
+    assert seen["keep_partial"] is False
+
+
+def test_a_discarded_stop_keeps_the_previous_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D17: a discarded stop restores ``last_result``, so its overlays survive."""
+    _stoppable_run(monkeypatch)
+    viewer = widget.view(f1_stack())
+    previous = object()
+    viewer._run_result = previous
+
+    viewer._on_msg(None, {"event": "run"}, [])
+    viewer._on_msg(None, {"event": "stop"}, [])
+    viewer._run_thread.join(timeout=5)
+
+    assert viewer.last_result is previous
+
+
+def test_a_kept_partial_stop_adopts_the_partial_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D17: with ``keep_partial`` the run reports done, not stopped."""
+    seen = _stoppable_run(monkeypatch)
+    viewer = widget.view(f1_stack())
+    viewer._on_msg(
+        None, {"event": "set_settings", "settings": {"keep_partial": True}}, []
+    )
+
+    viewer._on_msg(None, {"event": "run"}, [])
+    viewer._on_msg(None, {"event": "stop"}, [])
+    viewer._run_thread.join(timeout=5)
+
+    assert seen["keep_partial"] is True
+    assert viewer.run_result["status"] == "done"
+    assert isinstance(viewer.last_result, _StubResult)
+
+
+def test_stop_while_idle_is_a_no_op(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D17: a stop with no run in flight does nothing and is not an error."""
+    _stoppable_run(monkeypatch)
+    viewer = widget.view(f1_stack())
+    viewer._on_msg(None, {"event": "stop"}, [])
+    assert viewer.stopping is False
+    assert viewer.stop() is False
+
+
+def test_a_second_stop_is_harmless(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D17: stopping twice does not disturb the run or the worker's cleanup."""
+    _stoppable_run(monkeypatch)
+    viewer = widget.view(f1_stack())
+    viewer._on_msg(None, {"event": "run"}, [])
+    viewer._on_msg(None, {"event": "stop"}, [])
+    viewer._on_msg(None, {"event": "stop"}, [])
+    viewer._run_thread.join(timeout=5)
+    assert viewer.running is False and viewer.stopping is False
+    assert viewer.run_result == {"status": "stopped"}
+
+
+def test_stop_then_rerun_works(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D17: a fresh run gets a fresh cancel flag, so the stop does not persist."""
+    seen = _stoppable_run(monkeypatch)
+    viewer = widget.view(f1_stack())
+    viewer._on_msg(None, {"event": "run"}, [])
+    first = seen["cancel"]
+    viewer._on_msg(None, {"event": "stop"}, [])
+    viewer._run_thread.join(timeout=5)
+
+    viewer._on_msg(None, {"event": "run"}, [])
+    assert seen["cancel"] is not first, "a new run must get a fresh flag (spec D17)"
+    assert viewer.running is True
+    viewer._on_msg(None, {"event": "stop"}, [])
+    viewer._run_thread.join(timeout=5)
+    assert viewer.running is False
+
+
+def test_keep_partial_round_trips_and_is_listed() -> None:
+    """D17: the partial-result toggle is a setting and rides the state patch."""
+    viewer_state = state.ViewerState(f1_stack())
+    assert viewer_state.settings.keep_partial is False
+    assert viewer_state.to_state()["simulation"]["keep_partial"] is False
+    viewer_state.apply_patch({"simulation": {"keep_partial": True}})
+    assert viewer_state.settings.keep_partial is True
+    assert viewer_state.to_state()["simulation"]["keep_partial"] is True
 
 
 def test_widget_writes_a_saved_image(tmp_path: Path) -> None:

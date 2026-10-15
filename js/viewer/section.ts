@@ -52,6 +52,23 @@ interface View {
   dy: number;
 }
 
+/** The draw parameters that put a field raster upright over its plane (spec R15).
+ *
+ * The raster is row-major in (v, u), so its row 0 is the plane's low-v edge and
+ * must land at ``y1`` (the low-v screen edge). ``drawImage`` does not flip on a
+ * negative height, so the flip is a transform: translate to the low-v corner and
+ * negate y. Pure and exported so the raster-to-screen mapping can be tested
+ * without a canvas.
+ */
+export function fieldBlit(
+  x0: number,
+  y1: number,
+  x1: number,
+  y0: number,
+): { translate: [number, number]; scale: [number, number]; dest: [number, number, number, number] } {
+  return { translate: [x0, y1], scale: [1, -1], dest: [0, 0, x1 - x0, y1 - y0] };
+}
+
 export class Section2D {
   readonly root: HTMLElement;
   private readonly canvas: HTMLCanvasElement;
@@ -330,18 +347,23 @@ export class Section2D {
     image.getContext("2d")!.putImageData(pixels, 0, 0);
 
     // the rectangle's two corners in the section's local (u, v). The raster is
-    // row-major with rows as v and columns as u (spec R15), and the plane's v=0
-    // edge is its bottom, so the image is drawn with row 0 at ``y1`` (the low-v
-    // screen edge) and a negative height to flip it upright.
+    // row-major with rows as v and columns as u (spec R15), so raster row 0 is
+    // the plane's low-v edge and must land at ``y1`` (the low-v screen edge).
+    // ``drawImage`` does NOT flip on a negative height (Chromium normalises the
+    // rectangle), so the flip is done with a transform instead: translate to the
+    // low-v corner and negate y, then draw with a positive height.
     const [au, av] = { xy: [0, 1], xz: [0, 2], yz: [1, 2] }[this.payload!.plane];
     const cu = glyph.center[au];
     const cv = glyph.center[av];
     const [x0, y1] = this.project(cu - glyph.u_half, cv - glyph.v_half);
     const [x1, y0] = this.project(cu + glyph.u_half, cv + glyph.v_half);
+    const blit = fieldBlit(x0, y1, x1, y0);
     ctx.save();
     ctx.globalAlpha = alpha * settings.field_opacity;
     ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(image, x0, y1, x1 - x0, y0 - y1);
+    ctx.translate(blit.translate[0], blit.translate[1]);
+    ctx.scale(blit.scale[0], blit.scale[1]);
+    ctx.drawImage(image, blit.dest[0], blit.dest[1], blit.dest[2], blit.dest[3]);
     ctx.restore();
   }
 

@@ -125,6 +125,9 @@ export interface SimSettingsPayload {
   //: the bottom of the `logabs` color ramp, in decades below the plane's
   //: maximum (spec R15, Q22)
   log_range: number;
+  //: whether a stopped run keeps its partial detector fields instead of
+  //: discarding them (spec D17)
+  keep_partial: boolean;
 }
 
 //: One detector's field from the last result (spec R15, D16). `real`/`imag` are

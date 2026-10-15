@@ -47,7 +47,7 @@ import traitlets
 
 from gdsfactory.viewer.fields import validate_result
 from gdsfactory.viewer.payload import build_field_payload, build_payload, build_section_payload
-from gdsfactory.viewer.sim import build_objects
+from gdsfactory.viewer.sim import RunStopped, build_objects
 from gdsfactory.viewer.sim import run as _run_sim
 from gdsfactory.viewer.state import ViewerState
 
@@ -102,6 +102,9 @@ class Viewer(anywidget.AnyWidget):
     #: the in-flight run's phase — ``"placing"``, ``"compiling"`` or
     #: ``"stepping"`` (spec D15) — or ``""`` when no run is in flight
     phase = traitlets.Unicode(default_value="").tag(sync=True)
+    #: whether the user has asked the in-flight run to stop (spec D17); the
+    #: browser greys the button and shows "stopping…" while it is true
+    stopping = traitlets.Bool(default_value=False).tag(sync=True)
     #: the last kernel-side save's outcome, for the browser to confirm (spec
     #: D14): ``{"path": str}`` on success, ``{"folder": str}`` when the save
     #: folder changed, or ``{"error": str}`` on failure
@@ -126,6 +129,12 @@ class Viewer(anywidget.AnyWidget):
         self._run_result: Any = None
         self._run_error: BaseException | None = None
         self._run_thread: threading.Thread | None = None
+        #: the stop flag for the in-flight run (spec D17); ``None`` when no run
+        #: is in flight. Set by :meth:`stop` and read by the worker's condition.
+        self._run_cancel: threading.Event | None = None
+        #: the result in place before the current run started, so a *discarded*
+        #: stop can leave ``last_result`` as it was rather than as ``None`` (D17)
+        self._previous_result: Any = None
         #: cache of the prepared ``(objects, config, constraints)``, keyed by the
         #: state revision, so the three properties share one build (spec D11)
         self._prepared: tuple[int, tuple[list[Any], Any, list[Any]]] | None = None
@@ -207,6 +216,9 @@ class Viewer(anywidget.AnyWidget):
         """
         if self._viewer_state.running:
             raise RuntimeError("A run is already in flight")
+        # snapshot the previous result before clearing, so a discarded stop can
+        # restore it (spec D17)
+        self._previous_result = self._run_result
         self._run_result = None
         self._run_error = None
         self._viewer_state.running = True
@@ -214,6 +226,8 @@ class Viewer(anywidget.AnyWidget):
         self.run_result = {"status": "running"}
         self.progress = {}
         self.phase = "placing"
+        self.stopping = False
+        self._run_cancel = threading.Event()
 
         # capture the marimo runtime context here, on the cell's thread; the
         # worker must install it or its trait updates never reach the browser
@@ -223,6 +237,10 @@ class Viewer(anywidget.AnyWidget):
             self.progress = {"step": int(step), "total": int(total)}
 
         def _on_phase(name: str) -> None:
+            # once a stop is requested the phase must stay "stopping", so a later
+            # "compiling" from the same run cannot overwrite it (spec D17)
+            if self._run_cancel is not None and self._run_cancel.is_set():
+                return
             self.phase = name
 
         def _work() -> None:
@@ -240,11 +258,19 @@ class Viewer(anywidget.AnyWidget):
                     key=key,
                     progress=_on_progress,
                     phase=_on_phase,
+                    cancel=self._run_cancel,
+                    keep_partial=self._viewer_state.settings.keep_partial,
                 )
                 self._run_result = result
                 self.run_result = {"status": "done", "detectors": _detector_names(result)}
                 # the field buffers ride the same worker-thread context install
                 self.fields = build_field_payload(self._viewer_state, result)
+            except RunStopped:
+                # a stopped run whose partial result is discarded: keep the
+                # previous result and its overlays, report the stop (spec D17)
+                self._run_result = self._previous_result
+                self._run_error = None
+                self.run_result = {"status": "stopped"}
             except BaseException as exc:
                 self._run_error = exc
                 self.run_result = {"status": "error", "message": str(exc)}
@@ -253,11 +279,32 @@ class Viewer(anywidget.AnyWidget):
                 self.state = self._viewer_state.to_state()
                 self.progress = {}
                 self.phase = ""
+                self.stopping = False
+                self._run_cancel = None
                 if on_done is not None:
                     on_done(self._run_result)
 
         self._run_thread = threading.Thread(target=_work, name="viewer-run", daemon=True)
         self._run_thread.start()
+
+    def stop(self) -> bool:
+        """Asks the in-flight run to stop (spec D17).
+
+        Sets the run's cancel flag; the worker notices it at the next step or
+        phase boundary and unwinds. Idempotent, and a no-op when no run is in
+        flight. Does not clear ``running`` — the worker's ``finally`` owns that,
+        so the widget never claims a run has ended before it has.
+
+        Returns:
+            True if a run was in flight and the stop was requested, False
+            otherwise.
+        """
+        cancel = self._run_cancel
+        if cancel is None or not self._viewer_state.running:
+            return False
+        cancel.set()
+        self.stopping = True
+        return True
 
     @property
     def last_result(self) -> Any:
@@ -313,6 +360,11 @@ class Viewer(anywidget.AnyWidget):
                 self.run()
             except RuntimeError:
                 pass
+            return
+        if event == "stop":
+            # the Run button's stop toggle (spec D17): flag the in-flight run so
+            # its worker unwinds at the next step or phase boundary
+            self.stop()
             return
         if event == "save_image":
             # the browser's save button, routed to the kernel (spec D14): write

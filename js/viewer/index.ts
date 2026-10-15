@@ -33,10 +33,12 @@ const PLANES = ["xy", "xz", "yz"] as const;
 
 //: Human labels for the run's phases (spec D15). Placement and JAX compilation
 //: report no fraction, so naming the phase is the only feedback they can give.
+//: ``stopping`` is a client-side state: the run is unwinding after a stop (D17).
 const PHASE_LABELS: Record<string, string> = {
   placing: "placing…",
   compiling: "compiling…",
   stepping: "stepping…",
+  stopping: "stopping…",
 };
 
 //: Human labels for the rotation styles the settings screen offers (spec R3).
@@ -75,6 +77,16 @@ const RUN_ICON =
   '<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" ' +
   'stroke="currentColor" stroke-width="1" stroke-linejoin="round" aria-hidden="true">' +
   '<path d="M7 4.5v15l13-7.5z"/></svg>';
+
+//: A filled square for the Stop button: the Run button becomes this while a run
+//: is in flight (spec D17).
+const STOP_ICON =
+  '<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" ' +
+  'stroke="currentColor" stroke-width="1" stroke-linejoin="round" aria-hidden="true">' +
+  '<rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>';
+
+const RUN_TITLE = "run the simulation in the kernel (spec R14 mode 1)";
+const STOP_TITLE = "stop the running simulation (spec D17)";
 
 function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void {
   let geometry = model.get("geometry") as GeometryPayload;
@@ -396,10 +408,13 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   };
   rebuildContent();
 
-  // -- run (spec R14 mode 1, D15) -------------------------------------------
+  // -- run / stop (spec R14 mode 1, D15, D17) --------------------------------
+  // one toggle button: idle it starts a run, running it stops one. While the
+  // stop is unwinding, the button disables and the phase reads "stopping…".
   run.addEventListener("click", () => {
     if (run.disabled) return;
-    send(model, { event: "run" });
+    if (currentState(model)?.running) send(model, { event: "stop" });
+    else send(model, { event: "run" });
   });
 
   // -- double-click a port in 3D to add a detector (spec R12) ---------------
@@ -633,13 +648,7 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
     applyFields();
     // while a mode-1 run is in flight the setup is frozen (spec D15); the
     // explorer disables its own controls, and Run is disabled here
-    run.disabled = state.running;
-    runPhase.hidden = !state.running;
-    runProgress.hidden = !state.running;
-    if (!state.running) {
-      applyPhase();
-      applyProgress();
-    }
+    applyRunControls();
     fullInput.checked = state.show_full;
     if (document.activeElement !== fadeInput) fadeInput.value = String(state.plane_fade_frac);
     fadeValue.textContent = `${state.plane_fade_frac.toFixed(2)}×`;
@@ -670,6 +679,28 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   const applyPhase = (): void => {
     const name = (model.get("phase") as string | undefined) ?? "";
     runPhase.textContent = PHASE_LABELS[name] ?? "";
+  };
+
+  // the Run/Stop toggle (spec D15, D17): idle the button starts a run; while one
+  // is in flight it becomes Stop; once the stop is requested it disables and the
+  // phase reads "stopping…" until the worker unwinds. The phase label and bar
+  // show only while a run is in flight.
+  const applyRunControls = (): void => {
+    const state = currentState(model);
+    const running = state?.running ?? false;
+    const stopping = (model.get("stopping") as boolean | undefined) ?? false;
+    run.innerHTML = running ? STOP_ICON : RUN_ICON;
+    run.title = running ? STOP_TITLE : RUN_TITLE;
+    run.disabled = running && stopping;
+    runPhase.hidden = !running;
+    runProgress.hidden = !running;
+    if (running && stopping) {
+      runPhase.textContent = PHASE_LABELS.stopping;
+      runProgress.hidden = true;
+    } else if (!running) {
+      applyPhase();
+      applyProgress();
+    }
   };
 
   // the run's progress (spec D15): fill the bar from the kernel's `progress`
@@ -726,6 +757,7 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   model.on("change:fields", applyFields);
   model.on("change:progress", applyProgress);
   model.on("change:phase", applyPhase);
+  model.on("change:stopping", applyRunControls);
   model.on("change:section", applySection);
   model.on("change:geometry", applyGeometry);
   model.on("change:meta", applyGeometry);
