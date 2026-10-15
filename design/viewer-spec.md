@@ -366,10 +366,13 @@ plain translucent glyph; once a field is shown, the glyph's translucent fill is
   - **`field_transform`** — one of **`real`, `imag`, `abs`, `phase`, `logabs`**.
     Default `abs`. `logabs` is `log10(abs(...))` (see *Log and the value floor*).
   - **`field_color_low`** / **`field_color_high`** — the two endpoint colors of
-    the field's colormap, chosen per detector. The map is a
-    **color → transparent → color** ramp: `field_color_low` at the low end of the
-    plane's range, transparent at its midpoint, `field_color_high` at the high
-    end (see *The colormap*). Defaults: a cool blue and a warm red.
+    the field's map, chosen per detector. The map depends on the transform (see
+    *The colormap*): the signed transforms (`real`, `imag`, `phase`) use a
+    **color → transparent → color** ramp (`field_color_low` at the low end,
+    transparent at the midpoint, `field_color_high` at the high end); the
+    non-negative transforms (`abs`, `logabs`) use a **transparent → color** ramp
+    (`field_color_high` fading up from the low end). Defaults: a cool blue and a
+    warm red.
   - **`field_opacity`** — the overlay's overall opacity, 0–1. Default 1. It
     multiplies the whole overlay's alpha, so the user can fade it without
     touching the map's shape.
@@ -430,9 +433,10 @@ AC:
 - Changing a detector's `field_component` / `field_transform` /
   `field_color_low` / `field_color_high` / `field_opacity` re-shades its plane
   live, with no re-run and no kernel round-trip beyond the state patch (D10).
-- The overlay's alpha comes from the colormap's transparent middle alone, not
-  from the field's intensity: a component whose value is at the plane's midpoint
-  is transparent at full `field_opacity` (checked in a test).
+- The overlay's alpha comes from the map alone, not from the field's intensity:
+  a signed transform's value at the plane's midpoint is transparent at full
+  `field_opacity`, and an `abs`/`logabs` value at the plane's low end is
+  transparent (checked in a test).
 - Switching the 2D section to a detector's plane shades the field there, faded
   by the same gaussian as the ports (R4); a section perpendicular to the
   detector's plane does not shade it.
@@ -874,28 +878,41 @@ from that, both settled here.
 
 ---
 
-### D16. The field overlay is a two-color map with a transparent middle: *Accepted* (2026-10-14)
+### D16. The field overlay is a two-color map with a transparent end: *Accepted* (2026-10-14)
 
 R15 draws a detector's field on its plane. Two questions were open: what the
 **color** ramp is, and what the second channel, **alpha**, should encode.
 
 - **Decision — color and alpha both come from one map.** The overlay maps the
-  transformed component onto a **color → transparent → color** ramp between two
-  user-chosen endpoint colors, `field_color_low` and `field_color_high`:
+  transformed component onto a ramp between two user-chosen colors,
+  `field_color_low` and `field_color_high`, with a **transparent** region. The
+  ramp's shape depends on whether the transform is signed:
 
-  ```
-  t(u, v)  = (value(u, v) - min) / (max - min)      # the plane's own range
-  color    = t <= 0.5  ?  mix(low,  high, 2t)  :  mix(high, low, 2t - 1)
-  alpha    = |2t - 1|                               # 0 at the middle, 1 at each end
-  ```
+  - **Signed transforms** (`real`, `imag`, `phase`) get a **color → transparent →
+    color** ramp: `field_color_low` at the low end of the plane's range,
+    transparent at its midpoint, `field_color_high` at the high end. The midpoint
+    is the natural zero of a signed quantity, so a near-zero region reads as
+    "nothing here" and the two signs take the two colors.
 
-  So the low end of the plane's range is `field_color_low`, the middle is fully
-  transparent, and the high end is `field_color_high`. This is a diverging
-  colormap with the midpoint punched out, which suits a signed quantity: `real`
-  and `imag` swing about zero, so their near-zero regions read as "nothing here"
-  and the two signs take the two colors. The `field_opacity` setting multiplies
-  the whole map's alpha, so the user can fade the overlay without changing its
-  shape.
+    ```
+    t(u, v)  = (value(u, v) - min) / (max - min)      # the plane's own range
+    color    = t <= 0.5  ?  mix(low,  high, 2t)  :  mix(high, low, 2t - 1)
+    alpha    = |2t - 1|                               # 0 at the middle, 1 at each end
+    ```
+
+  - **Non-negative transforms** (`abs`, `logabs`) get a **transparent → color**
+    ramp: transparent at the low end of the plane's range and `field_color_high`
+    at the high end (a single hue fading up from nothing), since there is no
+    signed midpoint to punch out.
+
+    ```
+    t(u, v)  = (value(u, v) - min) / (max - min)
+    color    = mix(transparent, high, t)
+    alpha    = t                                      # 0 at the low end, 1 at the high end
+    ```
+
+  The `field_opacity` setting multiplies the whole map's alpha, so the user can
+  fade the overlay without changing its shape.
 - **Alpha is the map, not the intensity.** This is the load-bearing change: the
   overlay's transparency is **not** a separate function of `|field|`. An earlier
   draft scaled alpha by the local magnitude (bright field opaque, weak field
@@ -925,15 +942,12 @@ R15 draws a detector's field on its plane. Two questions were open: what the
   plain translucent plane fill (R12) is dropped — the field is what fills the
   rectangle. The detector's outline still marks its extent, and turning
   `field_visible` off restores the plain translucent glyph.
-- **What the map does to `abs`.** A diverging map is a natural fit for the
-  signed transforms (`real`, `imag`): zero is the transparent middle and the two
-  signs take the two colors. For `abs` (and `logabs`), whose values are
-  non-negative, the transparent middle lands at the middle of the plane's
-  *magnitude* range, so a mid-strength region is transparent and the extremes are
-  solid. That is the map working as specified, not a bug — a user who wants a
-  plain opaque amplitude plot can set the two endpoint colors and read the
-  colorbar; if it proves awkward in use it is a candidate for a follow-up (a
-  "no transparent middle" toggle).
+- **Which ramp a transform gets.** `real`, `imag` and `phase` are signed, so
+  they take the color→transparent→color ramp and their zero reads as the
+  transparent middle. `abs` and `logabs` are non-negative, so they take the
+  transparent→color ramp: a single hue (`field_color_high`) fading up from the
+  low end of the plane's range. `field_color_low` is unused by the
+  non-negative transforms (the transparent end stands in for it).
 - **2D fades like the ports.** In the section canvas the overlay's alpha is
   multiplied by the same gaussian the ports use (R4): `exp(-½ (d / fade)²)` with
   `d` the section plane's distance from the detector's plane and `fade` the
@@ -1288,9 +1302,12 @@ R15 draws a detector's field on its plane. Two questions were open: what the
     lives with the other view-wide settings, not in a detector row.
 - 2026-10-14: D16 revised — the field overlay is a two-color map, and 2D fades
   like the ports.
-  - The per-detector colormap is a **color → transparent → color** ramp between
-    two user-chosen colors (`field_color_low`, `field_color_high`), transparent
-    at the plane's range midpoint, replacing the named-colormap setting.
+  - The per-detector colormap is a ramp between two user-chosen colors
+    (`field_color_low`, `field_color_high`) with a transparent region: the signed
+    transforms (`real`, `imag`, `phase`) get color → transparent → color
+    (transparent at the plane's range midpoint), the non-negative transforms
+    (`abs`, `logabs`) get transparent → color (a single hue fading up from the
+    low end). This replaces the named-colormap setting.
   - **Alpha is the map alone.** The earlier magnitude-scaled alpha
     (`|field| / max|field|`) is dropped: transparency no longer tracks intensity,
     only where the transformed value sits on the plane's range.
