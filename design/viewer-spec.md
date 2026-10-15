@@ -350,7 +350,8 @@ A detector that recorded a field can shade its plane in both viewports from the
 last result. The overlay is drawn **on the detector's own plane**, in the plane's
 (u, v) frame, so it lines up with the glyph the pre-placement view already draws
 (R12). A detector with no result yet, or whose result has no field, keeps its
-plain translucent glyph.
+plain translucent glyph; once a field is shown, the glyph's translucent fill is
+**replaced** by the field (the detector's outline still marks its extent).
 
 - **Where the field comes from.** The last run's
   `result.arrays.detector_states[name]` (R14 mode 1), or a result the user
@@ -364,9 +365,14 @@ plain translucent glyph.
     Hx, Hy, Hz`). Default: the first component the detector recorded.
   - **`field_transform`** — one of **`real`, `imag`, `abs`, `phase`, `logabs`**.
     Default `abs`. `logabs` is `log10(abs(...))` (see *Log and the value floor*).
-  - **`field_colormap`** — the colormap name. Default `viridis`.
-  - **`field_opacity`** — the overlay's opacity, 0–1. Default 1 (fully opaque
-    where the field is at its maximum; see *Transparency*).
+  - **`field_color_low`** / **`field_color_high`** — the two endpoint colors of
+    the field's colormap, chosen per detector. The map is a
+    **color → transparent → color** ramp: `field_color_low` at the low end of the
+    plane's range, transparent at its midpoint, `field_color_high` at the high
+    end (see *The colormap*). Defaults: a cool blue and a warm red.
+  - **`field_opacity`** — the overlay's overall opacity, 0–1. Default 1. It
+    multiplies the whole overlay's alpha, so the user can fade it without
+    touching the map's shape.
   - **`field_visible`** — whether the overlay is drawn at all, separate from the
     detector glyph's own visibility (R12). Default on once a result exists.
 - **Display settings are per-detector, per-session.** They live in the detector
@@ -378,23 +384,25 @@ plain translucent glyph.
   of the `logabs` color ramp, shared by every detector's overlay (Q22). It is a
   view setting, not a detector field, and lives with the other view-wide controls
   rather than in a detector row. See *Log and the value floor* (D16).
-- **Transparency encodes magnitude, when asked.** The overlay's alpha is a
-  function of the local |field| relative to the plane's maximum, so a low-amplitude
-  region fades toward the geometry behind it. See *Transparency* below for the
-  exact function and why it is what it is.
+- **The colormap is the only source of transparency** (D16). Alpha comes from the
+  map's transparent middle, **not** from the field's intensity: there is no
+  separate magnitude-scaled alpha. See *The colormap* below.
 - **Two viewports.**
   - **3D:** the detector's plane rectangle (already built, `PlaneGlyphs`) carries
     a texture of the transformed field, with a small colorbar beside the
     viewport naming the transform and component.
-  - **2D:** when the section plane **matches** the detector's plane, the field is
-    drawn over the detector's (u, v) rectangle in the section canvas, under the
-    region outline and ticks. A detector whose plane does not match the current
-    section is not shaded in 2D (its field is a plane, and there is nothing to
-    show off that plane); the 3D viewport still shows it.
-- **Scale is per-plane** (Q21, resolved 2026-10-14). `max` (the normalizer) is
-  the maximum of the transformed value over that detector's plane, so two
-  detectors with very different amplitudes are each readable. The colorbar shows
-  the plane's own range. There is no shared scale across detectors.
+  - **2D:** when the section plane is **parallel** to the detector's plane, the
+    field is drawn over the detector's (u, v) rectangle in the section canvas,
+    under the region outline and ticks, and it **fades with the same gaussian as
+    the ports** (R4): the overlay's alpha falls off with the section plane's
+    distance from the detector's plane, over `port_fade_um`, so a field fades in
+    as its plane is approached rather than popping in. A detector whose plane is
+    perpendicular to the section is not shaded in 2D (its field is a plane, and
+    there is nothing to show off that plane); the 3D viewport still shows it.
+- **Scale is per-plane** (Q21, resolved 2026-10-14). The range that maps onto the
+  colormap is the transformed value's own range over that detector's plane, so
+  two detectors with very different amplitudes are each readable. The colorbar
+  shows the plane's own range. There is no shared scale across detectors.
 
 **Supplying a result.** The widget exposes a setter — `viewer.show_result(result)`
 — that takes a result the user produced themselves (a `RunResult`, R14, or any
@@ -419,11 +427,17 @@ AC:
 - With a result present (from a mode-1 run or `show_result`), a detector's plane
   is shaded in 3D from `result.arrays.detector_states[name]`, and the colorbar
   names the component and transform.
-- Changing a detector's `field_component` / `field_transform` / `field_colormap`
-  / `field_opacity` re-shades its plane live, with no re-run and no kernel
-  round-trip beyond the state patch (D10).
-- Switching the 2D section to a detector's plane shades the field there; a
-  section on any other plane does not.
+- Changing a detector's `field_component` / `field_transform` /
+  `field_color_low` / `field_color_high` / `field_opacity` re-shades its plane
+  live, with no re-run and no kernel round-trip beyond the state patch (D10).
+- The overlay's alpha comes from the colormap's transparent middle alone, not
+  from the field's intensity: a component whose value is at the plane's midpoint
+  is transparent at full `field_opacity` (checked in a test).
+- Switching the 2D section to a detector's plane shades the field there, faded
+  by the same gaussian as the ports (R4); a section perpendicular to the
+  detector's plane does not shade it.
+- While a field is shown, the detector's translucent fill is gone (its outline
+  remains); turning `field_visible` off restores the plain glyph.
 - `show_result` with a result whose detectors match the setup — name, grid
   shape, grid spacing and plane position (Q23) — makes it the current result and
   redraws the overlays; a mismatched result raises and leaves the previous result
@@ -860,61 +874,77 @@ from that, both settled here.
 
 ---
 
-### D16. The field overlay's transparency is normalized linear magnitude: *Accepted* (2026-10-14)
+### D16. The field overlay is a two-color map with a transparent middle: *Accepted* (2026-10-14)
 
-R15 draws a detector's field on its plane. The color already encodes the value;
-**alpha** is the second channel, and the question is what it should encode.
+R15 draws a detector's field on its plane. Two questions were open: what the
+**color** ramp is, and what the second channel, **alpha**, should encode.
 
-- **Decision.** Alpha is the **local |field| divided by the plane's maximum**,
-  scaled by the detector's `field_opacity`:
+- **Decision — color and alpha both come from one map.** The overlay maps the
+  transformed component onto a **color → transparent → color** ramp between two
+  user-chosen endpoint colors, `field_color_low` and `field_color_high`:
 
   ```
-  alpha(u, v) = field_opacity * |local(u, v)| / max|field|
+  t(u, v)  = (value(u, v) - min) / (max - min)      # the plane's own range
+  color    = t <= 0.5  ?  mix(low,  high, 2t)  :  mix(high, low, 2t - 1)
+  alpha    = |2t - 1|                               # 0 at the middle, 1 at each end
   ```
 
-  `local` is the **raw recorded component** — the same complex value the
-  transform is applied to for the color — so alpha is always the *magnitude*
-  regardless of the selected transform. It does **not** depend on the transform,
-  the colormap, or the log setting.
-- **Why magnitude, not the transformed value.** The transform (`real`, `imag`,
-  `abs`, `phase`, `logabs`) is a *display* choice for the color channel; the
-  underlying physical quantity is complex. Alpha should say "how much field is
-  here", which is `|field|` for every transform. Deriving alpha from the
-  transformed value instead makes it jump when the user switches `real` → `imag`
-  (a component can be near zero on one and large on the other), which reads as a
-  rendering bug rather than a display choice. One rule, stable under every
-  transform.
-- **Why `|local| / max|field|` and not the log form.** The alternative you
-  floated — `10^(log10|local| − log10 max)`, i.e. alpha in dB relative to the
-  maximum — is mathematically the *same* ratio (`10^(log a − log b) = a/b`), so
-  it is not a different function, only a different route to the same number. The
-  ratio is the simpler statement of it, so that is what the spec says. Alpha
-  therefore stays in [0, 1] and needs no clamping beyond the natural one at the
-  maximum.
-- **`logabs` is a transform, not an alpha mode.** Since alpha is transform-
-  independent, "plot the log of the value" is exactly the **`logabs` transform**
-  on the color channel: `log10(|field|)`, normalized over the plane's own
-  `log10(|field|)` range. Alpha is unchanged by it. This keeps one transparency
-  rule and one log switch, and they do not interact.
-- **The zero of the log.** `log10(0)` is `−∞`, and a real field can be exactly
-  zero on a plane. `logabs` floors at a **dynamic range** below the plane's
-  maximum — `log10(|field|)` is clamped at `log10(max|field|) − range`, with
-  `range` a **global** setting (Q22, resolved; default 6 decades) — so a true
-  zero maps to the floor rather than to `−∞`. The same floor is what `alpha`
-  approaches: a cell whose `|field|` is below `max·10^−range` is effectively
-  transparent.
-- **Per-plane normalization** (Q21, resolved). `max|field|` is over that
-  detector's plane only (R15), so alpha is a statement about *this* plane. A
-  plane whose field is everywhere tiny is still fully drawn where it is
-  brightest; comparing amplitudes *between* detectors is the colorbar's job, not
-  alpha's. There is no shared scale.
-- **What alpha does not do.** It is not depth cueing, not a selection highlight,
-  and not the detector glyph's own opacity (R12) — those are separate. The
-  overlay's `field_opacity` multiplies alpha so the user can fade the whole
-  overlay without touching the per-cell ratio.
+  So the low end of the plane's range is `field_color_low`, the middle is fully
+  transparent, and the high end is `field_color_high`. This is a diverging
+  colormap with the midpoint punched out, which suits a signed quantity: `real`
+  and `imag` swing about zero, so their near-zero regions read as "nothing here"
+  and the two signs take the two colors. The `field_opacity` setting multiplies
+  the whole map's alpha, so the user can fade the overlay without changing its
+  shape.
+- **Alpha is the map, not the intensity.** This is the load-bearing change: the
+  overlay's transparency is **not** a separate function of `|field|`. An earlier
+  draft scaled alpha by the local magnitude (bright field opaque, weak field
+  faint); that is dropped. The only thing that decides a cell's alpha is where
+  its *transformed value* sits on the plane's range — a cell at the midpoint is
+  transparent no matter how large the field is there, and a cell at either end is
+  fully opaque no matter how small. Color and alpha read from the same number, so
+  the picture never disagrees with itself.
+- **Why this beats a magnitude alpha.** A magnitude-scaled alpha encodes a second
+  quantity (how much field) on top of the color (the value), and the two fight:
+  a strong field at the range's midpoint would be drawn faint, and a weak field
+  at an end would be drawn solid, which reads as a rendering bug. With one map,
+  the colorbar tells the whole story — position on the ramp is color *and*
+  opacity at once.
+- **Per-plane normalization** (Q21, resolved). `min` and `max` are over that
+  detector's plane only (R15), so the ramp always spans the plane's own range and
+  two detectors with very different amplitudes are each readable. Comparing
+  amplitudes *between* detectors is the colorbar's job. There is no shared scale.
+- **`logabs` and the ramp.** `logabs` is a transform on the *value* the ramp is
+  applied to: `log10(|field|)`, over the plane's own `log10(|field|)` range. Its
+  values are non-negative, so the low end of the ramp is the field's smallest
+  magnitude and the high end its largest; the transparent middle is the geometric
+  midpoint of the plane's log range. Because `log10(0)` is `−∞`, `logabs` floors
+  at a **global** dynamic range (Q22, resolved; default 6 decades) below the
+  plane's maximum, so a true zero maps to the floor rather than to `−∞`.
+- **The fill is replaced, not overlaid.** Once a detector shows a field, its
+  plain translucent plane fill (R12) is dropped — the field is what fills the
+  rectangle. The detector's outline still marks its extent, and turning
+  `field_visible` off restores the plain translucent glyph.
+- **What the map does to `abs`.** A diverging map is a natural fit for the
+  signed transforms (`real`, `imag`): zero is the transparent middle and the two
+  signs take the two colors. For `abs` (and `logabs`), whose values are
+  non-negative, the transparent middle lands at the middle of the plane's
+  *magnitude* range, so a mid-strength region is transparent and the extremes are
+  solid. That is the map working as specified, not a bug — a user who wants a
+  plain opaque amplitude plot can set the two endpoint colors and read the
+  colorbar; if it proves awkward in use it is a candidate for a follow-up (a
+  "no transparent middle" toggle).
+- **2D fades like the ports.** In the section canvas the overlay's alpha is
+  multiplied by the same gaussian the ports use (R4): `exp(-½ (d / fade)²)` with
+  `d` the section plane's distance from the detector's plane and `fade` the
+  state's `port_fade_um`. A field therefore fades in as its plane is approached,
+  matching how a port outline fades — one fade rule for the 2D viewport.
+- **What alpha does not do.** It is not depth cueing and not a selection
+  highlight; those are separate. The detector glyph's own opacity (R12) is
+  superseded for a detector showing a field (above) and unchanged otherwise.
 
 **Implemented in M4** (`js/viewer/section.ts`, `glyphs.ts`, `index.ts`;
-`gdsfactory/viewer/payload.py`). **Relates to R15, R12, Q21, Q22.**
+`gdsfactory/viewer/fields.py`, `payload.py`). **Relates to R15, R12, R4, Q21, Q22.**
 
 ---
 
@@ -1226,17 +1256,21 @@ R15 draws a detector's field on its plane. The color already encodes the value;
   - **R15** shades a detector's plane from the field it recorded, in both
     viewports. Per-detector display settings on the Detectors tab: the field
     component (from the detector's own `components`), the transform (`real`,
-    `imag`, `abs`, `phase`, `logabs`), the colormap, the overlay opacity and a
-    visibility toggle. Display settings are display-only spec params (D11), so
-    they never reach `create_*_at` and survive a re-run.
+    `imag`, `abs`, `phase`, `logabs`), the two endpoint colors, the overlay
+    opacity and a visibility toggle. Display settings are display-only spec
+    params (D11), so they never reach `create_*_at` and survive a re-run.
   - **`viewer.show_result(result)`** adopts a result the user produced
     elsewhere (their own `srun` run) as the widget's current result, redrawing
     the overlays with no re-run. It validates the result's detectors against the
     setup and raises on a mismatch (Q23).
-  - **D16** fixes the transparency rule: `alpha = field_opacity · |field| /
-    max|field|`, magnitude only, independent of the transform. The log option is
-    the `logabs` transform on the color channel, not an alpha mode; the two do
-    not interact. `logabs` floors at 6 decades below the plane's maximum (Q22).
+  - **D16** fixes the overlay's color and transparency: a **color → transparent
+    → color** ramp between two per-detector endpoint colors (`field_color_low`,
+    `field_color_high`), transparent at the plane's range midpoint. Alpha is the
+    map alone — **not** a separate magnitude-scaled alpha. `logabs` is a
+    transform on the ramp's input, not an alpha mode; it floors at the global
+    `log_range` (Q22). The detector's translucent fill is replaced by the field
+    while it is shown, and in 2D the overlay fades with the same gaussian as the
+    ports (R4).
   - **Q20** (referenced since D15 but never written) now defines the widget's
     result surface: `last_result`, `last_error`, and `show_result`.
   - M4's exit criterion gains R15's AC. R8 is superseded; Q9's promotion of R8
@@ -1252,3 +1286,15 @@ R15 draws a detector's field on its plane. The color already encodes the value;
     the bottom of the `logabs` color ramp (default 6 decades), not a per-detector
     field, so the scale reads consistently across every detector's plane. It
     lives with the other view-wide settings, not in a detector row.
+- 2026-10-14: D16 revised — the field overlay is a two-color map, and 2D fades
+  like the ports.
+  - The per-detector colormap is a **color → transparent → color** ramp between
+    two user-chosen colors (`field_color_low`, `field_color_high`), transparent
+    at the plane's range midpoint, replacing the named-colormap setting.
+  - **Alpha is the map alone.** The earlier magnitude-scaled alpha
+    (`|field| / max|field|`) is dropped: transparency no longer tracks intensity,
+    only where the transformed value sits on the plane's range.
+  - A detector showing a field **loses its translucent fill** — the field fills
+    the rectangle, the outline remains.
+  - The 2D overlay **fades with the same gaussian as the ports** (R4), so a
+    field fades in as its plane is approached.
