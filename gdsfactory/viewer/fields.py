@@ -118,14 +118,20 @@ def field_payload(result: Any, name: str, spec_id: str) -> dict[str, Any] | None
     if not components or phasor.shape[0] != len(components):
         # fall back to generic names so the field is still plottable
         components = [f"c{i}" for i in range(phasor.shape[0])]
-    grid = tuple(int(v) for v in phasor.shape[1:])
+    # the grid axes, with the detector's normal axis (a singleton) dropped: the
+    # two in-plane extents are what the browser textures. The normal is not
+    # always last — an xz detector's is the middle axis — so the singleton is
+    # removed by value, not position.
+    in_plane = [int(v) for v in phasor.shape[1:] if v > 1]
+    if len(in_plane) != 2:
+        return None
     real = np.ascontiguousarray(phasor.real, dtype=np.float32)
     imag = np.ascontiguousarray(phasor.imag, dtype=np.float32)
     return {
         "id": spec_id,
         "name": name,
         "components": components,
-        "grid": [grid[-2], grid[-1]],
+        "grid": [in_plane[0], in_plane[1]],
         "real": real.data,
         "imag": imag.data,
     }

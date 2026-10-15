@@ -12,6 +12,8 @@
 // says why (spec D15): the kernel refuses setup edits regardless, so the
 // disable is convenience, not the guarantee.
 import type {
+  FieldPayload,
+  FieldSettings,
   LevelMeta,
   MetaPayload,
   PortMeta,
@@ -73,6 +75,14 @@ interface SpecRow {
   name: HTMLElement;
   visible: HTMLInputElement;
   fields: Map<string, Control>;
+  /** the field-display controls (spec R15); empty for a source */
+  display: Map<string, Control>;
+  /** the "Field" group, shown only for a detector (spec R15) */
+  displayGroup: HTMLElement | null;
+  /** the component select, whose options come from the last result (spec R15) */
+  componentSelect: HTMLSelectElement | null;
+  /** the transform select, so a non-negative transform can dim the low color */
+  transformSelect: HTMLSelectElement | null;
 }
 
 const TABS = ["Layout / Ports", "Sources / Detectors", "Simulation"];
@@ -82,6 +92,10 @@ const SOURCE_TYPES = ["ModePlaneSource", "GaussianPlaneSource", "UniformPlaneSou
   "HardConstantAmplitudePlanceSource", "PointDipoleSource"];
 const DETECTOR_TYPES = ["ModeOverlapDetector", "PoyntingFluxDetector", "PhasorDetector",
   "FieldDetector", "EnergyDetector"];
+
+//: The transforms a detector's field can take (spec R15); the first three are
+//: signed, the last two non-negative, which picks the ramp's shape (spec D16).
+const FIELD_TRANSFORMS = ["real", "imag", "abs", "phase", "logabs"];
 
 export class Explorer {
   readonly root: HTMLElement;
@@ -101,6 +115,9 @@ export class Explorer {
   private readonly simFields = new Map<string, Control>();
   private readonly simNote: HTMLElement;
   private readonly layoutPanel: HTMLElement;
+  //: each detector's recorded field components, from the last result (spec R15);
+  //: the component select's options come from here, keyed by spec id
+  private fieldComponents = new Map<string, string[]>();
   private locked = false;
 
   constructor(
@@ -174,6 +191,19 @@ export class Explorer {
     this.buildLayout();
   }
 
+  /**
+   * Records the last result's per-detector field components (spec R15).
+   *
+   * The component select's options are the components the result actually
+   * recorded, so a detector whose field is unavailable (or a result with no
+   * field) offers none. Called before :meth:`render`, which writes the rows.
+   */
+  setFieldComponents(fields: Record<string, FieldPayload>): void {
+    this.fieldComponents = new Map(
+      Object.entries(fields ?? {}).map(([id, entry]) => [id, entry.components ?? []]),
+    );
+  }
+
   render(state: StatePayload): void {
     for (const level of this.meta.levels) {
       const row = this.levelRows.get(level.name);
@@ -192,8 +222,11 @@ export class Explorer {
       if (row.visible.checked !== visible) row.visible.checked = visible;
     }
 
-    this.renderSpecs(state.sources, "source", this.sourceRows, this.sourceList, this.sourceEmpty);
-    this.renderSpecs(state.detectors, "detector", this.detectorRows, this.detectorList, this.detectorEmpty);
+    this.renderSpecs(state.sources, "source", this.sourceRows, this.sourceList, this.sourceEmpty, {});
+    this.renderSpecs(
+      state.detectors, "detector", this.detectorRows, this.detectorList, this.detectorEmpty,
+      state.field_settings ?? {},
+    );
     this.renderSettings(state.simulation);
     this.setLocked(state.running);
 
@@ -299,6 +332,7 @@ export class Explorer {
     rows: Map<string, SpecRow>,
     list: HTMLElement,
     empty: HTMLElement,
+    fieldSettings: Record<string, FieldSettings>,
   ): void {
     const seen = new Set<string>();
     for (const spec of specs) {
@@ -318,7 +352,7 @@ export class Explorer {
         rows.set(spec.id, rebuilt);
         row = rebuilt;
       }
-      this.fillSpecRow(row, spec);
+      this.fillSpecRow(row, spec, fieldSettings[spec.id]);
     }
     for (const [id, row] of rows) {
       if (seen.has(id)) continue;
@@ -427,7 +461,63 @@ export class Explorer {
       fields.appendChild(fieldRow(key, control.element));
     }
 
-    const row: SpecRow = { root, type: spec.type, twisty, collapsed, name, visible, fields: controls };
+    // the field-display group (spec R15, D16): how this detector's last-result
+    // field is shaded. Only a detector has one, so a source builds none.
+    const display = new Map<string, Control>();
+    let displayGroup: HTMLElement | null = null;
+    let componentSelect: HTMLSelectElement | null = null;
+    let transformSelect: HTMLSelectElement | null = null;
+    if (kind === "detector") {
+      displayGroup = document.createElement("div");
+      displayGroup.className = "gfx-spec-fields gfx-field-group";
+      const heading = document.createElement("div");
+      heading.className = "gfx-group-heading";
+      heading.textContent = "Field (last result)";
+      displayGroup.appendChild(heading);
+      const addDisplay = (key: string, labelText: string, control: Control, hint: string): void => {
+        display.set(key, control);
+        displayGroup!.appendChild(fieldRow(labelText, control.element, hint));
+      };
+      // the component list is filled from the last result (spec R15): an empty
+      // select means no result yet, and the group is disabled until one lands
+      const component = this.selectControl([], "", (value) => setParam("field_component", value || null));
+      componentSelect = component.element as HTMLSelectElement;
+      addDisplay("field_component", "component", component,
+        "which recorded field component to shade the plane with");
+      const transform = this.selectControl(
+        [...FIELD_TRANSFORMS], "abs",
+        (value) => setParam("field_transform", value),
+      );
+      transformSelect = transform.element as HTMLSelectElement;
+      addDisplay("field_transform", "transform", transform,
+        "real/imag/phase are signed (two-color ramp); abs/logabs are non-negative");
+      addDisplay("field_color_low", "low color", this.colorControl(
+        (value) => setParam("field_color_low", value),
+      ), "the ramp's low-end color (signed transforms only)");
+      addDisplay("field_color_high", "high color", this.colorControl(
+        (value) => setParam("field_color_high", value),
+      ), "the ramp's high-end color");
+      addDisplay("field_opacity", "opacity", this.numberControl(
+        1, 0.05, (value) => setParam("field_opacity", value), true,
+      ), "the overlay's overall opacity, 0-1");
+      const visible = checkbox(true, (value) => setParam("field_visible", value));
+      display.set("field_visible", {
+        element: visible,
+        write(value) {
+          if (visible.checked !== Boolean(value)) visible.checked = Boolean(value);
+        },
+        setDisabled(value) {
+          visible.disabled = value;
+        },
+      });
+      displayGroup.appendChild(fieldRow("show", visible, "shade this detector's plane with the last result"));
+      fields.appendChild(displayGroup);
+    }
+
+    const row: SpecRow = {
+      root, type: spec.type, twisty, collapsed, name, visible, fields: controls,
+      display, displayGroup, componentSelect, transformSelect,
+    };
     // collapsing is view-only, so it lives in the row, not the kernel state: a
     // state round-trip must not expand a row the user collapsed
     twisty.addEventListener("click", (event) => {
@@ -448,7 +538,7 @@ export class Explorer {
     row.twisty.setAttribute("aria-expanded", String(!row.collapsed));
   }
 
-  private fillSpecRow(row: SpecRow, spec: SpecPayload): void {
+  private fillSpecRow(row: SpecRow, spec: SpecPayload, fieldSettings?: FieldSettings): void {
     // the kernel names the object `<port>_<type>` unless params.name overrides
     // it (spec R12); the row shows the same name the placed object will carry
     const name = spec.params.name;
@@ -471,6 +561,50 @@ export class Explorer {
         continue;
       }
       control.write(values[key]);
+    }
+    if (fieldSettings) this.fillDisplay(row, fieldSettings);
+  }
+
+  /**
+   * Writes a detector's field-display controls (spec R15, D16).
+   *
+   * The settings live in `state.field_settings[id]`, not `spec.params`, so they
+   * are merged in here rather than through the `values` map above. The
+   * component select is rebuilt from the last result's recorded components (the
+   * kernel sends them in `fields`); a non-negative transform dims the low color,
+   * which the ramp does not use (spec D16).
+   */
+  private fillDisplay(row: SpecRow, settings: FieldSettings): void {
+    const components = this.fieldComponents.get(row.root.dataset.name ?? "") ?? [];
+    if (row.componentSelect) {
+      const wanted = settings.field_component ?? "";
+      const options = ["", ...components];
+      if (row.componentSelect.options.length !== options.length) {
+        row.componentSelect.replaceChildren(
+          ...options.map((value) => {
+            const option = document.createElement("option");
+            option.value = value;
+            option.textContent = value || "(none)";
+            return option;
+          }),
+        );
+      }
+      if (document.activeElement !== row.componentSelect && row.componentSelect.value !== wanted) {
+        row.componentSelect.value = wanted;
+      }
+      // a detector with no result has no component to shade with (spec R15)
+      row.componentSelect.disabled = components.length === 0 || this.locked;
+    }
+    const nonNegative = settings.field_transform === "abs" || settings.field_transform === "logabs";
+    for (const [key, control] of row.display) {
+      if (key === "field_component") continue;
+      control.write(settings[key as keyof FieldSettings]);
+    }
+    // the low color is unused by a non-negative transform (spec D16): grey it out
+    const low = row.display.get("field_color_low");
+    if (low) {
+      low.element.classList.toggle("gfx-unused", nonNegative);
+      low.element.title = nonNegative ? "unused by abs/logabs" : "";
     }
   }
 
@@ -510,6 +644,10 @@ export class Explorer {
     add("boundary_offset", "boundary offset", this.boundaryControl(
       (value) => this.callbacks.onSettings({ boundary_offset: value }),
     ), "move each box face off the geometry's bounding box, in µm (positive = towards +axis); the viewports update live");
+    // the logabs ramp's floor, one number for the whole viewer (spec R15, Q22)
+    add("log_range", "log range", this.numberControl(
+      6, 1, (value) => this.callbacks.onSettings({ log_range: value }), true,
+    ), "the logabs color ramp's floor, in decades below the plane's maximum");
     return { rows: [fields, note], note };
   }
 
@@ -521,6 +659,7 @@ export class Explorer {
       resolution_um: settings.resolution_um,
       // the control's write() divides by its scale, so pass kernel units here
       time_fs: settings.time_s,
+      log_range: settings.log_range,
     };
     for (const [key, control] of this.simFields) {
       if (key === "port_size_mult" || key === "boundary_offset") continue;
@@ -536,9 +675,19 @@ export class Explorer {
     const rows = [...this.sourceRows.values(), ...this.detectorRows.values()];
     for (const row of rows) {
       for (const control of row.fields.values()) control.setDisabled(locked);
+      for (const control of row.display.values()) control.setDisabled(locked);
       row.visible.disabled = locked;
       const remove = row.root.querySelector("button");
       if (remove) (remove as HTMLButtonElement).disabled = locked;
+    }
+    // a locked detector's component select stays disabled even after unlock if
+    // the last result recorded no components (spec R15); re-apply that rule
+    if (!locked) {
+      for (const [id, row] of this.detectorRows) {
+        if (row.componentSelect) {
+          row.componentSelect.disabled = (this.fieldComponents.get(id) ?? []).length === 0;
+        }
+      }
     }
     for (const control of this.simFields.values()) control.setDisabled(locked);
     this.sourceAdd.disabled = locked;
@@ -604,6 +753,24 @@ export class Explorer {
         const shown =
           value === null || value === undefined ? "" : String(displayNumber(Number(value) / scale));
         if (document.activeElement !== input && input.value !== shown) input.value = shown;
+      },
+      setDisabled(value) {
+        input.disabled = value;
+      },
+    };
+  }
+
+  /** A color input (spec R15): one endpoint of a detector's field ramp. */
+  private colorControl(onChange: (value: string) => void): Control {
+    const input = document.createElement("input");
+    input.type = "color";
+    input.className = "gfx-swatch";
+    input.addEventListener("input", () => onChange(input.value));
+    return {
+      element: input,
+      write(value) {
+        const text = value === null || value === undefined ? "" : String(value);
+        if (document.activeElement !== input && input.value !== text) input.value = text;
       },
       setDisabled(value) {
         input.disabled = value;

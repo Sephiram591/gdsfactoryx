@@ -896,7 +896,7 @@ R15 draws a detector's field on its plane. Two questions were open: what the
 
     ```
     t(u, v)  = (value(u, v) - min) / (max - min)      # the plane's own range
-    color    = t <= 0.5  ?  mix(low,  high, 2t)  :  mix(high, low, 2t - 1)
+    color    = mix(low, high, t)                      # low at t=0, high at t=1
     alpha    = |2t - 1|                               # 0 at the middle, 1 at each end
     ```
 

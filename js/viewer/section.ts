@@ -4,8 +4,18 @@
 // section is sharp at any zoom and always agrees with the 3D view. Here the
 // rings are filled with Canvas2D's even-odd rule (holes come for free) and
 // zoom/pan are a screen transform applied on redraw, so nothing is resampled.
+import { componentData, parseColor, rampColor, transformValues, valueRange } from "./fieldramp";
 import { REGION_COLOR, formatTick, niceStep, tickValues } from "./ticks";
-import type { GlyphPayload, MetaPayload, PortMeta, Ring, SectionPayload, StatePayload } from "./wire";
+import type {
+  FieldPayload,
+  FieldSettings,
+  GlyphPayload,
+  MetaPayload,
+  PortMeta,
+  Ring,
+  SectionPayload,
+  StatePayload,
+} from "./wire";
 
 const BG_COLOR = "#15151a";
 const EDGE_COLOR = "#000000";
@@ -52,6 +62,10 @@ export class Section2D {
   private readonly readout: HTMLElement;
   private payload: SectionPayload | null = null;
   private state: StatePayload | null = null;
+  //: the last result's per-detector fields (spec R15); empty until a run lands
+  private fields: Record<string, FieldPayload> = {};
+  //: a scratch canvas for rasterizing one field before it is drawn (spec R15)
+  private scratch: HTMLCanvasElement | null = null;
   private exaggeration = 1;
   //: the box center (spec C5) of the section's two axes, for labelling local
   //: coordinates in device (stack) coordinates, like the slider
@@ -107,6 +121,12 @@ export class Section2D {
 
   setState(state: StatePayload): void {
     this.state = state;
+    this.draw();
+  }
+
+  /** The last result's per-detector fields (spec R15); re-draws the overlay. */
+  setFields(fields: Record<string, FieldPayload>): void {
+    this.fields = fields ?? {};
     this.draw();
   }
 
@@ -229,9 +249,97 @@ export class Section2D {
     }
 
     this.drawPorts(ctx, payload);
+    this.drawFields(ctx, payload);
     this.drawGlyphs(ctx, payload);
     this.drawRegion(ctx, payload);
     this.drawTicks(ctx, payload);
+  }
+
+  /**
+   * Shades a detector's plane with its field, where the section is parallel to
+   * it (spec R15, D16).
+   *
+   * The field is a raster on the detector's own (u, v) rectangle, drawn under
+   * the outline and ticks. A section perpendicular to the detector's plane
+   * shows nothing (its field is a plane, and there is nothing off it). The
+   * overlay fades with the same gaussian as the ports (spec R4), so a field
+   * fades in as its plane is approached.
+   */
+  private drawFields(ctx: CanvasRenderingContext2D, payload: SectionPayload): void {
+    const state = this.state;
+    if (!state) return;
+    const [ox, oy, oz] = payload.origin;
+    const origin = [ox, oy, oz];
+    const normalStack = { xy: 2, xz: 1, yz: 0 }[payload.plane];
+    const fade = state.port_fade_um > 0 ? state.port_fade_um : PORT_FADE_UM;
+    for (const glyph of state.glyphs ?? []) {
+      if (!glyph.visible || glyph.kind !== "detector") continue;
+      if (glyph.u_half <= 0 || glyph.v_half <= 0) continue;
+      // only a detector whose plane is parallel to the section can be shaded
+      if (glyph.axis !== normalStack) continue;
+      const settings = state.field_settings?.[glyph.id];
+      const field = this.fields[glyph.id];
+      if (!settings || !settings.field_visible || !field || !settings.field_component) continue;
+      const data = componentData(field, settings.field_component);
+      if (!data) continue;
+      // the gaussian the ports use, from the section plane to the detector's
+      // plane (both in the local frame) (spec D16, R4)
+      const distance = glyph.center[glyph.axis] - (payload.position - origin[normalStack]);
+      if (Math.abs(distance) > PORT_FADE_CUTOFF * fade) continue;
+      const alpha = Math.exp(-0.5 * (distance / fade) ** 2);
+      if (alpha < 0.01) continue;
+      const values = transformValues(data.real, data.imag, settings.field_transform);
+      const range = valueRange(values, settings.field_transform, state.simulation?.log_range ?? 6);
+      this.blitField(ctx, glyph, field, values, range, settings, alpha);
+    }
+  }
+
+  /** Paints a detector's raster field over its (u, v) rectangle (spec R15). */
+  private blitField(
+    ctx: CanvasRenderingContext2D,
+    glyph: GlyphPayload,
+    field: FieldPayload,
+    values: Float32Array,
+    range: [number, number],
+    settings: FieldSettings,
+    alpha: number,
+  ): void {
+    const [rows, cols] = field.grid;
+    const image = this.fieldCanvas(cols, rows);
+    const pixels = image.getContext("2d")!.createImageData(cols, rows);
+    const span = range[1] - range[0];
+    const low = parseColor(settings.field_color_low);
+    const high = parseColor(settings.field_color_high);
+    for (let i = 0; i < values.length; i += 1) {
+      const t = span > 0 ? (values[i] - range[0]) / span : 0;
+      const [r, g, b, a] = rampColor(t, settings.field_transform, low, high);
+      pixels.data[i * 4] = r;
+      pixels.data[i * 4 + 1] = g;
+      pixels.data[i * 4 + 2] = b;
+      pixels.data[i * 4 + 3] = Math.round(a * 255);
+    }
+    image.getContext("2d")!.putImageData(pixels, 0, 0);
+
+    // the rectangle's two corners in the section's local (u, v)
+    const [au, av] = { xy: [0, 1], xz: [0, 2], yz: [1, 2] }[this.payload!.plane];
+    const cu = glyph.center[au];
+    const cv = glyph.center[av];
+    const [x0, y1] = this.project(cu - glyph.u_half, cv - glyph.v_half);
+    const [x1, y0] = this.project(cu + glyph.u_half, cv + glyph.v_half);
+    ctx.save();
+    ctx.globalAlpha = alpha * settings.field_opacity;
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(image, x0, y0, x1 - x0, y1 - y0);
+    ctx.restore();
+  }
+
+  private fieldCanvas(cols: number, rows: number): HTMLCanvasElement {
+    if (!this.scratch || this.scratch.width !== cols || this.scratch.height !== rows) {
+      this.scratch = document.createElement("canvas");
+      this.scratch.width = cols;
+      this.scratch.height = rows;
+    }
+    return this.scratch;
   }
 
   /**

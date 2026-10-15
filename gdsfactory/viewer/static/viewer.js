@@ -13685,6 +13685,19 @@ var LineSegments = class extends Line {
     return this;
   }
 };
+var LineLoop = class extends Line {
+  /**
+   * Constructs a new line loop.
+   *
+   * @param {BufferGeometry} [geometry] - The line geometry.
+   * @param {Material|Array<Material>} [material] - The line material.
+   */
+  constructor(geometry, material) {
+    super(geometry, material);
+    this.isLineLoop = true;
+    this.type = "LineLoop";
+  }
+};
 var CubeTexture = class extends Texture {
   /**
    * Constructs a new cube texture.
@@ -29419,6 +29432,7 @@ var DETECTOR_TYPES = [
   "FieldDetector",
   "EnergyDetector"
 ];
+var FIELD_TRANSFORMS = ["real", "imag", "abs", "phase", "logabs"];
 var Explorer = class {
   constructor(meta, callbacks) {
     this.meta = meta;
@@ -29429,6 +29443,9 @@ var Explorer = class {
     this.sourceRows = /* @__PURE__ */ new Map();
     this.detectorRows = /* @__PURE__ */ new Map();
     this.simFields = /* @__PURE__ */ new Map();
+    //: each detector's recorded field components, from the last result (spec R15);
+    //: the component select's options come from here, keyed by spec id
+    this.fieldComponents = /* @__PURE__ */ new Map();
     this.locked = false;
     this.root = document.createElement("div");
     this.root.className = "gfx-explorer";
@@ -29489,6 +29506,18 @@ var Explorer = class {
     this.meta = meta;
     this.buildLayout();
   }
+  /**
+   * Records the last result's per-detector field components (spec R15).
+   *
+   * The component select's options are the components the result actually
+   * recorded, so a detector whose field is unavailable (or a result with no
+   * field) offers none. Called before :meth:`render`, which writes the rows.
+   */
+  setFieldComponents(fields) {
+    this.fieldComponents = new Map(
+      Object.entries(fields ?? {}).map(([id, entry]) => [id, entry.components ?? []])
+    );
+  }
   render(state) {
     for (const level of this.meta.levels) {
       const row2 = this.levelRows.get(level.name);
@@ -29506,8 +29535,15 @@ var Explorer = class {
       const visible = state.port_visible[port.name] ?? true;
       if (row2.visible.checked !== visible) row2.visible.checked = visible;
     }
-    this.renderSpecs(state.sources, "source", this.sourceRows, this.sourceList, this.sourceEmpty);
-    this.renderSpecs(state.detectors, "detector", this.detectorRows, this.detectorList, this.detectorEmpty);
+    this.renderSpecs(state.sources, "source", this.sourceRows, this.sourceList, this.sourceEmpty, {});
+    this.renderSpecs(
+      state.detectors,
+      "detector",
+      this.detectorRows,
+      this.detectorList,
+      this.detectorEmpty,
+      state.field_settings ?? {}
+    );
     this.renderSettings(state.simulation);
     this.setLocked(state.running);
     for (const row2 of this.levelRows.values()) row2.root.classList.remove("gfx-selected");
@@ -29596,7 +29632,7 @@ var Explorer = class {
     });
     return plus;
   }
-  renderSpecs(specs, kind, rows, list, empty) {
+  renderSpecs(specs, kind, rows, list, empty, fieldSettings) {
     const seen = /* @__PURE__ */ new Set();
     for (const spec of specs) {
       seen.add(spec.id);
@@ -29613,7 +29649,7 @@ var Explorer = class {
         rows.set(spec.id, rebuilt);
         row2 = rebuilt;
       }
-      this.fillSpecRow(row2, spec);
+      this.fillSpecRow(row2, spec, fieldSettings[spec.id]);
     }
     for (const [id, row2] of rows) {
       if (seen.has(id)) continue;
@@ -29705,7 +29741,79 @@ var Explorer = class {
     for (const [key, control] of controls) {
       fields.appendChild(fieldRow(key, control.element));
     }
-    const row2 = { root, type: spec.type, twisty, collapsed, name, visible, fields: controls };
+    const display = /* @__PURE__ */ new Map();
+    let displayGroup = null;
+    let componentSelect = null;
+    let transformSelect = null;
+    if (kind === "detector") {
+      displayGroup = document.createElement("div");
+      displayGroup.className = "gfx-spec-fields gfx-field-group";
+      const heading = document.createElement("div");
+      heading.className = "gfx-group-heading";
+      heading.textContent = "Field (last result)";
+      displayGroup.appendChild(heading);
+      const addDisplay = (key, labelText, control, hint) => {
+        display.set(key, control);
+        displayGroup.appendChild(fieldRow(labelText, control.element, hint));
+      };
+      const component = this.selectControl([], "", (value) => setParam("field_component", value || null));
+      componentSelect = component.element;
+      addDisplay(
+        "field_component",
+        "component",
+        component,
+        "which recorded field component to shade the plane with"
+      );
+      const transform = this.selectControl(
+        [...FIELD_TRANSFORMS],
+        "abs",
+        (value) => setParam("field_transform", value)
+      );
+      transformSelect = transform.element;
+      addDisplay(
+        "field_transform",
+        "transform",
+        transform,
+        "real/imag/phase are signed (two-color ramp); abs/logabs are non-negative"
+      );
+      addDisplay("field_color_low", "low color", this.colorControl(
+        (value) => setParam("field_color_low", value)
+      ), "the ramp's low-end color (signed transforms only)");
+      addDisplay("field_color_high", "high color", this.colorControl(
+        (value) => setParam("field_color_high", value)
+      ), "the ramp's high-end color");
+      addDisplay("field_opacity", "opacity", this.numberControl(
+        1,
+        0.05,
+        (value) => setParam("field_opacity", value),
+        true
+      ), "the overlay's overall opacity, 0-1");
+      const visible2 = checkbox(true, (value) => setParam("field_visible", value));
+      display.set("field_visible", {
+        element: visible2,
+        write(value) {
+          if (visible2.checked !== Boolean(value)) visible2.checked = Boolean(value);
+        },
+        setDisabled(value) {
+          visible2.disabled = value;
+        }
+      });
+      displayGroup.appendChild(fieldRow("show", visible2, "shade this detector's plane with the last result"));
+      fields.appendChild(displayGroup);
+    }
+    const row2 = {
+      root,
+      type: spec.type,
+      twisty,
+      collapsed,
+      name,
+      visible,
+      fields: controls,
+      display,
+      displayGroup,
+      componentSelect,
+      transformSelect
+    };
     twisty.addEventListener("click", (event) => {
       event.stopPropagation();
       row2.collapsed = !row2.collapsed;
@@ -29722,7 +29830,7 @@ var Explorer = class {
     row2.twisty.title = row2.collapsed ? "expand" : "collapse";
     row2.twisty.setAttribute("aria-expanded", String(!row2.collapsed));
   }
-  fillSpecRow(row2, spec) {
+  fillSpecRow(row2, spec, fieldSettings) {
     const name = spec.params.name;
     row2.name.textContent = typeof name === "string" && name ? name : `${spec.port}_${spec.type}`;
     const visible = spec.params.visible ?? true;
@@ -29743,6 +29851,47 @@ var Explorer = class {
         continue;
       }
       control.write(values[key]);
+    }
+    if (fieldSettings) this.fillDisplay(row2, fieldSettings);
+  }
+  /**
+   * Writes a detector's field-display controls (spec R15, D16).
+   *
+   * The settings live in `state.field_settings[id]`, not `spec.params`, so they
+   * are merged in here rather than through the `values` map above. The
+   * component select is rebuilt from the last result's recorded components (the
+   * kernel sends them in `fields`); a non-negative transform dims the low color,
+   * which the ramp does not use (spec D16).
+   */
+  fillDisplay(row2, settings) {
+    const components = this.fieldComponents.get(row2.root.dataset.name ?? "") ?? [];
+    if (row2.componentSelect) {
+      const wanted = settings.field_component ?? "";
+      const options = ["", ...components];
+      if (row2.componentSelect.options.length !== options.length) {
+        row2.componentSelect.replaceChildren(
+          ...options.map((value) => {
+            const option = document.createElement("option");
+            option.value = value;
+            option.textContent = value || "(none)";
+            return option;
+          })
+        );
+      }
+      if (document.activeElement !== row2.componentSelect && row2.componentSelect.value !== wanted) {
+        row2.componentSelect.value = wanted;
+      }
+      row2.componentSelect.disabled = components.length === 0 || this.locked;
+    }
+    const nonNegative = settings.field_transform === "abs" || settings.field_transform === "logabs";
+    for (const [key, control] of row2.display) {
+      if (key === "field_component") continue;
+      control.write(settings[key]);
+    }
+    const low = row2.display.get("field_color_low");
+    if (low) {
+      low.element.classList.toggle("gfx-unused", nonNegative);
+      low.element.title = nonNegative ? "unused by abs/logabs" : "";
     }
   }
   // ------------------------------------------------------------------ settings
@@ -29791,6 +29940,12 @@ var Explorer = class {
     add("boundary_offset", "boundary offset", this.boundaryControl(
       (value) => this.callbacks.onSettings({ boundary_offset: value })
     ), "move each box face off the geometry's bounding box, in \xB5m (positive = towards +axis); the viewports update live");
+    add("log_range", "log range", this.numberControl(
+      6,
+      1,
+      (value) => this.callbacks.onSettings({ log_range: value }),
+      true
+    ), "the logabs color ramp's floor, in decades below the plane's maximum");
     return { rows: [fields, note], note };
   }
   renderSettings(settings) {
@@ -29800,7 +29955,8 @@ var Explorer = class {
       pml_thickness: settings.pml_thickness,
       resolution_um: settings.resolution_um,
       // the control's write() divides by its scale, so pass kernel units here
-      time_fs: settings.time_s
+      time_fs: settings.time_s,
+      log_range: settings.log_range
     };
     for (const [key, control] of this.simFields) {
       if (key === "port_size_mult" || key === "boundary_offset") continue;
@@ -29815,9 +29971,17 @@ var Explorer = class {
     const rows = [...this.sourceRows.values(), ...this.detectorRows.values()];
     for (const row2 of rows) {
       for (const control of row2.fields.values()) control.setDisabled(locked);
+      for (const control of row2.display.values()) control.setDisabled(locked);
       row2.visible.disabled = locked;
       const remove = row2.root.querySelector("button");
       if (remove) remove.disabled = locked;
+    }
+    if (!locked) {
+      for (const [id, row2] of this.detectorRows) {
+        if (row2.componentSelect) {
+          row2.componentSelect.disabled = (this.fieldComponents.get(id) ?? []).length === 0;
+        }
+      }
     }
     for (const control of this.simFields.values()) control.setDisabled(locked);
     this.sourceAdd.disabled = locked;
@@ -29869,6 +30033,23 @@ var Explorer = class {
       write(value) {
         const shown = value === null || value === void 0 ? "" : String(displayNumber(Number(value) / scale));
         if (document.activeElement !== input && input.value !== shown) input.value = shown;
+      },
+      setDisabled(value) {
+        input.disabled = value;
+      }
+    };
+  }
+  /** A color input (spec R15): one endpoint of a detector's field ramp. */
+  colorControl(onChange) {
+    const input = document.createElement("input");
+    input.type = "color";
+    input.className = "gfx-swatch";
+    input.addEventListener("input", () => onChange(input.value));
+    return {
+      element: input,
+      write(value) {
+        const text = value === null || value === void 0 ? "" : String(value);
+        if (document.activeElement !== input && input.value !== text) input.value = text;
       },
       setDisabled(value) {
         input.disabled = value;
@@ -30156,6 +30337,120 @@ function emptyNote(text) {
   return div;
 }
 
+// viewer/fieldramp.ts
+var SIGNED_TRANSFORMS = /* @__PURE__ */ new Set(["real", "imag", "phase"]);
+function isSigned(transform) {
+  return SIGNED_TRANSFORMS.has(transform);
+}
+function componentData(field, component) {
+  const index = field.components.indexOf(component);
+  if (index < 0) return null;
+  const [rows, cols] = field.grid;
+  const count = rows * cols;
+  return {
+    real: decodeFloat32(field.real, index * count, count),
+    imag: decodeFloat32(field.imag, index * count, count)
+  };
+}
+function transformValues(real, imag, transform) {
+  const out = new Float32Array(real.length);
+  for (let i = 0; i < real.length; i += 1) {
+    const re = real[i];
+    const im = imag[i];
+    switch (transform) {
+      case "real":
+        out[i] = re;
+        break;
+      case "imag":
+        out[i] = im;
+        break;
+      case "phase":
+        out[i] = Math.atan2(im, re);
+        break;
+      case "logabs":
+        out[i] = Math.log10(Math.hypot(re, im) + Number.MIN_VALUE);
+        break;
+      default:
+        out[i] = Math.hypot(re, im);
+    }
+  }
+  return out;
+}
+function valueRange(values, transform, logRange) {
+  let min = Infinity;
+  let max = -Infinity;
+  for (const value of values) {
+    if (value < min) min = value;
+    if (value > max) max = value;
+  }
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return [0, 1];
+  if (transform === "logabs") {
+    const floor = max - Math.abs(logRange);
+    if (min < floor) min = floor;
+  }
+  if (max <= min) max = min + 1e-12;
+  return [min, max];
+}
+function rampTexture(values, range, transform, low, high, opacity) {
+  const [min, max] = range;
+  const span = max - min;
+  const signed = isSigned(transform);
+  const bytes = new Uint8Array(values.length * 4);
+  for (let i = 0; i < values.length; i += 1) {
+    let t = span > 0 ? (values[i] - min) / span : 0;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    let r;
+    let g;
+    let b;
+    let a;
+    if (signed) {
+      r = mix(low[0], high[0], t);
+      g = mix(low[1], high[1], t);
+      b = mix(low[2], high[2], t);
+      a = Math.abs(2 * t - 1);
+    } else {
+      r = high[0];
+      g = high[1];
+      b = high[2];
+      a = t;
+    }
+    const alpha = a * opacity;
+    bytes[i * 4] = r;
+    bytes[i * 4 + 1] = g;
+    bytes[i * 4 + 2] = b;
+    bytes[i * 4 + 3] = Math.round(alpha * 255);
+  }
+  return bytes;
+}
+function parseColor(text) {
+  const match = /^#?([0-9a-f]{6})$/i.exec(text.trim());
+  if (!match) return [128, 128, 128];
+  const value = parseInt(match[1], 16);
+  return [value >> 16 & 255, value >> 8 & 255, value & 255];
+}
+function rampColor(t, transform, low, high) {
+  const clamped = t < 0 ? 0 : t > 1 ? 1 : t;
+  if (isSigned(transform)) {
+    return [
+      mix(low[0], high[0], clamped),
+      mix(low[1], high[1], clamped),
+      mix(low[2], high[2], clamped),
+      Math.abs(2 * clamped - 1)
+    ];
+  }
+  return [high[0], high[1], high[2], clamped];
+}
+function mix(from, to, t) {
+  return from + (to - from) * t;
+}
+function decodeFloat32(buffer, offset, count) {
+  const source = buffer instanceof ArrayBuffer ? buffer : buffer.buffer;
+  const base = buffer instanceof ArrayBuffer ? 0 : buffer.byteOffset;
+  const start = base + offset * 4;
+  if (start % 4 === 0) return new Float32Array(source, start, count);
+  return new Float32Array(source.slice(start, start + count * 4));
+}
+
 // viewer/glyphs.ts
 var GLYPH_COLOR = 16763955;
 var SELECTED_COLOR = 6750054;
@@ -30261,12 +30556,106 @@ var PlaneGlyphs = class {
       const basis = new Matrix4().makeBasis(u, v, normal);
       mesh.quaternion.setFromRotationMatrix(basis);
       group.add(mesh);
+      const outline = new LineLoop(
+        new BufferGeometry().setFromPoints([
+          new Vector3(-glyph.u_half, -glyph.v_half, 0),
+          new Vector3(glyph.u_half, -glyph.v_half, 0),
+          new Vector3(glyph.u_half, glyph.v_half, 0),
+          new Vector3(-glyph.u_half, glyph.v_half, 0)
+        ]),
+        new LineBasicMaterial({ color: baseColor, transparent: true, opacity: 0.9 })
+      );
+      outline.quaternion.copy(mesh.quaternion);
+      outline.visible = false;
+      group.add(outline);
       this.group.add(group);
-      return { group, material, uHalf: glyph.u_half, vHalf: glyph.v_half, axis: glyph.axis };
+      return {
+        group,
+        material,
+        uHalf: glyph.u_half,
+        vHalf: glyph.v_half,
+        axis: glyph.axis,
+        plane: mesh,
+        fieldMaterial: null,
+        outline,
+        texture: null
+      };
     }
     group.add(new Mesh(new SphereGeometry(POINT_RADIUS, 12, 8), material));
     this.group.add(group);
-    return { group, material, uHalf: 0, vHalf: 0, axis: glyph.axis };
+    return {
+      group,
+      material,
+      uHalf: 0,
+      vHalf: 0,
+      axis: glyph.axis,
+      plane: null,
+      fieldMaterial: null,
+      outline: null,
+      texture: null
+    };
+  }
+  /**
+   * Shades a detector's plane with the field it recorded (spec R15, D16).
+   *
+   * The transformed component becomes a texture on the plane; the plain
+   * translucent fill is replaced (the outline marks the extent instead). A null
+   * `field` — no result, no component, or `field_visible` off — restores the
+   * plain glyph.
+   */
+  setField(id, field, settings, logRange) {
+    const item = this.items.get(id);
+    if (!item || !item.plane) return;
+    const component = settings.field_component;
+    const data = field && component ? componentData(field, component) : null;
+    if (!field || !data || !settings.field_visible) {
+      this.clearField(item);
+      return;
+    }
+    const values = transformValues(data.real, data.imag, settings.field_transform);
+    const range = valueRange(values, settings.field_transform, logRange);
+    const low = parseColor(settings.field_color_low);
+    const high = parseColor(settings.field_color_high);
+    const bytes = rampTexture(values, range, settings.field_transform, low, high, settings.field_opacity);
+    const [rows, cols] = field.grid;
+    if (!item.texture || item.texture.image.width !== cols || item.texture.image.height !== rows) {
+      item.texture?.dispose();
+      item.texture = new DataTexture(
+        new Uint8Array(cols * rows * 4),
+        cols,
+        rows,
+        RGBAFormat
+      );
+      item.texture.minFilter = LinearFilter;
+      item.texture.magFilter = LinearFilter;
+      item.texture.colorSpace = SRGBColorSpace;
+    }
+    item.texture.image.data.set(bytes);
+    item.texture.needsUpdate = true;
+    if (!item.fieldMaterial) {
+      item.fieldMaterial = new MeshBasicMaterial({
+        transparent: true,
+        side: DoubleSide,
+        depthWrite: false
+      });
+      item.plane.material = item.fieldMaterial;
+    }
+    item.fieldMaterial.map = item.texture;
+    item.fieldMaterial.opacity = 1;
+    item.fieldMaterial.needsUpdate = true;
+    if (item.outline) item.outline.visible = true;
+    item.material.visible = false;
+  }
+  clearField(item) {
+    if (item.fieldMaterial && item.plane) {
+      item.plane.material = item.material;
+      item.fieldMaterial.dispose();
+      item.fieldMaterial = null;
+    }
+    item.texture?.dispose();
+    item.texture = null;
+    if (item.outline) item.outline.visible = false;
+    item.material.visible = true;
   }
   setVisible(id, visible) {
     const item = this.items.get(id);
@@ -30274,8 +30663,9 @@ var PlaneGlyphs = class {
   }
   setSelected(id) {
     for (const [key, item] of this.items) {
-      if (key === id) item.material.color.setHex(SELECTED_COLOR);
-      else item.material.color.setHex(item.material.userData.baseColor);
+      const color = key === id ? SELECTED_COLOR : item.material.userData.baseColor;
+      item.material.color.setHex(color);
+      if (item.outline) item.outline.material.color.setHex(color);
     }
   }
   dispose() {
@@ -30283,8 +30673,14 @@ var PlaneGlyphs = class {
   }
   clear() {
     for (const item of this.items.values()) {
+      item.texture?.dispose();
+      item.fieldMaterial?.dispose();
       item.group.traverse((object) => {
         if (object instanceof Mesh) object.geometry.dispose();
+        if (object instanceof LineLoop) {
+          object.geometry.dispose();
+          object.material.dispose();
+        }
       });
       item.material.dispose();
     }
@@ -34210,6 +34606,10 @@ var Section2D = class {
     this.onPortSelect = onPortSelect;
     this.payload = null;
     this.state = null;
+    //: the last result's per-detector fields (spec R15); empty until a run lands
+    this.fields = {};
+    //: a scratch canvas for rasterizing one field before it is drawn (spec R15)
+    this.scratch = null;
     this.exaggeration = 1;
     //: the box center (spec C5) of the section's two axes, for labelling local
     //: coordinates in device (stack) coordinates, like the slider
@@ -34254,6 +34654,11 @@ var Section2D = class {
   }
   setState(state) {
     this.state = state;
+    this.draw();
+  }
+  /** The last result's per-detector fields (spec R15); re-draws the overlay. */
+  setFields(fields) {
+    this.fields = fields ?? {};
     this.draw();
   }
   /**
@@ -34361,9 +34766,81 @@ var Section2D = class {
       ctx.stroke(path);
     }
     this.drawPorts(ctx, payload);
+    this.drawFields(ctx, payload);
     this.drawGlyphs(ctx, payload);
     this.drawRegion(ctx, payload);
     this.drawTicks(ctx, payload);
+  }
+  /**
+   * Shades a detector's plane with its field, where the section is parallel to
+   * it (spec R15, D16).
+   *
+   * The field is a raster on the detector's own (u, v) rectangle, drawn under
+   * the outline and ticks. A section perpendicular to the detector's plane
+   * shows nothing (its field is a plane, and there is nothing off it). The
+   * overlay fades with the same gaussian as the ports (spec R4), so a field
+   * fades in as its plane is approached.
+   */
+  drawFields(ctx, payload) {
+    const state = this.state;
+    if (!state) return;
+    const [ox, oy, oz] = payload.origin;
+    const origin = [ox, oy, oz];
+    const normalStack = { xy: 2, xz: 1, yz: 0 }[payload.plane];
+    const fade = state.port_fade_um > 0 ? state.port_fade_um : PORT_FADE_UM;
+    for (const glyph of state.glyphs ?? []) {
+      if (!glyph.visible || glyph.kind !== "detector") continue;
+      if (glyph.u_half <= 0 || glyph.v_half <= 0) continue;
+      if (glyph.axis !== normalStack) continue;
+      const settings = state.field_settings?.[glyph.id];
+      const field = this.fields[glyph.id];
+      if (!settings || !settings.field_visible || !field || !settings.field_component) continue;
+      const data = componentData(field, settings.field_component);
+      if (!data) continue;
+      const distance = glyph.center[glyph.axis] - (payload.position - origin[normalStack]);
+      if (Math.abs(distance) > PORT_FADE_CUTOFF * fade) continue;
+      const alpha = Math.exp(-0.5 * (distance / fade) ** 2);
+      if (alpha < 0.01) continue;
+      const values = transformValues(data.real, data.imag, settings.field_transform);
+      const range = valueRange(values, settings.field_transform, state.simulation?.log_range ?? 6);
+      this.blitField(ctx, glyph, field, values, range, settings, alpha);
+    }
+  }
+  /** Paints a detector's raster field over its (u, v) rectangle (spec R15). */
+  blitField(ctx, glyph, field, values, range, settings, alpha) {
+    const [rows, cols] = field.grid;
+    const image = this.fieldCanvas(cols, rows);
+    const pixels = image.getContext("2d").createImageData(cols, rows);
+    const span = range[1] - range[0];
+    const low = parseColor(settings.field_color_low);
+    const high = parseColor(settings.field_color_high);
+    for (let i = 0; i < values.length; i += 1) {
+      const t = span > 0 ? (values[i] - range[0]) / span : 0;
+      const [r, g, b, a] = rampColor(t, settings.field_transform, low, high);
+      pixels.data[i * 4] = r;
+      pixels.data[i * 4 + 1] = g;
+      pixels.data[i * 4 + 2] = b;
+      pixels.data[i * 4 + 3] = Math.round(a * 255);
+    }
+    image.getContext("2d").putImageData(pixels, 0, 0);
+    const [au, av] = { xy: [0, 1], xz: [0, 2], yz: [1, 2] }[this.payload.plane];
+    const cu = glyph.center[au];
+    const cv = glyph.center[av];
+    const [x0, y1] = this.project(cu - glyph.u_half, cv - glyph.v_half);
+    const [x1, y0] = this.project(cu + glyph.u_half, cv + glyph.v_half);
+    ctx.save();
+    ctx.globalAlpha = alpha * settings.field_opacity;
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(image, x0, y0, x1 - x0, y1 - y0);
+    ctx.restore();
+  }
+  fieldCanvas(cols, rows) {
+    if (!this.scratch || this.scratch.width !== cols || this.scratch.height !== rows) {
+      this.scratch = document.createElement("canvas");
+      this.scratch.width = cols;
+      this.scratch.height = rows;
+    }
+    return this.scratch;
   }
   /**
    * Outlines each source/detector where the section plane cuts it (spec R12).
@@ -34939,6 +35416,10 @@ function render({ model, el }) {
     selection: name ? { kind: "port", name } : null
   }));
   viewport.appendChild(section.root);
+  const colorbar = document.createElement("div");
+  colorbar.className = "gfx-colorbar";
+  colorbar.hidden = true;
+  sceneRoot.appendChild(colorbar);
   const content = scene.content;
   let levels = /* @__PURE__ */ new Map();
   let glyphs = new PortGlyphs(meta.ports);
@@ -34963,6 +35444,7 @@ function render({ model, el }) {
     glyphs = new PortGlyphs(meta.ports);
     content.add(glyphs.group);
     content.add(planes.group);
+    applyFields();
     scene.setBounds(geometry.size, geometry.origin);
   };
   rebuildContent();
@@ -35068,6 +35550,56 @@ function render({ model, el }) {
     positionSlider.value = String(value);
     queuePosition(value);
   });
+  function applyFields() {
+    const fields = model.get("fields") ?? {};
+    const state = model.get("state");
+    const settings2 = state.field_settings ?? {};
+    const logRange = state.simulation?.log_range ?? 6;
+    for (const glyph of state.glyphs ?? []) {
+      if (glyph.kind !== "detector") continue;
+      planes.setField(glyph.id, fields[glyph.id] ?? null, settings2[glyph.id], logRange);
+    }
+    explorer.setFieldComponents(fields);
+    section.setFields(fields);
+    renderColorbar(state, fields);
+  }
+  function renderColorbar(state, fields) {
+    const settings2 = state.field_settings ?? {};
+    const logRange = state.simulation?.log_range ?? 6;
+    const entry = (state.glyphs ?? []).find((glyph) => {
+      if (glyph.kind !== "detector") return false;
+      const s2 = settings2[glyph.id];
+      const field2 = fields[glyph.id];
+      return Boolean(s2?.field_visible && field2 && s2.field_component);
+    });
+    if (!entry) {
+      colorbar.hidden = true;
+      return;
+    }
+    const s = settings2[entry.id];
+    const field = fields[entry.id];
+    const data = componentData(field, s.field_component);
+    if (!data) {
+      colorbar.hidden = true;
+      return;
+    }
+    const values = transformValues(data.real, data.imag, s.field_transform);
+    const range = valueRange(values, s.field_transform, logRange);
+    const low = parseColor(s.field_color_low);
+    const high = parseColor(s.field_color_high);
+    const steps = 64;
+    const pixels = [];
+    for (let i = 0; i < steps; i += 1) {
+      const [r, g, b, a] = rampColor(i / (steps - 1), s.field_transform, low, high);
+      pixels.push(`rgba(${r},${g},${b},${a.toFixed(3)}) ${i / steps * 100}%`);
+    }
+    colorbar.hidden = false;
+    colorbar.replaceChildren(
+      colorbarTitle(`${entry.name} \xB7 ${s.field_component} \xB7 ${s.field_transform}`),
+      colorbarRamp(pixels.join(",")),
+      colorbarScale(range[0], range[1])
+    );
+  }
   const applyState = () => {
     const state = model.get("state");
     const is2d = state.active_viewport === "2d";
@@ -35103,6 +35635,7 @@ function render({ model, el }) {
     planes.setSelected(
       state.selection && (state.selection.kind === "source" || state.selection.kind === "detector") ? state.selection.name : null
     );
+    applyFields();
     run.disabled = state.running;
     runPhase.hidden = !state.running;
     runProgress.hidden = !state.running;
@@ -35173,6 +35706,7 @@ function render({ model, el }) {
     }
   };
   model.on("change:state", applyState);
+  model.on("change:fields", applyFields);
   model.on("change:progress", applyProgress);
   model.on("change:phase", applyPhase);
   model.on("change:section", applySection);
@@ -35328,6 +35862,36 @@ async function captureShell(shell, fallbackPng) {
 function currentState(model) {
   return model.get("state");
 }
+function colorbarTitle(text) {
+  const element = document.createElement("div");
+  element.className = "gfx-colorbar-title";
+  element.textContent = text;
+  return element;
+}
+function colorbarRamp(gradient) {
+  const element = document.createElement("div");
+  element.className = "gfx-colorbar-ramp";
+  element.style.backgroundImage = `linear-gradient(to right, ${gradient}), ${CHECKER}`;
+  return element;
+}
+function colorbarScale(lo, hi) {
+  const element = document.createElement("div");
+  element.className = "gfx-colorbar-scale";
+  const low = document.createElement("span");
+  low.textContent = formatValue(lo);
+  const high = document.createElement("span");
+  high.textContent = formatValue(hi);
+  element.append(low, high);
+  return element;
+}
+function formatValue(value) {
+  if (!Number.isFinite(value)) return "-";
+  if (value === 0) return "0";
+  const magnitude = Math.abs(value);
+  if (magnitude >= 1e4 || magnitude < 1e-3) return value.toExponential(2);
+  return value.toPrecision(3);
+}
+var CHECKER = "repeating-conic-gradient(#2a2a30 0% 25%, #3a3a42 0% 50%) 50% / 12px 12px";
 function currentStyles(model) {
   return currentState(model)?.styles ?? {};
 }

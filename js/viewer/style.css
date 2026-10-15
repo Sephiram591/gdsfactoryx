@@ -485,6 +485,45 @@
   display: block;
 }
 
+/* the field colorbar (spec R15): a ramp beside the 3D viewport naming the
+   shaded detector's component and transform, with the plane's own value range */
+.gfx-colorbar {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 132px;
+  padding: 8px;
+  background: rgba(24, 24, 30, 0.88);
+  border: 1px solid #3a3a42;
+  border-radius: 4px;
+  font-size: 11px;
+  color: #d8d8e0;
+  pointer-events: none;
+}
+
+.gfx-colorbar[hidden] {
+  display: none;
+}
+
+.gfx-colorbar-title {
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+
+.gfx-colorbar-ramp {
+  height: 12px;
+  border: 1px solid #4a4a52;
+  border-radius: 2px;
+}
+
+.gfx-colorbar-scale {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+}
+
 /* the 2D cross-section region (spec R4) */
 .gfx-section-controls {
   grid-area: section;

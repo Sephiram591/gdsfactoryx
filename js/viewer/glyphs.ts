@@ -1,9 +1,17 @@
 // Port glyphs: an arrow along the port orientation plus a bar for its width
 // (spec R3, Q12, Q15). Source/detector glyphs: a translucent plane at the
-// object's port frame, before anything is placed (spec R12, D11).
+// object's port frame, before anything is placed (spec R12, D11). A detector
+// with a result can shade its plane with the field it recorded (spec R15, D16).
 import * as THREE from "three";
 
-import type { GlyphPayload, PortMeta } from "./wire";
+import {
+  componentData,
+  parseColor,
+  rampTexture,
+  transformValues,
+  valueRange,
+} from "./fieldramp";
+import type { FieldPayload, FieldSettings, GlyphPayload, PortMeta } from "./wire";
 
 const GLYPH_COLOR = 0xffcc33;
 const SELECTED_COLOR = 0x66ff66;
@@ -114,6 +122,14 @@ interface PlaneItem {
   vHalf: number;
   /** the plane normal axis (0=x, 1=y, 2=z) */
   axis: number;
+  /** the textured plane mesh, when the glyph has one (spec R15) */
+  plane: THREE.Mesh | null;
+  /** the plane's field material, once a field has been shown (spec R15) */
+  fieldMaterial: THREE.MeshBasicMaterial | null;
+  /** the outline drawn while a field replaces the fill (spec R15, D16) */
+  outline: THREE.LineLoop | null;
+  /** the field texture, so a re-shade can update it in place (spec R15) */
+  texture: THREE.DataTexture | null;
 }
 
 /**
@@ -156,14 +172,98 @@ export class PlaneGlyphs {
       const basis = new THREE.Matrix4().makeBasis(u, v, normal);
       mesh.quaternion.setFromRotationMatrix(basis);
       group.add(mesh);
+      // the outline that marks the plane's extent once a field replaces the
+      // translucent fill (spec R15, D16); hidden until a field is shown
+      const outline = new THREE.LineLoop(
+        new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3(-glyph.u_half, -glyph.v_half, 0),
+          new THREE.Vector3(glyph.u_half, -glyph.v_half, 0),
+          new THREE.Vector3(glyph.u_half, glyph.v_half, 0),
+          new THREE.Vector3(-glyph.u_half, glyph.v_half, 0),
+        ]),
+        new THREE.LineBasicMaterial({ color: baseColor, transparent: true, opacity: 0.9 }),
+      );
+      outline.quaternion.copy(mesh.quaternion);
+      outline.visible = false;
+      group.add(outline);
       this.group.add(group);
-      return { group, material, uHalf: glyph.u_half, vHalf: glyph.v_half, axis: glyph.axis };
+      return {
+        group, material, uHalf: glyph.u_half, vHalf: glyph.v_half, axis: glyph.axis,
+        plane: mesh, fieldMaterial: null, outline, texture: null,
+      };
     }
 
     // a dipole (or an unresolvable port): a small marker instead of a plane
     group.add(new THREE.Mesh(new THREE.SphereGeometry(POINT_RADIUS, 12, 8), material));
     this.group.add(group);
-    return { group, material, uHalf: 0, vHalf: 0, axis: glyph.axis };
+    return {
+      group, material, uHalf: 0, vHalf: 0, axis: glyph.axis,
+      plane: null, fieldMaterial: null, outline: null, texture: null,
+    };
+  }
+
+  /**
+   * Shades a detector's plane with the field it recorded (spec R15, D16).
+   *
+   * The transformed component becomes a texture on the plane; the plain
+   * translucent fill is replaced (the outline marks the extent instead). A null
+   * `field` — no result, no component, or `field_visible` off — restores the
+   * plain glyph.
+   */
+  setField(id: string, field: FieldPayload | null, settings: FieldSettings, logRange: number): void {
+    const item = this.items.get(id);
+    if (!item || !item.plane) return;
+    const component = settings.field_component;
+    const data = field && component ? componentData(field, component) : null;
+    if (!field || !data || !settings.field_visible) {
+      this.clearField(item);
+      return;
+    }
+    const values = transformValues(data.real, data.imag, settings.field_transform);
+    const range = valueRange(values, settings.field_transform, logRange);
+    const low = parseColor(settings.field_color_low);
+    const high = parseColor(settings.field_color_high);
+    const bytes = rampTexture(values, range, settings.field_transform, low, high, settings.field_opacity);
+
+    const [rows, cols] = field.grid;
+    if (!item.texture || item.texture.image.width !== cols || item.texture.image.height !== rows) {
+      item.texture?.dispose();
+      item.texture = new THREE.DataTexture(
+        new Uint8Array(cols * rows * 4), cols, rows, THREE.RGBAFormat,
+      );
+      item.texture.minFilter = THREE.LinearFilter;
+      item.texture.magFilter = THREE.LinearFilter;
+      item.texture.colorSpace = THREE.SRGBColorSpace;
+    }
+    (item.texture.image.data as Uint8Array).set(bytes);
+    item.texture.needsUpdate = true;
+
+    if (!item.fieldMaterial) {
+      item.fieldMaterial = new THREE.MeshBasicMaterial({
+        transparent: true,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      });
+      item.plane.material = item.fieldMaterial;
+    }
+    item.fieldMaterial.map = item.texture;
+    item.fieldMaterial.opacity = 1;
+    item.fieldMaterial.needsUpdate = true;
+    if (item.outline) item.outline.visible = true;
+    // the plain translucent fill is replaced by the field (spec R15)
+    item.material.visible = false;
+  }
+
+  private clearField(item: PlaneItem): void {
+    if (item.fieldMaterial && item.plane) {
+      item.plane.material = item.material;
+      item.fieldMaterial.dispose();
+      item.fieldMaterial = null;
+    }
+    item.texture?.dispose();
+    item.texture = null;
+    if (item.outline) item.outline.visible = false;
+    item.material.visible = true;
   }
 
   setVisible(id: string, visible: boolean): void {
@@ -173,8 +273,9 @@ export class PlaneGlyphs {
 
   setSelected(id: string | null): void {
     for (const [key, item] of this.items) {
-      if (key === id) item.material.color.setHex(SELECTED_COLOR);
-      else item.material.color.setHex(item.material.userData.baseColor);
+      const color = key === id ? SELECTED_COLOR : item.material.userData.baseColor;
+      item.material.color.setHex(color);
+      if (item.outline) (item.outline.material as THREE.LineBasicMaterial).color.setHex(color);
     }
   }
 
@@ -184,8 +285,14 @@ export class PlaneGlyphs {
 
   private clear(): void {
     for (const item of this.items.values()) {
+      item.texture?.dispose();
+      item.fieldMaterial?.dispose();
       item.group.traverse((object) => {
         if (object instanceof THREE.Mesh) object.geometry.dispose();
+        if (object instanceof THREE.LineLoop) {
+          object.geometry.dispose();
+          (object.material as THREE.Material).dispose();
+        }
       });
       item.material.dispose();
     }

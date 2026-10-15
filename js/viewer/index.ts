@@ -8,11 +8,13 @@ import "./style.css";
 import * as THREE from "three";
 
 import { Explorer } from "./explorer";
+import { componentData, parseColor, rampColor, transformValues, valueRange } from "./fieldramp";
 import { PlaneGlyphs, PortGlyphs } from "./glyphs";
 import { LevelMeshes } from "./mesh";
 import { Scene3D, CONTROL_KINDS, type ControlKind } from "./scene";
 import { Section2D } from "./section";
 import type {
+  FieldPayload,
   GeometryPayload,
   MetaPayload,
   SectionPayload,
@@ -339,6 +341,14 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   }));
   viewport.appendChild(section.root);
 
+  // the field colorbar (spec R15): one per detector showing a field, over the 3D
+  // viewport. It names the component and transform and shows the plane's own
+  // range, so a shaded plane can be read (spec R15's AC).
+  const colorbar = document.createElement("div");
+  colorbar.className = "gfx-colorbar";
+  colorbar.hidden = true;
+  sceneRoot.appendChild(colorbar);
+
   // -- 3D content (spec D5, R13) --------------------------------------------
   // The levels, port glyphs and source/detector planes are built from the
   // payload's meshes and metadata. A boundary-offset edit re-boxes the device
@@ -378,6 +388,9 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
     // re-append so the plane glyphs stay after the meshes (a rebuild adds the
     // new meshes and glyphs to the end, which would otherwise cover them)
     content.add(planes.group);
+    // a re-boxed device invalidates the glyphs, so re-shade from the last
+    // result's fields (spec R15); the payload is keyed by spec id, not glyph
+    applyFields();
     scene.setBounds(geometry.size, geometry.origin);
   };
   rebuildContent();
@@ -503,6 +516,75 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   });
 
   // -- state sync -----------------------------------------------------------
+  // the last result's detector fields (spec R15, D16): hand them to the 3D
+  // planes, the explorer's component selects and the 2D section. Called from
+  // applyState (so a display-setting edit re-shades) and on change:fields (a
+  // new result).
+  function applyFields(): void {
+    const fields = (model.get("fields") as Record<string, FieldPayload> | undefined) ?? {};
+    const state = model.get("state") as StatePayload;
+    const settings = state.field_settings ?? {};
+    const logRange = state.simulation?.log_range ?? 6;
+    for (const glyph of state.glyphs ?? []) {
+      if (glyph.kind !== "detector") continue;
+      planes.setField(glyph.id, fields[glyph.id] ?? null, settings[glyph.id], logRange);
+    }
+    explorer.setFieldComponents(fields);
+    section.setFields(fields);
+    renderColorbar(state, fields);
+  }
+
+  /**
+   * Draws the colorbar for the detector showing a field (spec R15).
+   *
+   * The bar is a canvas ramp beside the 3D viewport, labelled with the
+   * detector's component, transform and the plane's own value range. Only one is
+   * shown — the first detector with a field — so the overlay stays readable when
+   * several detectors are shaded.
+   */
+  function renderColorbar(
+    state: StatePayload,
+    fields: Record<string, FieldPayload>,
+  ): void {
+    const settings = state.field_settings ?? {};
+    const logRange = state.simulation?.log_range ?? 6;
+    const entry = (state.glyphs ?? []).find((glyph) => {
+      if (glyph.kind !== "detector") return false;
+      const s = settings[glyph.id];
+      const field = fields[glyph.id];
+      return Boolean(s?.field_visible && field && s.field_component);
+    });
+    if (!entry) {
+      colorbar.hidden = true;
+      return;
+    }
+    const s = settings[entry.id];
+    const field = fields[entry.id];
+    const data = componentData(field, s.field_component!);
+    if (!data) {
+      colorbar.hidden = true;
+      return;
+    }
+    const values = transformValues(data.real, data.imag, s.field_transform);
+    const range = valueRange(values, s.field_transform, logRange);
+    const low = parseColor(s.field_color_low);
+    const high = parseColor(s.field_color_high);
+    const steps = 64;
+    const pixels: string[] = [];
+    for (let i = 0; i < steps; i += 1) {
+      const [r, g, b, a] = rampColor(i / (steps - 1), s.field_transform, low, high);
+      // the transparent end is shown against the panel, so the bar reads as the
+      // overlay does (spec D16)
+      pixels.push(`rgba(${r},${g},${b},${a.toFixed(3)}) ${(i / steps) * 100}%`);
+    }
+    colorbar.hidden = false;
+    colorbar.replaceChildren(
+      colorbarTitle(`${entry.name} · ${s.field_component} · ${s.field_transform}`),
+      colorbarRamp(pixels.join(",")),
+      colorbarScale(range[0], range[1]),
+    );
+  }
+
   const applyState = (): void => {
     const state = model.get("state") as StatePayload;
     const is2d = state.active_viewport === "2d";
@@ -544,6 +626,10 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
         ? state.selection.name
         : null,
     );
+    // the last result's detector fields shade their planes (spec R15, D16); the
+    // explorer names each detector's recorded components and the section draws
+    // the field where it is parallel to a detector's plane
+    applyFields();
     // while a mode-1 run is in flight the setup is frozen (spec D15); the
     // explorer disables its own controls, and Run is disabled here
     run.disabled = state.running;
@@ -636,6 +722,7 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   };
 
   model.on("change:state", applyState);
+  model.on("change:fields", applyFields);
   model.on("change:progress", applyProgress);
   model.on("change:phase", applyPhase);
   model.on("change:section", applySection);
@@ -869,6 +956,47 @@ async function captureShell(shell: HTMLElement, fallbackPng: string): Promise<st
 function currentState(model: AnyModel): StatePayload | undefined {
   return model.get("state") as StatePayload | undefined;
 }
+
+// The field colorbar's three parts (spec R15): a title naming the detector,
+// component and transform; the ramp itself; and the plane's own value range.
+function colorbarTitle(text: string): HTMLElement {
+  const element = document.createElement("div");
+  element.className = "gfx-colorbar-title";
+  element.textContent = text;
+  return element;
+}
+
+function colorbarRamp(gradient: string): HTMLElement {
+  const element = document.createElement("div");
+  element.className = "gfx-colorbar-ramp";
+  // a checkerboard shows through the transparent middle, so the alpha reads
+  element.style.backgroundImage = `linear-gradient(to right, ${gradient}), ${CHECKER}`;
+  return element;
+}
+
+function colorbarScale(lo: number, hi: number): HTMLElement {
+  const element = document.createElement("div");
+  element.className = "gfx-colorbar-scale";
+  const low = document.createElement("span");
+  low.textContent = formatValue(lo);
+  const high = document.createElement("span");
+  high.textContent = formatValue(hi);
+  element.append(low, high);
+  return element;
+}
+
+/** A compact number for the colorbar's ends (spec R15). */
+function formatValue(value: number): string {
+  if (!Number.isFinite(value)) return "-";
+  if (value === 0) return "0";
+  const magnitude = Math.abs(value);
+  if (magnitude >= 1e4 || magnitude < 1e-3) return value.toExponential(2);
+  return value.toPrecision(3);
+}
+
+//: a CSS checkerboard, so a transparent ramp end reads as transparent
+const CHECKER =
+  "repeating-conic-gradient(#2a2a30 0% 25%, #3a3a42 0% 50%) 50% / 12px 12px";
 
 function currentStyles(model: AnyModel): Record<string, { color: string; opacity: number }> {
   return currentState(model)?.styles ?? {};

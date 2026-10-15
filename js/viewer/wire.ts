@@ -122,6 +122,34 @@ export interface SimSettingsPayload {
   //: `(x+, x-, y+, y-, z+, z-)` in µm — how far the box's faces move off the
   //: geometry's bounding box (spec R13). The geometry does not change.
   boundary_offset: [number, number, number, number, number, number];
+  //: the bottom of the `logabs` color ramp, in decades below the plane's
+  //: maximum (spec R15, Q22)
+  log_range: number;
+}
+
+//: One detector's field from the last result (spec R15, D16). `real`/`imag` are
+//: component-major float32 planes: component `c` occupies `grid[0]*grid[1]`
+//: values starting at `c * grid[0] * grid[1]`.
+export interface FieldPayload {
+  //: the spec's id (matches a `SpecPayload.id`)
+  id: string;
+  name: string;
+  components: string[];
+  //: `[rows, cols]` of one component plane
+  grid: [number, number];
+  real: DataView | ArrayBuffer;
+  imag: DataView | ArrayBuffer;
+}
+
+//: A detector's field display settings (spec R15, D16). `component` is null
+//: until the user picks one, or when the result recorded none.
+export interface FieldSettings {
+  field_component: string | null;
+  field_transform: "real" | "imag" | "abs" | "phase" | "logabs";
+  field_color_low: string;
+  field_color_high: string;
+  field_opacity: number;
+  field_visible: boolean;
 }
 
 export interface StatePayload {
@@ -139,6 +167,8 @@ export interface StatePayload {
   sources: SpecPayload[];
   detectors: SpecPayload[];
   glyphs: GlyphPayload[];
+  //: per-detector field display settings, keyed by spec id (spec R15)
+  field_settings: Record<string, FieldSettings>;
   simulation: SimSettingsPayload;
   //: true while a mode-1 run is in flight; the setup is locked (spec D15)
   running: boolean;
