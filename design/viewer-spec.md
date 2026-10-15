@@ -387,10 +387,10 @@ plain translucent glyph.
     region outline and ticks. A detector whose plane does not match the current
     section is not shaded in 2D (its field is a plane, and there is nothing to
     show off that plane); the 3D viewport still shows it.
-- **Scale is per-plane.** `max` (the normalizer) is the maximum of the
-  transformed value over that detector's plane, so two detectors with very
-  different amplitudes are each readable. The colorbar shows the plane's own
-  range. A **shared** scale across detectors is Q21.
+- **Scale is per-plane** (Q21, resolved 2026-10-14). `max` (the normalizer) is
+  the maximum of the transformed value over that detector's plane, so two
+  detectors with very different amplitudes are each readable. The colorbar shows
+  the plane's own range. There is no shared scale across detectors.
 
 **Supplying a result.** The widget exposes a setter — `viewer.show_result(result)`
 — that takes a result the user produced themselves (a `RunResult`, R14, or any
@@ -403,8 +403,9 @@ re-send of the geometry.
   widget (R14 mode 3, or their own script): the common case is a user who ran
   under `srun` and wants to look at the fields in the widget.
 - **What it validates.** The result's detectors must correspond to the widget's
-  current setup, by name and shape, or the setter raises (see the AC below). It
-  does **not** re-place or re-run anything; it only adopts the arrays.
+  current setup — by name, grid shape, grid spacing and plane position (Q23) —
+  or the setter raises (see the AC below). It does **not** re-place or re-run
+  anything; it only adopts the arrays.
 - **What it does not do.** It does not adopt the result's geometry or its
   `objects` as the widget's setup — the widget's own stack and specs stay
   authoritative. A result recorded on a different device is refused rather than
@@ -419,9 +420,10 @@ AC:
   round-trip beyond the state patch (D10).
 - Switching the 2D section to a detector's plane shades the field there; a
   section on any other plane does not.
-- `show_result` with a result whose detector names/shapes match the setup makes
-  it the current result and redraws the overlays; a mismatched result raises and
-  leaves the previous result and the overlays unchanged (checked in a test).
+- `show_result` with a result whose detectors match the setup — name, grid
+  shape, grid spacing and plane position (Q23) — makes it the current result and
+  redraws the overlays; a mismatched result raises and leaves the previous result
+  and the overlays unchanged (checked in a test).
 - A detector with no result, and a result with no field for a detector, both
   leave that detector's plain glyph (no blank texture, no error).
 
@@ -896,11 +898,11 @@ R15 draws a detector's field on its plane. The color already encodes the value;
   `range = 6` decades (a fixed v1 constant, Q22) — so a true zero maps to the
   floor rather than to `−∞`. The same floor is what `alpha` approaches: a cell
   whose `|field|` is below `max·10^−6` is effectively transparent.
-- **Per-plane normalization.** `max|field|` is over that detector's plane only
-  (R15), so alpha is a statement about *this* plane. A plane whose field is
-  everywhere tiny is still fully drawn where it is brightest; comparing
-  amplitudes *between* detectors is the colorbar's job, not alpha's, and a shared
-  scale is Q21.
+- **Per-plane normalization** (Q21, resolved). `max|field|` is over that
+  detector's plane only (R15), so alpha is a statement about *this* plane. A
+  plane whose field is everywhere tiny is still fully drawn where it is
+  brightest; comparing amplitudes *between* detectors is the colorbar's job, not
+  alpha's. There is no shared scale.
 - **What alpha does not do.** It is not depth cueing, not a selection highlight,
   and not the detector glyph's own opacity (R12) — those are separate. The
   overlay's `field_opacity` multiplies alpha so the user can fade the whole
@@ -981,16 +983,30 @@ R15 draws a detector's field on its plane. The color already encodes the value;
   `viewer.show_result(result)`, which adopts a result the user produced
   elsewhere under the same surface. The `run_result`/`progress`/`phase` traits
   are the browser's summary of a mode-1 run, not the data.
-- **Q21.** Field overlay scale: per-plane (R15's default) or one shared scale
-  across every detector's plane? Per-plane is more readable per detector but
-  makes two planes hard to compare; a shared scale needs a rule for which planes
-  it covers and what happens when one is added or removed.
-- **Q22.** `logabs`'s dynamic range (D16): the fixed 6 decades is a v1 constant.
-  Open: make it a per-detector field, a global setting, or leave it fixed?
-- **Q23.** `show_result` validation (R15): how strict is "correspond to the
-  current setup"? Name and per-component grid shape is the proposed minimum;
-  open: also check the grid *spacing* and the plane's position, which would
-  catch a result recorded on a re-boxed device (R13)?
+- **Q21.** *Resolved 2026-10-14:* **per-plane.** Each detector's plane is
+  normalized to its own maximum (R15, D16), so two planes with very different
+  amplitudes are each readable and a newly added detector needs no rescaling of
+  the others. The colorbar carries each plane's own range; comparing amplitudes
+  *between* detectors is the user's read of the two colorbars, not a shared
+  scale. There is no cross-detector shared-scale mode.
+- **Q22.** The `logabs` value floor (D16). `logabs` is `log10(|field|)`, which is
+  `−∞` at an exact zero, so the color range is clamped at some number of decades
+  below the plane's maximum. **What the constant does:** it is *only* the bottom
+  of the color ramp. With `range = 6`, the color scale runs from `log10(max)` at
+  the top to `log10(max) − 6` at the bottom, so anything `10⁶×` weaker than the
+  plane's peak (including an exact zero) paints as the floor color rather than
+  stretching the scale to `−∞`. It is not a physical threshold and changes
+  nothing about the field — a larger range shows fainter detail at the cost of a
+  washed-out high end. **The question:** fixed at 6, or user-settable? If
+  settable, per-detector (a field alongside `field_transform`) or one global
+  setting for all overlays? v1 default is fixed 6.
+- **Q23.** *Resolved 2026-10-14:* **strict.** `show_result` (R15) checks the
+  result's detectors against the widget's current setup by **name, per-component
+  grid shape, grid spacing, and the plane's position** — not just name and
+  shape. A result recorded on a re-boxed device (R13) has the same detector
+  names and array shapes but a shifted grid, so a shape-only check would silently
+  mis-place the field; the position check refuses it instead. The setter raises
+  on any mismatch and leaves the previous result and overlays untouched.
 
 ---
 
@@ -1225,3 +1241,13 @@ R15 draws a detector's field on its plane. The color already encodes the value;
     result surface: `last_result`, `last_error`, and `show_result`.
   - M4's exit criterion gains R15's AC. R8 is superseded; Q9's promotion of R8
     is answered.
+- 2026-10-14: Q21 and Q23 resolved.
+  - **Q21 — per-plane scale.** R15 normalizes each detector's plane to its own
+    maximum; no cross-detector shared scale. A new detector needs no rescaling
+    of the others, and the colorbar carries each plane's own range.
+  - **Q23 — strict `show_result` validation.** It checks detector names, grid
+    shape, grid spacing and the plane's position, not name and shape alone, so a
+    result recorded on a re-boxed device (R13) is refused rather than mis-placed.
+  - **Q22** reworded to spell out that the 6-decade constant is only the floor of
+    the `logabs` color ramp (not a physical threshold) and to pose the fixed vs
+    user-settable choice concretely. Still open.
