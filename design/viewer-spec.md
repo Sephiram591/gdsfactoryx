@@ -76,6 +76,16 @@ stable: never renumber, only add. Item status is one of *Proposed*, *Accepted*,
 - **C5. Units.** Coordinates are in µm. The wire format uses float32 measured
   from a local origin (the box center), because absolute float32 loses nm
   precision at chip scale.
+- **C7. fdtdx 0.6.3.** The viewer tracks fdtdx **0.6.3** (`betterfdtd` env).
+  Since 0.6.2: `SimulationConfig` takes `grid=UniformGrid(spacing=...)` (no
+  `resolution=`), `config.uniform_spacing()` returns the grid spacing (works on
+  uniform and rectilinear grids; a non-uniform grid raises `ValueError`),
+  `place_objects` returns a 5-tuple `(objects, arrays, params, config, info)`,
+  `run_fdtd` returns `(timestep, arrays)`, and PML coefficients are derived
+  during `place_on_grid`. Importing gdsfactory enables jax x64 globally, so
+  fdtdx derives the PMLs' CPML coefficients as float64; `sim.run` re-casts
+  them to `config.dtype` (otherwise the CPML update promotes the float32 psi
+  fields and `eqxi.while_loop` rejects the changed structure).
 
 ## 5. UI layout (sketch)
 
@@ -527,9 +537,11 @@ without re-authoring the setup:
   phasor whose grid shape disagrees with its placement, or a `stack` whose box
   disagrees with the result's grid by more than one cell. Everything else is
   accepted — the goal is to display, not to gate.
-- **Geometry rebuild (D18).** The viewer rebuilds its state from `stack`
-  (default: the stack it was built from), so a foreign device's box becomes the
-  displayed geometry.
+- **Two worlds (R17).** The result never replaces the editor's setup: it
+  installs a **result world** — a separate `ViewerState` built from `stack`
+  (default: the stack it was built from) with its own adopted specs, styles and
+  cached geometry — that only the Result tab shows. The editor's stack, specs
+  and level styles stay authoritative and untouched.
 - **Phasor-family overlays only.** Detectors with a `"phasor"` state key
   (`PhasorDetector`, `ModeOverlapDetector`) shade (R15); every other detector
   is listed with a plain glyph and is selectable but never shaded.
@@ -542,8 +554,10 @@ without re-authoring the setup:
 
 AC:
 - A foreign result whose stack differs from the viewer's is loaded by passing
-  `stack=...`; the geometry payload reflects the new box and the old specs are
-  replaced by the adopted ones (checked in a test).
+  `stack=...`; switching to the Result tab shows the new box and the adopted
+  specs, while the editor views keep the viewer's own stack and specs
+  (checked in a test and kernel-side against a live foreign result,
+  2026-10-16).
 - A result missing `detector_states` raises and leaves the previous result and
   overlays unchanged (checked in a test).
 - `load_result` during a run raises `RuntimeError` (checked in a test).
@@ -557,6 +571,15 @@ The explorer gains a fourth tab, **Result**, that holds each detector's field
 — the widget's own runs and adopted foreign results alike — instead of the
 Sources/Detectors tab, which keeps authoring params only.
 
+- **Two worlds, one wire.** A result installs its own `ViewerState` (the
+  *result world*) beside the editor's; the active tab routes which world the
+  single `geometry`/`meta`/`section`/`state` traits carry. The Result tab
+  shows the result world (its geometry, its level styles, the adopted specs);
+  every other tab shows the editor's, unchanged. On a tab switch the whole set
+  is re-sent, `state` first so a rebuild sees the world's styles.
+- **Shading only on the Result tab.** The field payload rides along whenever a
+  result exists, but the browser shades only while the Result tab is active —
+  the editor's views never show field overlays.
 - **Frequency slider.** A multi-frequency detector (a `PhasorDetector` with
   several `wave_characters`) gets a slider selecting which frequency frame is
   shaded, with a readout of the frequency in THz. The kernel sends **all**
@@ -584,6 +607,13 @@ AC:
 - A Layers-row patch (`field_visible`/`field_color_high`/`field_opacity`)
   round-trips on an adopted spec too — display params are allowed there
   (checked kernel-side against a live adopted result, 2026-10-16).
+- A tab switch re-sends the active world's `geometry`/`meta`/`section`/`state`:
+  Result carries the result world's box and adopted specs, the editor tabs the
+  viewer's own (checked kernel-side against a live foreign result with a
+  different box, 2026-10-16).
+- Field shading appears only while the Result tab is active (checked kernel-side:
+  the payload is published on any tab, the browser's `applyFields` gates on
+  `state.active_tab === "result"`).
 
 ### R18. "None" port: absolute placement: *Must* (2026-10-16)
 
@@ -1180,12 +1210,15 @@ through fdtdx's own loop condition instead.
 
 How `load_result` (R16) turns a foreign result into display state.
 
-- **A fresh `ViewerState` per load.** The viewer never merges foreign
-  detectors into its live specs: it builds a new state from the result's
-  `stack` (default: its own), with fresh default `SimSettings` unless the
-  caller passes `settings=`. The memoized `_prepare` cache is reset on the
-  swap (its revision counter starts at 0 for every state, so a stale cache
-  would otherwise survive the swap).
+- **A result world per load, never a swap.** The viewer never merges foreign
+  detectors into its live specs, and never replaces its editor state either:
+  the result gets a separate `ViewerState` built from the result's `stack`
+  (default: its own), with fresh default `SimSettings` unless the caller passes
+  `settings=`. The result world carries its own cached geometry/section
+  payloads; the editor's setup, geometry and level styles are untouched and
+  come back untouched when the user leaves the Result tab (R17). The editor's
+  `_prepare` cache is keyed per world, so a stale cache cannot survive the
+  swap either way.
 - **One read-only "None"-port spec per detector.** Every detector in
   `objects.detectors` (names read from the placed objects — fdtdx may
   auto-generate) gets a spec with `port == "None"` (R18) whose `axis`/`center`/
@@ -1319,7 +1352,8 @@ How `load_result` (R16) turns a foreign result into display state.
 - **M3. Cross-section.** R4 (D4), plus D14's region ticks, settings screen,
   per-plane section state and save-image button. Exit: R4's AC.
 - **M4. Sources and detectors, running, and field overlays.** R12, R13, D11;
-  R14 modes 1 and 2; R15 (promoted from R8, D16).
+  R14 modes 1 and 2; R15 (promoted from R8, D16); R16–R18 (adoption, the
+  Result tab, absolute placement — D18).
   Exit: R12 and R13 AC, R14's mode-2 AC, and R15's AC.
 - **M5. Launch code and polish.** R14 mode 3 (the tail emitter), then *Should*
   items from R1–R4 and R12.
@@ -1625,9 +1659,10 @@ How `load_result` (R16) turns a foreign result into display state.
 
 - 2026-10-16: adopting a foreign completed result. `Viewer.load_result(
   objects, arrays, config, stack=None)` accepts the three pieces fdtdx hands
-  out from arbitrary user code and displays them (R16): the geometry rebuilds
-  from the result's stack, every detector becomes a read-only "None"-port spec
-  with a `grid_slice`-derived glyph, phasor-family detectors shade, and lenient
+  out from arbitrary user code and displays them (R16): a **result world** —
+  a separate state built from the result's stack — is installed beside the
+  editor's, every detector becomes a read-only "None"-port spec with a
+  `grid_slice`-derived glyph, phasor-family detectors shade, and lenient
   validation refuses only what could never render (D18). The explorer's new
   **Result** tab holds each result detector's plotting options, and
   multi-frequency detectors get a frequency slider that re-shades client-side —
@@ -1637,4 +1672,10 @@ How `load_result` (R16) turns a foreign result into display state.
   margin frame as `_place_at`; mode sources/detectors work on any plane, not
   only ports (R18). The Result tab also opens with a **Layers** section — one
   row per shaded detector with show/color/opacity for the result overlays,
-  independent of the editor's level Layers (R17).
+  independent of the editor's level Layers (R17). Later the same day: the
+  two-world split — the Result tab shows the result world's geometry and
+  styles while every other tab keeps the editor's (loading a result leaves the
+  editor untouched), and field shading applies only while the Result tab is
+  active (R17, D18). fdtdx 0.6.3 compatibility: `SimulationConfig(grid=...)`,
+  `uniform_spacing()`, the 5-tuple `place_objects`, and the PML CPML
+  coefficient dtype re-cast (C7).

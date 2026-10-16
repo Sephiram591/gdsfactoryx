@@ -30,6 +30,8 @@ export const Z_CENTER_LEVEL = "z_center";
 
 export interface ExplorerCallbacks {
   onPatch(patch: Record<string, unknown>): void;
+  /** the active explorer tab, so the render picks the right style set (R17) */
+  onActiveTab(tab: "layout" | "sources" | "simulation" | "result"): void;
   onSelect(
     selection: { kind: "level" | "port" | "source" | "detector"; name: string } | null,
   ): void;
@@ -61,7 +63,7 @@ interface PortRow {
   visible: HTMLInputElement;
 }
 
-/** One Result-tab Layers row: a detector's overlay show/color/opacity (R17). */
+/** One Result-tab Layers row: a stack level's show/color/opacity there (R17). */
 interface ResultLayerRow {
   root: HTMLElement;
   visible: HTMLInputElement;
@@ -134,9 +136,9 @@ export class Explorer {
   /** the Result tab's per-detector display controls, keyed by spec id (R17) */
   private resultControls = new Map<string, Map<string, Control>>();
   /**
-   * The Result tab's Layers-style rows (one per shaded detector), keyed by spec
-   * id — color and opacity of the result overlays, independent of the editor's
-   * Layers tab (levels).
+   * The Result tab's Layers-style rows (one per stack level), keyed by level
+   * name — color and opacity of the *result world's* render while the Result
+   * tab is active, independent of the editor's Layers tab (spec R17).
    */
   private resultLayers = new Map<string, ResultLayerRow>();
   private readonly resultLayersRoot: HTMLElement;
@@ -671,14 +673,14 @@ export class Explorer {
    * One section per detector with an entry in the last `fields` payload — the
    * widget's own runs and adopted foreign results alike — holding the detector's
    * field-display controls and, for a multi-frequency detector, the frequency
-   * slider. Rebuilt only when the payload set changes (a run or a
-   * `load_result`); the per-render fill writes values in place so a slider drag
-   * is never torn down.
+   * slider. A Layers section above them holds one row per stack level styling
+   * the device while this tab is active. Rebuilt only when the payload or
+   * metadata changes; the per-render fill writes values in place so a slider
+   * drag is never torn down.
    */
   private renderResult(state?: StatePayload): void {
     const ids = Object.keys(this.fields);
     this.resultNote.hidden = ids.length > 0;
-    this.resultLayersRoot.hidden = ids.length === 0;
 
     // rebuild the sections when the detector set changed
     const current = new Set(ids);
@@ -687,19 +689,22 @@ export class Explorer {
       controls.get("section")?.element.remove();
       this.resultControls.delete(id);
     }
-    for (const [id, row] of [...this.resultLayers]) {
-      if (current.has(id)) continue;
-      row.root.remove();
-      this.resultLayers.delete(id);
-    }
     for (const id of ids) {
       if (this.resultControls.has(id)) continue;
       const section = this.buildResultSection(id);
       this.resultSections.appendChild(section);
     }
-    for (const id of ids) {
-      if (this.resultLayers.has(id)) continue;
-      this.resultLayersList.appendChild(this.buildResultLayerRow(id));
+
+    // the Layers rows follow the level metadata (a re-box can drop or add one)
+    const levelNames = new Set(this.meta.levels.map((level) => level.name));
+    for (const [name, row] of [...this.resultLayers]) {
+      if (levelNames.has(name)) continue;
+      row.root.remove();
+      this.resultLayers.delete(name);
+    }
+    for (const level of this.meta.levels) {
+      if (this.resultLayers.has(level.name)) continue;
+      this.resultLayersList.appendChild(this.buildResultLayerRow(level.name));
     }
     if (!state) return;
     const settings = state.field_settings ?? {};
@@ -743,51 +748,63 @@ export class Explorer {
         low.element.classList.toggle("gfx-unused", nonNegative);
         low.element.title = nonNegative ? "unused by abs/logabs" : "";
       }
-      // the Layers row mirrors the section's show/high-color/opacity controls
-      const layer = this.resultLayers.get(id);
-      if (layer) {
-        if (layer.visible.checked !== s.field_visible) layer.visible.checked = s.field_visible;
-        const high = String(s.field_color_high);
-        if (layer.swatch.value !== high) layer.swatch.value = high;
-        const opacity = String(s.field_opacity);
-        if (layer.opacity.value !== opacity) layer.opacity.value = opacity;
-        layer.opacity.title = `opacity ${Number(s.field_opacity).toFixed(2)}`;
+    }
+    // the Layers rows show the style set currently on the wire (spec R17):
+    // the result world's styles while the Result tab is active
+    if (state) {
+      for (const [name, row] of this.resultLayers) {
+        const style = state.styles?.[name];
+        if (!style) continue;
+        if (row.visible.checked !== style.visible) row.visible.checked = style.visible;
+        if (row.swatch.value !== style.color) row.swatch.value = style.color;
+        const opacity = String(style.opacity);
+        if (row.opacity.value !== opacity) row.opacity.value = opacity;
+        row.opacity.title = `opacity ${style.opacity.toFixed(2)}`;
       }
     }
   }
 
   /**
-   * One Layers-style row in the Result tab: a detector's field overlay as
-   * show / high color / opacity, the same controls the editor's Layers tab
-   * offers for levels (spec R17). Writes the `field_*` display params, so this
-   * row and the detector's section stay in sync through the kernel round-trip;
-   * the editor's level colors are untouched.
+   * One Layers-style row in the Result tab: a stack level as show / color /
+   * opacity, the same controls the editor's Layers tab offers (spec R17). It
+   * patches `styles`, which the kernel routes to the result world's own state
+   * while this tab is active — so the editor's level colors are untouched.
    */
-  private buildResultLayerRow(id: string): HTMLElement {
-    const entry = this.fields[id];
+  private buildResultLayerRow(name: string): HTMLElement {
     const root = document.createElement("div");
     root.className = "gfx-row";
-    root.dataset.kind = "detector";
-    root.dataset.name = id;
+    root.dataset.kind = "level";
+    root.dataset.name = name;
 
-    const setParam = (key: string, value: unknown): void =>
-      this.callbacks.onUpdateSpec("detector", id, { params: { [key]: value } });
+    const patch = (style: Record<string, unknown>): void =>
+      this.callbacks.onPatch({ styles: { [name]: style } });
 
-    const visible = checkbox(true, (value) => setParam("field_visible", value));
+    const visible = checkbox(true, (value) => patch({ visible: value }));
     const swatch = document.createElement("input");
     swatch.type = "color";
     swatch.className = "gfx-swatch";
-    swatch.addEventListener("input", () => setParam("field_color_high", swatch.value));
+    swatch.addEventListener("input", () => patch({ color: swatch.value }));
     const opacity = document.createElement("input");
     opacity.type = "range";
     opacity.min = "0";
     opacity.max = "1";
-    opacity.step = "0.05";
+    opacity.step = "0.01";
     opacity.className = "gfx-opacity";
-    opacity.addEventListener("input", () => setParam("field_opacity", Number(opacity.value)));
+    let pending: number | null = null;
+    const flush = (): void => {
+      if (pending !== null) {
+        patch({ opacity: pending });
+        pending = null;
+      }
+    };
+    opacity.addEventListener("input", () => {
+      pending = Number(opacity.value);
+      if (window.requestAnimationFrame) window.requestAnimationFrame(flush);
+      else flush();
+    });
 
-    root.append(visible, swatch, opacity, label(entry.name));
-    this.resultLayers.set(id, { root, visible, swatch, opacity });
+    root.append(visible, swatch, opacity, label(name));
+    this.resultLayers.set(name, { root, visible, swatch, opacity });
     return root;
   }
 
@@ -1148,6 +1165,8 @@ export class Explorer {
   private setTab(index: number): void {
     this.panels.forEach((panel, i) => (panel.hidden = i !== index));
     this.tabButtons.forEach((tab, i) => tab.classList.toggle("gfx-active", i === index));
+    const tabs = ["layout", "sources", "simulation", "result"] as const;
+    this.callbacks.onActiveTab(tabs[index]);
   }
 
   private section(title: string, rows: HTMLElement[], add?: HTMLButtonElement): HTMLElement {

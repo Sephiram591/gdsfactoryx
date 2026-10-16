@@ -164,31 +164,25 @@ def test_validate_foreign_result_refuses_a_mismatched_stack() -> None:
 
 
 def test_load_result_same_stack_adopts_detectors() -> None:
-    """R16: adoption adds one read-only spec per detector and re-shades."""
+    """R16: adoption adds one read-only spec per result detector, in the result world."""
     viewer = _detector_viewer()
     result = _run(viewer)
     before_geometry = viewer.geometry
     viewer.load_result(*result)
-    specs = [s for s in viewer.specs if s.category == "detector"]
+    # the editor keeps its own specs; the result world holds the adopted ones
+    assert viewer._result_state is not None
+    specs = [s for s in viewer._result_state.specs if s.category == "detector"]
     assert specs, "adoption must create detector specs"
     for spec, obj in zip(specs, result.objects.detectors, strict=True):
         assert spec.port == "None"
         assert spec.params["name"] == obj.name
-    wire = viewer.state
-    for entry in wire["detectors"]:
-        assert entry["adopted"] is True
-    # fields keyed by the adopted ids, matching the detector names
-    names = {s.params["name"] for s in specs}
-    assert names == set(result.arrays.detector_states)
-    # geometry was re-sent (same stack, so the same box)
+        assert spec.id in viewer._result_state.adopted
+    # geometry was not re-sent on the editor (same stack, same box)
     assert viewer.geometry["size"] == before_geometry["size"]
-    # the old run's specs are gone: only the adopted ones remain
-    assert not any(s.port == "o1" and s.id not in [x.id for x in specs]
-                   for s in viewer.specs)
 
 
 def test_load_result_different_stack_rebuilds_geometry() -> None:
-    """R16: a foreign stack's box becomes the viewer's geometry."""
+    """R16/R17: a foreign stack becomes the result world's geometry; the editor is untouched."""
     viewer = _detector_viewer()
     result = _run(viewer)
     from gdsfactory.viewer.state import _rebox_stack
@@ -201,12 +195,16 @@ def test_load_result_different_stack_rebuilds_geometry() -> None:
                          (viewer.stack.center[0], viewer.stack.center[1]),
                          viewer.stack.z_center)
     viewer.load_result(result.objects, result.arrays, result.config, stack=other)
-    assert viewer.stack is other
-    # geometry size is in um, partial_real_shape in meters
+    # the editor keeps its own stack; the result world carries the foreign one
+    assert viewer.stack is not other
+    assert viewer._result_state.stack is other
+    # switching to the Result tab puts the result world's geometry on the wire
+    # (size is in um, partial_real_shape in meters)
+    viewer._on_msg(None, {"event": "set_state", "patch": {"active_tab": "result"}}, [])
     assert viewer.geometry["size"] == pytest.approx(
         [float(v) * 1e6 for v in other.partial_real_shape], abs=1e-5)
-    # the old specs were replaced by the adopted ones
-    assert all(s.id in viewer._viewer_state.adopted for s in viewer.specs)
+    # the result world's specs are the adopted ones
+    assert all(s.id in viewer._result_state.adopted for s in viewer._result_state.specs)
 
 
 def test_adopted_specs_are_read_only() -> None:
@@ -214,9 +212,15 @@ def test_adopted_specs_are_read_only() -> None:
     viewer = _detector_viewer()
     result = _run(viewer)
     viewer.load_result(*result)
-    spec = next(s for s in viewer.specs if s.category == "detector")
+    assert viewer._result_state is not None
+    spec = next(s for s in viewer._result_state.specs if s.category == "detector")
 
-    # a display edit is accepted
+    # a display edit is accepted (routed to the result world)
+    viewer._on_msg(
+        None,
+        {"event": "set_state", "patch": {"active_tab": "result"}},
+        [],
+    )
     viewer._on_msg(
         None,
         {"event": "update_spec", "kind": "detector",
@@ -241,7 +245,7 @@ def test_adopted_specs_are_read_only() -> None:
     )
     assert "port_offset" not in spec.params
     with pytest.raises(ValueError, match="cannot be removed"):
-        viewer._viewer_state.remove_spec(spec.id)
+        viewer._result_state.remove_spec(spec.id)
 
 
 def test_load_result_garbage_leaves_the_result_untouched() -> None:
@@ -250,7 +254,7 @@ def test_load_result_garbage_leaves_the_result_untouched() -> None:
     result = _run(viewer)
     viewer.load_result(*result)
     before_fields = dict(viewer.fields)
-    before_specs = list(viewer.specs)
+    before_state = viewer._result_state
 
     class _Arrays:
         pass  # no detector_states attribute at all: refused by R16's validation
@@ -259,7 +263,8 @@ def test_load_result_garbage_leaves_the_result_untouched() -> None:
         viewer.load_result(result.objects, _Arrays(), result.config)
     assert viewer.last_result.objects is result.objects
     assert viewer.fields == before_fields
-    assert viewer.specs == before_specs
+    # the result world is untouched too
+    assert viewer._result_state is before_state
 
 
 def test_load_result_while_running_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -298,10 +303,16 @@ def test_build_objects_skips_adopted_specs() -> None:
     viewer = _detector_viewer()
     result = _run(viewer)
     viewer.load_result(*result)
-    objects, config, constraints = viewer._prepare()
-    names = {o.name for o in objects if isinstance(o, Detector)}
-    foreign = {s.params["name"] for s in viewer.specs if s.id in viewer._viewer_state.adopted}
-    assert foreign and not (names & foreign)
+    assert viewer._result_state is not None
+    # the result world's adopted specs are excluded from build_objects: build
+    # the objects from the result world's own settings (what a run on that
+    # world would place) and check the adopted detectors are not re-created
+    foreign = {s.params["name"] for s in viewer._result_state.specs
+               if s.id in viewer._result_state.adopted}
+    assert foreign
+    result_objects, _, _ = sim.build_objects(viewer.stack, viewer._result_state)
+    names = {o.name for o in result_objects if isinstance(o, Detector)}
+    assert not (names & foreign)
 
 
 # ----------------------------------------------------- R17: frequency frames
@@ -428,7 +439,7 @@ def test_none_port_spec_places_through_place_objects() -> None:
     obj = next(o for o in placed.detectors if o.name == spec.name)
     # the placement resolves in the mesh local frame: the volume corner sits at
     # origin - 0.5 * size (adopt.grid_bounds_um's same math), in um
-    res_um = float(config.resolution) * 1e6
+    res_um = float(getattr(config, "grid").spacing) * 1e6
     volume = next(o for o in placed.objects if o is placed.volume)
     origin = viewer._viewer_state.origin
     size_um = [float(v) * 1e6 for v in volume.partial_real_shape]
@@ -510,8 +521,11 @@ def test_synthetic_spec_round_trips_as_a_payload() -> None:
     viewer = _detector_viewer()
     result = _run(viewer)
     viewer.load_result(*result)
-    spec = next(s for s in viewer.specs if s.category == "detector")
-    entry = next(e for e in viewer.state["detectors"] if e["id"] == spec.id)
+    assert viewer._result_state is not None
+    spec = next(s for s in viewer._result_state.specs if s.category == "detector")
+    wire = viewer._result_state.to_state()
+    entry = next(e for e in wire["detectors"] if e["id"] == spec.id)
+    assert entry["adopted"] is True
     back = sim.ObjectSpec.from_wire(entry)
     assert back.type == spec.type
     assert back.port == spec.port

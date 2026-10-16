@@ -213,7 +213,7 @@ def validate_result(state: Any, result: Any) -> None:
 
     resolution = _result_resolution(result)
     if resolution is None:
-        raise ValueError("the result has no grid resolution (.config.resolution)")
+        raise ValueError("the result has no grid resolution (.config.grid.spacing)")
 
     for name, spec in expected.items():
         phasor = _detector_phasor(result, name)
@@ -233,12 +233,14 @@ def validate_result(state: Any, result: Any) -> None:
             )
 
 def _result_resolution(result: Any) -> float | None:
-    """The result's grid spacing in µm, or None (spec Q23)."""
+    """The result's grid spacing in µm, or None (spec Q23).
+
+    fdtdx ≥ 0.6 carries the spacing on the config (any grid type); older
+    versions on ``config.resolution`` (in meters, like the spacing).
+    """
     config = getattr(result, "config", None)
-    resolution = getattr(config, "resolution", None)
-    if resolution is None:
-        return None
-    return float(resolution) * 1e6  # meters -> µm
+    spacing = _config_spacing(config)
+    return None if spacing is None else spacing * 1e6  # meters -> µm
 
 
 def _grid_matches(state: Any, spec: Any, grid: tuple[int, ...], resolution_um: float) -> bool:
@@ -270,6 +272,19 @@ def _grid_matches(state: Any, spec: Any, grid: tuple[int, ...], resolution_um: f
     )
 
 
+def _config_spacing(config: Any) -> float | None:
+    """A config's grid spacing in meters, or None (fdtdx ≥ 0.6 or older)."""
+    if hasattr(config, "uniform_spacing"):
+        try:
+            return float(config.uniform_spacing())
+        except ValueError:
+            return None
+    spacing = getattr(getattr(config, "grid", None), "spacing", None)
+    if spacing is None:
+        spacing = getattr(config, "resolution", None)
+    return None if spacing is None else float(spacing)
+
+
 def validate_foreign_result(
     objects: Any, arrays: Any, config: Any, stack: Any = None
 ) -> None:
@@ -285,8 +300,8 @@ def validate_foreign_result(
         objects: the result's placed ``ObjectContainer`` (needs ``.detectors``
             and ``.volume``).
         arrays: the result's arrays (needs ``.detector_states``).
-        config: the result's ``SimulationConfig`` (needs a positive
-            ``.resolution``).
+        config: the result's ``SimulationConfig`` (needs a positive grid
+            spacing).
         stack: the :class:`~gdsfactory.fdtdx_stack.StackDevice` the viewer will
             rebuild its geometry from, if known.
 
@@ -302,9 +317,9 @@ def validate_foreign_result(
     volume = getattr(objects, "volume", None)
     if detectors is None or volume is None:
         raise ValueError("the result needs .objects.detectors and .objects.volume")
-    resolution = getattr(config, "resolution", None)
-    if resolution is None or not float(resolution) > 0:
-        raise ValueError("the result needs a positive .config.resolution")
+    resolution = _config_spacing(config)
+    if resolution is None or not resolution > 0:
+        raise ValueError("the result needs a positive grid resolution (.config.grid.spacing)")
 
     for obj in detectors:
         state = detector_states.get(obj.name) if hasattr(detector_states, "get") else None

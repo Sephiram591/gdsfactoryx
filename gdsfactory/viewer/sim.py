@@ -595,6 +595,33 @@ def _create(stack: Any, spec: ObjectSpec, settings: SimSettings,
     return method(**kwargs)
 
 
+def _pml_coeffs_in_config_dtype(objects: Any, config: Any) -> Any:
+    """Re-casts the PMLs' CPML coefficients to ``config.dtype`` (fdtdx 0.6.3).
+
+    Importing gdsfactory enables jax x64 globally (``gdsfactory._jax``), and
+    fdtdx's ``place_on_grid`` then derives ``pml_a/b``/``inv_kappa`` as float64
+    regardless of ``config.dtype`` — so the CPML update ``b * psi + a * d``
+    promotes the float32 psi fields and ``eqxi.while_loop`` rejects the body's
+    changed output structure. Casting the coefficients back keeps the loop's
+    tree structure stable.
+    """
+    import jax.numpy as jnp
+
+    from fdtdx.fdtd.container import ObjectContainer
+
+    if objects is None or getattr(objects, "object_list", None) is None:
+        return objects
+    out = []
+    for obj in objects.object_list:
+        if type(obj).__name__ == "PerfectlyMatchedLayer":
+            for name in ("pml_a_E", "pml_b_E", "inv_kappa_E", "pml_a_H", "pml_b_H", "inv_kappa_H"):
+                value = getattr(obj, name, None)
+                if value is not None:
+                    obj = obj.aset(name, value.astype(config.dtype))
+        out.append(obj)
+    return ObjectContainer(object_list=out, volume_idx=objects.volume_idx)
+
+
 def build_objects(stack: Any, state: Any) -> tuple[list[Any], Any, list[Any]]:
     """The prepared objects, config and constraints (spec R14 mode 2, D11).
 
@@ -626,7 +653,8 @@ def build_objects(stack: Any, state: Any) -> tuple[list[Any], Any, list[Any]]:
         constraints += cons
 
     config = fdtdx.SimulationConfig(
-        time=settings.time_s, resolution=settings.resolution_um * 1e-6
+        time=settings.time_s,
+        grid=fdtdx.core.grid.UniformGrid(spacing=settings.resolution_um * 1e-6),
     )
     pml = fdtdx.BoundaryConfig.from_uniform_bound(thickness=settings.pml_thickness)
     boundaries, cons = fdtdx.boundary_objects_from_config(pml, volume)
@@ -708,6 +736,7 @@ def run(
     _check_cancel()
     key = jax.random.PRNGKey(0) if key is None else key
     objects, arrays, params, config, _ = fdtdx.place_objects(objects, config, constraints, key)
+    objects = _pml_coeffs_in_config_dtype(objects, config)
     arrays, objects, _ = apply_stack(arrays, objects, {**params, **init_stack_params(objects)}, key)
     _check_cancel()
 

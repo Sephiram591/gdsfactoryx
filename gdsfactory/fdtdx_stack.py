@@ -4074,7 +4074,7 @@ class StackDevice(StaticMultiMaterialObject):
 
     def _res_um(self) -> float:
         """Grid resolution in um."""
-        return self._config.resolution * 1e6
+        return self._config.uniform_spacing() * 1e6
 
     def interface_offsets(self, key: Array | None) -> list[Array]:
         """Samples every roughness entry.
@@ -4620,7 +4620,7 @@ class StackDevice(StaticMultiMaterialObject):
         Returns:
             The device with the reachable levels only.
         """
-        res_um = config.resolution * 1e6
+        res_um = config.uniform_spacing() * 1e6
         start, stop = grid_slice_tuple[2]
         half = 0.5 * (stop - start) * res_um
         bottom = self.z_center - half - 0.5 * res_um - self.level_margin
@@ -4756,7 +4756,7 @@ class StackDevice(StaticMultiMaterialObject):
                     jnp.sum(w_cell * sigma[:, k, None, None, None], axis=0)
                     for k in range(sigma.shape[1])
                 ]
-            cond = jnp.stack(cond) * self._config.resolution
+            cond = jnp.stack(cond) * self._config.uniform_spacing()
             gradient_config = self._config.gradient_config
             if gradient_config is not None and gradient_config.method == "reversible":
                 # fdtdx's reversible backward pass closes over the conductivity:

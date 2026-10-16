@@ -176,6 +176,11 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   // -- explorer -------------------------------------------------------------
   const explorer = new Explorer(meta, {
     onPatch: (patch) => sendPatch(model, patch),
+    onActiveTab: (tab) => {
+      // the render applies `result_styles` while the Result tab is active
+      // (spec R17); patching it re-syncs the state, which re-renders
+      sendPatch(model, { active_tab: tab });
+    },
     onSelect: (selection) => sendPatch(model, { selection }),
     onAddSource: (port) => send(model, { event: "add_source", port }),
     onAddDetector: (port) => send(model, { event: "add_detector", port }),
@@ -541,13 +546,18 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
     const state = model.get("state") as StatePayload;
     const settings = state.field_settings ?? {};
     const logRange = state.simulation?.log_range ?? 6;
+    // fields shade only while the Result tab is active (spec R17): the editor
+    // views show the setup, never an overlay
+    const shading = state.active_tab === "result";
     for (const glyph of state.glyphs ?? []) {
       if (glyph.kind !== "detector") continue;
-      planes.setField(glyph.id, fields[glyph.id] ?? null, settings[glyph.id], logRange);
+      planes.setField(
+        glyph.id, shading ? fields[glyph.id] ?? null : null, settings[glyph.id], logRange,
+      );
     }
     explorer.setFields(fields);
-    section.setFields(fields);
-    renderColorbar(state, fields);
+    section.setFields(shading ? fields : {});
+    renderColorbar(state, fields, shading);
   }
 
   /**
@@ -561,7 +571,12 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   function renderColorbar(
     state: StatePayload,
     fields: Record<string, FieldPayload>,
+    shading: boolean,
   ): void {
+    if (!shading) {
+      colorbar.hidden = true;
+      return;
+    }
     const settings = state.field_settings ?? {};
     const logRange = state.simulation?.log_range ?? 6;
     const entry = (state.glyphs ?? []).find((glyph) => {
@@ -620,6 +635,9 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
     if (document.activeElement !== positionBox) positionBox.value = String(state.plane_position);
     if (document.activeElement !== positionSlider) positionSlider.value = String(state.plane_position);
 
+    // the kernel sends the active world's geometry and styles (spec R17): the
+    // Result tab carries the result's own, the other tabs the editor's — so the
+    // styles here are already the ones this view shows
     for (const [name, meshes] of levels) {
       const style = state.styles[name];
       if (!style) continue;

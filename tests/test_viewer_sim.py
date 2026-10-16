@@ -364,7 +364,23 @@ class _FakeResult:
     class _Arrays:
         detector_states: ClassVar[dict[str, Any]] = {"o2_ModeOverlapDetector": object()}
 
+    class _Objects:
+        detectors: ClassVar[list[object]] = []
+
+        class _Volume:
+            grid_shape: ClassVar[tuple[int, int, int]] = (10, 10, 10)
+            grid_slice: ClassVar[tuple[slice, slice, slice]] = (
+                slice(0, 10), slice(0, 10), slice(0, 10),
+            )
+
+        volume = _Volume()
+
+    class _Config:
+        resolution: ClassVar[float] = 1e-7
+
     arrays = _Arrays()
+    objects = _Objects()
+    config = _Config()
 
 
 def _slow_run(monkeypatch: pytest.MonkeyPatch, seconds: float = 0.6) -> None:

@@ -118,6 +118,19 @@ def _absolute_params(
     }
 
 
+def _config_spacing(config: Any) -> float | None:
+    """A config's grid spacing in meters, or None (fdtdx ≥ 0.6 or older)."""
+    if hasattr(config, "uniform_spacing"):
+        try:
+            return float(config.uniform_spacing())
+        except ValueError:
+            return None
+    spacing = getattr(getattr(config, "grid", None), "spacing", None)
+    if spacing is None:
+        spacing = getattr(config, "resolution", None)
+    return None if spacing is None else float(spacing)
+
+
 def adopt_result(state: Any, objects: Any, config: Any) -> list[ObjectSpec]:
     """Creates one read-only "None"-port spec per detector in the result (R16).
 
@@ -134,7 +147,9 @@ def adopt_result(state: Any, objects: Any, config: Any) -> list[ObjectSpec]:
     Returns:
         The adopted specs, in ``objects.detectors`` order.
     """
-    resolution_m = float(config.resolution)
+    resolution_m = _config_spacing(config)
+    if resolution_m is None:
+        raise ValueError("the result needs a positive grid spacing (.config.grid.spacing)")
     volume = objects.volume
     volume_grid_shape = tuple(int(v) for v in volume.grid_shape)
     origin_um = tuple(float(v) for v in state.origin)

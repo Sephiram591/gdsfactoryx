@@ -50,7 +50,6 @@ from gdsfactory.viewer.payload import build_field_payload, build_payload, build_
 from gdsfactory.viewer.sim import RunResult, RunStopped, build_objects
 from gdsfactory.viewer.sim import run as _run_sim
 from gdsfactory.viewer.state import ViewerState
-
 __all__ = ["Viewer", "view"]
 
 _STATIC = Path(__file__).parent / "static"
@@ -125,6 +124,24 @@ class Viewer(anywidget.AnyWidget):
             **kwargs: passed to :class:`anywidget.AnyWidget`.
         """
         self._viewer_state = ViewerState(stack)
+        #: the result's own world (spec R17): a separate :class:`ViewerState`
+        #: built from the result's stack, holding the adopted specs and the
+        #: styles the Result tab edits. ``None`` until the first result arrives
+        #: (a run or a ``load_result``); while it is ``None`` the Result tab
+        #: shows its empty note. The editor world is never touched by a result.
+        self._result_state: ViewerState | None = None
+        #: the result world's cached geometry/section payloads, rebuilt only
+        #: when the result changes (they do not track editor edits)
+        self._result_geometry: dict[str, Any] = {}
+        self._result_meta: dict[str, Any] = {}
+        self._result_section: dict[str, Any] = {}
+        #: the result world the ``fields`` trait was last built from — so a
+        #: fresh result republishes its payload once, even from an editor tab
+        self._fields_state: ViewerState | None = None
+        #: the editor world's cached payloads (see :meth:`_cached_payloads`)
+        self._editor_geometry: dict[str, Any] | None = None
+        self._editor_meta: dict[str, Any] | None = None
+        self._editor_section: dict[str, Any] | None = None
         initial_save_dir = Path(save_dir).expanduser() if save_dir is not None else Path.cwd()
         self._run_result: Any = None
         self._run_error: BaseException | None = None
@@ -146,6 +163,99 @@ class Viewer(anywidget.AnyWidget):
         self.section = build_section_payload(self._viewer_state)
         self.save_dir = str(initial_save_dir.resolve())
         self.on_msg(self._on_msg)
+
+    # ------------------------------------------------------------------ worlds
+
+    def _install_result(self, result: RunResult, stack: Any, settings: Any = None) -> None:
+        """Installs a run result into the result world (spec R17).
+
+        The result gets its own :class:`ViewerState` — built from ``stack``,
+        holding the adopted specs and the Result tab's own styles — so the
+        editor's setup and level styles are untouched. Called by ``run``'s
+        worker (the widget's own stack) and by ``load_result`` (a foreign one).
+        """
+        from gdsfactory.viewer.adopt import adopt_result
+
+        new_state = ViewerState(stack, settings=settings)
+        adopt_result(new_state, result.objects, result.config)
+        self._result_state = new_state
+        geometry, meta = build_payload(new_state)
+        self._result_geometry = geometry
+        self._result_meta = meta
+        self._result_section = build_section_payload(new_state)
+
+    def _active_state(self) -> ViewerState:
+        """The state whose traits are on the wire (spec R17).
+
+        The Result tab shows the result world's geometry and state; every other
+        tab shows the editor's. The result world falls back to the editor while
+        no result exists (its tab then only shows the empty note).
+        """
+        if self._viewer_state.active_tab == "result" and self._result_state is not None:
+            return self._result_state
+        return self._viewer_state
+
+    def _sync_active(self, *, force: bool = False) -> None:
+        """Sends the active world's traits (spec R17).
+
+        A tab switch swaps which world the single ``geometry``/``meta``/
+        ``section``/``state`` traits carry, so on a switch (or ``force``) all
+        four are re-sent. ``state`` goes first so a rebuild sees the styles the
+        new world ships with; ``fields`` — the result world's whenever one
+        exists — rides along, so switching away from Result clears the
+        overlays (the browser shades only while the Result tab is active).
+        """
+        active = self._active_state()
+        if force or active is self._result_state:
+            self.state = active.to_state()
+            self.geometry = self._cached_payloads(active)[0]
+            self.meta = self._cached_payloads(active)[1]
+            self.section = (
+                self._result_section if active is self._result_state
+                else self._cached_section(self._viewer_state)
+            )
+            self.fields = (
+                build_field_payload(self._result_state, self._run_result)
+                if self._result_state is not None else {}
+            )
+            self._fields_state = self._result_state
+            return
+        # a fresh result world (run/show_result/load_result) republishes the
+        # field payload even from an editor tab — the browser shades only
+        # while the Result tab is active, so this is inert there (R17)
+        if self._result_state is not None and self._fields_state is not self._result_state:
+            self.fields = build_field_payload(self._result_state, self._run_result)
+            self._fields_state = self._result_state
+        self.state = active.to_state()
+
+    def _cached_payloads(self, state: ViewerState) -> tuple[dict[str, Any], dict[str, Any]]:
+        """The state's ``(geometry, meta)`` payloads, cached per world (spec R17).
+
+        A tab switch re-sends the whole set every time, so the mesh buffers are
+        built once per world; the editor's cache is dropped when a re-box moves
+        the box (``geometry_changed``).
+        """
+        if state is self._result_state:
+            return self._result_geometry, self._result_meta
+        if self._viewer_state.geometry_changed or self._editor_geometry is None:
+            self._viewer_state.geometry_changed = False
+            self._editor_geometry, self._editor_meta = build_payload(self._viewer_state)
+            self._editor_section = None
+        return self._editor_geometry, self._editor_meta
+
+    def _cached_section(self, state: ViewerState) -> dict[str, Any]:
+        """The editor world's section payload, cached between plane moves.
+
+        The result world's section is rebuilt once per result; the editor's
+        changes only when the plane or its position moves, which the caller
+        (``_on_msg``) detects — the cache here just avoids a re-slice on every
+        tab switch.
+        """
+        if state is not self._viewer_state:
+            return self._result_section
+        if self._editor_section is None:
+            self._editor_section = build_section_payload(self._viewer_state)
+        return self._editor_section
 
     # ------------------------------------------------------------------ handle
 
@@ -263,8 +373,11 @@ class Viewer(anywidget.AnyWidget):
                 )
                 self._run_result = result
                 self.run_result = {"status": "done", "detectors": _detector_names(result)}
+                # the result lands in the result world (spec R17): the editor's
+                # setup and styles are untouched, the Result tab shades from it
+                self._install_result(result, self.stack)
                 # the field buffers ride the same worker-thread context install
-                self.fields = build_field_payload(self._viewer_state, result)
+                self._sync_active()
             except RunStopped:
                 # a stopped run whose partial result is discarded: keep the
                 # previous result and its overlays, report the stop (spec D17)
@@ -276,7 +389,7 @@ class Viewer(anywidget.AnyWidget):
                 self.run_result = {"status": "error", "message": str(exc)}
             finally:
                 self._viewer_state.running = False
-                self.state = self._viewer_state.to_state()
+                self._sync_active()
                 self.progress = {}
                 self.phase = ""
                 self.stopping = False
@@ -339,7 +452,10 @@ class Viewer(anywidget.AnyWidget):
         self._run_result = result
         self._run_error = None
         self.run_result = {"status": "done", "detectors": _detector_names(result)}
-        self.fields = build_field_payload(self._viewer_state, result)
+        # the result lands in the result world too (spec R17): same stack as the
+        # editor here, but the Result tab shades from the result world's specs
+        self._install_result(result, self.stack)
+        self._sync_active()
 
     def load_result(
         self,
@@ -356,10 +472,13 @@ class Viewer(anywidget.AnyWidget):
         :func:`fdtdx.place_objects` returns ``(objects, config)`` and
         :func:`fdtdx.run_fdtd` returns ``(time_step, arrays)`` — so nothing is
         assembled for it; the widget's own run result passes as
-        ``load_result(*result)``. The viewer rebuilds its geometry from
-        ``stack`` (defaulting to the stack it was built from), adopts one
-        read-only spec per detector in ``objects.detectors`` (spec R16), and
-        re-shades the phasor-family detectors from ``arrays.detector_states``.
+        ``load_result(*result)``. The result lands in the viewer's **result
+        world** (spec R17): a separate state built from ``stack`` (defaulting
+        to the stack the widget was built from) that the Result tab shows —
+        its own geometry, one read-only adopted spec per detector in
+        ``objects.detectors`` (spec R16), and the phasor-family detectors
+        shaded from ``arrays.detector_states``. The editor's setup, geometry
+        and styles are untouched.
 
         The adopted detectors are excluded from a later :meth:`run`: the setup
         after a ``load_result`` is effectively fresh, and the foreign detectors
@@ -372,7 +491,7 @@ class Viewer(anywidget.AnyWidget):
             stack: the :class:`~gdsfactory.fdtdx_stack.StackDevice` the result
                 was recorded on; defaults to the widget's current stack.
             settings: kernel-side :class:`~gdsfactory.viewer.sim.SimSettings`
-                for the rebuilt state; defaults to fresh default settings.
+                for the result world; defaults to fresh default settings.
 
         Raises:
             RuntimeError: if a run is in flight (spec D15).
@@ -382,27 +501,20 @@ class Viewer(anywidget.AnyWidget):
         """
         if self._viewer_state.running:
             raise RuntimeError("a run is in flight; load_result is refused")
-        from gdsfactory.viewer.adopt import adopt_result
         from gdsfactory.viewer.fields import validate_foreign_result
 
         if stack is None:
             stack = self._viewer_state.stack
         validate_foreign_result(objects, arrays, config, stack=stack)
-        new_state = ViewerState(stack, settings=settings)
-        adopt_result(new_state, objects, config)
         result = RunResult(objects, arrays, config)
-        self._viewer_state = new_state
-        self._prepared = None  # the cached build belongs to the old state
+        self._install_result(result, stack, settings=settings)
         self._run_result = result
         self._run_error = None
         self._previous_result = None
-        geometry, meta = build_payload(new_state)
-        self.geometry = geometry
-        self.meta = meta
-        self.state = new_state.to_state()
-        self.section = build_section_payload(new_state)
         self.run_result = {"status": "done", "detectors": _detector_names(result)}
-        self.fields = build_field_payload(new_state, result)
+        # switching to the result world re-sends its traits; the editor's stay
+        # untouched and come back when the user leaves the Result tab (spec R17)
+        self._sync_active(force=True)
 
     # ------------------------------------------------------------------ messages
 
@@ -440,28 +552,61 @@ class Viewer(anywidget.AnyWidget):
             self._set_save_dir(content.get("dir"))
             return
         before = (self._viewer_state.plane, self._viewer_state.plane_position)
+        tab_before = self._viewer_state.active_tab
+        patch = dict(content.get("patch") or {}) if event == "set_state" else None
+        if patch is not None and "active_tab" in patch:
+            # the tab itself routes the worlds (spec R17), so it always edits
+            # the editor state, whichever world is on the wire
+            try:
+                self._viewer_state.apply_patch({"active_tab": patch.pop("active_tab")})
+            except (ValueError, TypeError, KeyError):
+                patch = None
+        active = self._active_state()
         try:
-            if event == "set_state":
-                self._viewer_state.apply_patch(content.get("patch") or {})
+            if patch is not None:
+                if patch:
+                    active.apply_patch(patch)
             elif event in _SETUP_EVENTS:
+                # setup events author the editor's setup (spec R17) — except a
+                # detector's display edit (the Result tab's field controls, spec
+                # R17): the result world's adopted specs own those, so an id
+                # adopted there is routed to it
+                if event == "update_spec" and self._result_state is not None:
+                    adopted = {s.id for s in self._result_state.specs
+                               if s.id in self._result_state.adopted}
+                    if content.get("kind") == "detector" and content.get("spec", {}).get("id") in adopted:
+                        self._result_state.apply_patch(
+                            {"detectors": [{"op": "update", **content["spec"]}]}
+                        )
+                        self.state = self._result_state.to_state()
+                        return
                 self._apply_setup_event(event, content)
             else:
                 return
         except (ValueError, TypeError, KeyError):
             pass  # a bad or refused message leaves the state unchanged
-        self.state = self._viewer_state.to_state()
+        if tab_before != self._viewer_state.active_tab:
+            # a tab switch swaps which world the traits carry (spec R17): the
+            # Result tab shows the result world's geometry and state, the other
+            # tabs the editor's, so re-send the now-active world's set
+            self._sync_active(force=True)
+            return
+        self.state = active.to_state()
+        if active is self._result_state:
+            return  # the result world tracks no editor edits; styles ride `state`
         if self._viewer_state.geometry_changed:
             # a boundary_offset edit re-boxed the device (spec R13): re-send the
             # mesh buffers and metadata so the browser rebuilds its viewports
-            self._viewer_state.geometry_changed = False
-            geometry, meta = build_payload(self._viewer_state)
+            geometry, meta = self._cached_payloads(self._viewer_state)
             self.geometry = geometry
             self.meta = meta
-            self.section = build_section_payload(self._viewer_state)
+            self._editor_section = None
+            self.section = self._cached_section(self._viewer_state)
             return
         after = (self._viewer_state.plane, self._viewer_state.plane_position)
         if after != before:
-            self.section = build_section_payload(self._viewer_state)
+            self._editor_section = build_section_payload(self._viewer_state)
+            self.section = self._editor_section
 
     def _apply_setup_event(self, event: str, content: dict[str, Any]) -> None:
         """Turns a setup event into a state patch (spec R12, R13, D15).

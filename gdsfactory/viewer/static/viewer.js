@@ -29580,9 +29580,9 @@ var Explorer = class {
     /** the Result tab's per-detector display controls, keyed by spec id (R17) */
     this.resultControls = /* @__PURE__ */ new Map();
     /**
-     * The Result tab's Layers-style rows (one per shaded detector), keyed by spec
-     * id — color and opacity of the result overlays, independent of the editor's
-     * Layers tab (levels).
+     * The Result tab's Layers-style rows (one per stack level), keyed by level
+     * name — color and opacity of the *result world's* render while the Result
+     * tab is active, independent of the editor's Layers tab (spec R17).
      */
     this.resultLayers = /* @__PURE__ */ new Map();
     /** each detector's frequency list, from its field payload (spec R17) */
@@ -30069,33 +30069,34 @@ var Explorer = class {
    * One section per detector with an entry in the last `fields` payload — the
    * widget's own runs and adopted foreign results alike — holding the detector's
    * field-display controls and, for a multi-frequency detector, the frequency
-   * slider. Rebuilt only when the payload set changes (a run or a
-   * `load_result`); the per-render fill writes values in place so a slider drag
-   * is never torn down.
+   * slider. A Layers section above them holds one row per stack level styling
+   * the device while this tab is active. Rebuilt only when the payload or
+   * metadata changes; the per-render fill writes values in place so a slider
+   * drag is never torn down.
    */
   renderResult(state) {
     const ids = Object.keys(this.fields);
     this.resultNote.hidden = ids.length > 0;
-    this.resultLayersRoot.hidden = ids.length === 0;
     const current = new Set(ids);
     for (const [id, controls] of [...this.resultControls]) {
       if (current.has(id)) continue;
       controls.get("section")?.element.remove();
       this.resultControls.delete(id);
     }
-    for (const [id, row2] of [...this.resultLayers]) {
-      if (current.has(id)) continue;
-      row2.root.remove();
-      this.resultLayers.delete(id);
-    }
     for (const id of ids) {
       if (this.resultControls.has(id)) continue;
       const section = this.buildResultSection(id);
       this.resultSections.appendChild(section);
     }
-    for (const id of ids) {
-      if (this.resultLayers.has(id)) continue;
-      this.resultLayersList.appendChild(this.buildResultLayerRow(id));
+    const levelNames = new Set(this.meta.levels.map((level) => level.name));
+    for (const [name, row2] of [...this.resultLayers]) {
+      if (levelNames.has(name)) continue;
+      row2.root.remove();
+      this.resultLayers.delete(name);
+    }
+    for (const level of this.meta.levels) {
+      if (this.resultLayers.has(level.name)) continue;
+      this.resultLayersList.appendChild(this.buildResultLayerRow(level.name));
     }
     if (!state) return;
     const settings = state.field_settings ?? {};
@@ -30134,45 +30135,56 @@ var Explorer = class {
         low.element.classList.toggle("gfx-unused", nonNegative);
         low.element.title = nonNegative ? "unused by abs/logabs" : "";
       }
-      const layer = this.resultLayers.get(id);
-      if (layer) {
-        if (layer.visible.checked !== s.field_visible) layer.visible.checked = s.field_visible;
-        const high = String(s.field_color_high);
-        if (layer.swatch.value !== high) layer.swatch.value = high;
-        const opacity = String(s.field_opacity);
-        if (layer.opacity.value !== opacity) layer.opacity.value = opacity;
-        layer.opacity.title = `opacity ${Number(s.field_opacity).toFixed(2)}`;
+    }
+    if (state) {
+      for (const [name, row2] of this.resultLayers) {
+        const style = state.styles?.[name];
+        if (!style) continue;
+        if (row2.visible.checked !== style.visible) row2.visible.checked = style.visible;
+        if (row2.swatch.value !== style.color) row2.swatch.value = style.color;
+        const opacity = String(style.opacity);
+        if (row2.opacity.value !== opacity) row2.opacity.value = opacity;
+        row2.opacity.title = `opacity ${style.opacity.toFixed(2)}`;
       }
     }
   }
   /**
-   * One Layers-style row in the Result tab: a detector's field overlay as
-   * show / high color / opacity, the same controls the editor's Layers tab
-   * offers for levels (spec R17). Writes the `field_*` display params, so this
-   * row and the detector's section stay in sync through the kernel round-trip;
-   * the editor's level colors are untouched.
+   * One Layers-style row in the Result tab: a stack level as show / color /
+   * opacity, the same controls the editor's Layers tab offers (spec R17). It
+   * patches `styles`, which the kernel routes to the result world's own state
+   * while this tab is active — so the editor's level colors are untouched.
    */
-  buildResultLayerRow(id) {
-    const entry = this.fields[id];
+  buildResultLayerRow(name) {
     const root = document.createElement("div");
     root.className = "gfx-row";
-    root.dataset.kind = "detector";
-    root.dataset.name = id;
-    const setParam = (key, value) => this.callbacks.onUpdateSpec("detector", id, { params: { [key]: value } });
-    const visible = checkbox(true, (value) => setParam("field_visible", value));
+    root.dataset.kind = "level";
+    root.dataset.name = name;
+    const patch = (style) => this.callbacks.onPatch({ styles: { [name]: style } });
+    const visible = checkbox(true, (value) => patch({ visible: value }));
     const swatch = document.createElement("input");
     swatch.type = "color";
     swatch.className = "gfx-swatch";
-    swatch.addEventListener("input", () => setParam("field_color_high", swatch.value));
+    swatch.addEventListener("input", () => patch({ color: swatch.value }));
     const opacity = document.createElement("input");
     opacity.type = "range";
     opacity.min = "0";
     opacity.max = "1";
-    opacity.step = "0.05";
+    opacity.step = "0.01";
     opacity.className = "gfx-opacity";
-    opacity.addEventListener("input", () => setParam("field_opacity", Number(opacity.value)));
-    root.append(visible, swatch, opacity, label(entry.name));
-    this.resultLayers.set(id, { root, visible, swatch, opacity });
+    let pending = null;
+    const flush = () => {
+      if (pending !== null) {
+        patch({ opacity: pending });
+        pending = null;
+      }
+    };
+    opacity.addEventListener("input", () => {
+      pending = Number(opacity.value);
+      if (window.requestAnimationFrame) window.requestAnimationFrame(flush);
+      else flush();
+    });
+    root.append(visible, swatch, opacity, label(name));
+    this.resultLayers.set(name, { root, visible, swatch, opacity });
     return root;
   }
   /** One detector's display controls in the Result tab (spec R17). */
@@ -30512,6 +30524,8 @@ var Explorer = class {
   setTab(index) {
     this.panels.forEach((panel, i) => panel.hidden = i !== index);
     this.tabButtons.forEach((tab, i) => tab.classList.toggle("gfx-active", i === index));
+    const tabs = ["layout", "sources", "simulation", "result"];
+    this.callbacks.onActiveTab(tabs[index]);
   }
   section(title2, rows, add) {
     const section = document.createElement("div");
@@ -35533,6 +35547,9 @@ function render({ model, el }) {
   sectionControls.append(planeToggle, position);
   const explorer = new Explorer(meta, {
     onPatch: (patch) => sendPatch(model, patch),
+    onActiveTab: (tab) => {
+      sendPatch(model, { active_tab: tab });
+    },
     onSelect: (selection) => sendPatch(model, { selection }),
     onAddSource: (port) => send(model, { event: "add_source", port }),
     onAddDetector: (port) => send(model, { event: "add_detector", port }),
@@ -35821,15 +35838,25 @@ function render({ model, el }) {
     const state = model.get("state");
     const settings2 = state.field_settings ?? {};
     const logRange = state.simulation?.log_range ?? 6;
+    const shading = state.active_tab === "result";
     for (const glyph of state.glyphs ?? []) {
       if (glyph.kind !== "detector") continue;
-      planes.setField(glyph.id, fields[glyph.id] ?? null, settings2[glyph.id], logRange);
+      planes.setField(
+        glyph.id,
+        shading ? fields[glyph.id] ?? null : null,
+        settings2[glyph.id],
+        logRange
+      );
     }
     explorer.setFields(fields);
-    section.setFields(fields);
-    renderColorbar(state, fields);
+    section.setFields(shading ? fields : {});
+    renderColorbar(state, fields, shading);
   }
-  function renderColorbar(state, fields) {
+  function renderColorbar(state, fields, shading) {
+    if (!shading) {
+      colorbar.hidden = true;
+      return;
+    }
     const settings2 = state.field_settings ?? {};
     const logRange = state.simulation?.log_range ?? 6;
     const entry = (state.glyphs ?? []).find((glyph) => {

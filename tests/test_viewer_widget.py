@@ -217,6 +217,8 @@ def test_state_edit_carries_no_geometry() -> None:
         "running",
         # R15 adds the detector field display settings (spec R15, D16)
         "field_settings",
+        # R17 adds the active tab, which routes the editor/result worlds
+        "active_tab",
     }
 
 
@@ -371,7 +373,21 @@ class _StubResult:
     class _Arrays:
         detector_states: dict[str, object] = {}
 
+    class _Objects:
+        detectors: list[object] = []
+
+        class _Volume:
+            grid_shape = (10, 10, 10)
+            grid_slice = (slice(0, 10), slice(0, 10), slice(0, 10))
+
+        volume = _Volume()
+
+    class _Config:
+        resolution = 1e-7
+
     arrays = _Arrays()
+    objects = _Objects()
+    config = _Config()
 
 
 def _stoppable_run(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:

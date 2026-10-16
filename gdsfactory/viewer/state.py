@@ -185,6 +185,11 @@ class ViewerState:
         #: the plane fade as a fraction of the box size along the section's
         #: normal; the 1/e distance is that fraction of the size (spec R4)
         self.plane_fade_frac: float = PLANE_FADE_FRAC
+        #: which explorer tab the browser shows (spec R17): the kernel sends the
+        #: active world's traits — the editor's, or the result's own geometry and
+        #: state when the Result tab is active — so the render knows which set
+        #: applies
+        self.active_tab: str = "layout"
 
     # ------------------------------------------------------------------ section
 
@@ -243,6 +248,16 @@ class ViewerState:
         # the box), so keep the visibility map in step with the glyphs
         names = {port.name for port in (*self.ports, *self.plane_ports)}
         self.port_visible = {name: self.port_visible.get(name, True) for name in names}
+        # and the style map in step with the levels (a level outside the old
+        # box appears; one no longer reaching it is dropped)
+        level_names = {level.name for level in self.levels}
+        self.styles = {name: s for name, s in self.styles.items() if name in level_names}
+        for level in self.levels:
+            if level.name not in self.styles:
+                self.styles[level.name] = LayerStyle(
+                    color="#cccccc", opacity=FILL_OPACITY if level.fill else LEVEL_OPACITY,
+                    visible=True,
+                )
         for plane in PLANES:
             lo, hi = self.plane_bounds(plane)
             self.plane_positions[plane] = min(hi, max(lo, self.plane_positions[plane]))
@@ -405,6 +420,7 @@ class ViewerState:
         """
         unknown = set(patch) - {
             "styles",
+            "active_tab",
             "port_visible",
             "selection",
             "active_viewport",
@@ -421,6 +437,12 @@ class ViewerState:
 
         if self.running and ({"sources", "detectors", "simulation"} & set(patch)):
             raise ValueError("The setup is locked while a run is in flight")
+
+        if "active_tab" in patch:
+            tab = patch["active_tab"]
+            if tab not in ("layout", "sources", "simulation", "result"):
+                raise ValueError(f"Unknown tab {tab!r}")
+            self.active_tab = tab
 
         for name, style in patch.get("styles", {}).items():
             if name not in self.styles:
@@ -493,6 +515,7 @@ class ViewerState:
                 name: {"color": s.color, "opacity": s.opacity, "visible": s.visible}
                 for name, s in self.styles.items()
             },
+            "active_tab": self.active_tab,
             "port_visible": dict(self.port_visible),
             "selection": self.selection,
             "active_viewport": self.active_viewport,

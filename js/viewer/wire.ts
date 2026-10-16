@@ -171,6 +171,9 @@ export interface FieldSettings {
 
 export interface StatePayload {
   styles: Record<string, LayerStyle>;
+  //: which explorer tab the browser shows; the kernel sends the active world's
+  //: geometry/state for it (the Result tab shows the result's own, spec R17)
+  active_tab: "layout" | "sources" | "simulation" | "result";
   port_visible: Record<string, boolean>;
   selection: Selection | null;
   active_viewport: "3d" | "2d";
