@@ -214,7 +214,10 @@ export class PlaneGlyphs {
     const item = this.items.get(id);
     if (!item || !item.plane) return;
     const component = settings.field_component;
-    const data = field && component ? componentData(field, component) : null;
+    // the selected frequency frame, client-side so a slider move re-shades with
+    // no kernel round-trip (spec R17)
+    const frame = settings.field_freq ?? 0;
+    const data = field && component ? componentData(field, component, frame) : null;
     if (!field || !data || !settings.field_visible) {
       this.clearField(item);
       return;

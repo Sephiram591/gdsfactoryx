@@ -306,7 +306,7 @@ export class Section2D {
       const settings = state.field_settings?.[glyph.id];
       const field = this.fields[glyph.id];
       if (!settings || !settings.field_visible || !field || !settings.field_component) continue;
-      const data = componentData(field, settings.field_component);
+      const data = componentData(field, settings.field_component, settings.field_freq ?? 0);
       if (!data) continue;
       // the gaussian the ports use, from the section plane to the detector's
       // plane (both in the local frame) (spec D16, R4)

@@ -13,7 +13,6 @@
 // disable is convenience, not the guarantee.
 import type {
   FieldPayload,
-  FieldSettings,
   LevelMeta,
   MetaPayload,
   PortMeta,
@@ -62,6 +61,14 @@ interface PortRow {
   visible: HTMLInputElement;
 }
 
+/** One Result-tab Layers row: a detector's overlay show/color/opacity (R17). */
+interface ResultLayerRow {
+  root: HTMLElement;
+  visible: HTMLInputElement;
+  swatch: HTMLInputElement;
+  opacity: HTMLInputElement;
+}
+
 //: One editable control in a spec or settings form: the element to disable, a
 //: writer that pushes the kernel's value back without stealing focus, and a
 //: disable hook (a pair control is two inputs behind one element).
@@ -75,6 +82,8 @@ interface SpecRow {
   root: HTMLElement;
   /** the type the row's fields were built for; a change rebuilds them */
   type: string;
+  /** the port the row's fields were built for; "None" has its own set (R18) */
+  port: string;
   /** the collapse arrow; its label tracks the row's collapsed state */
   twisty: HTMLButtonElement;
   collapsed: boolean;
@@ -83,17 +92,11 @@ interface SpecRow {
   /** the remove button, disabled while a run is in flight (spec D15) */
   remove: HTMLButtonElement;
   fields: Map<string, Control>;
-  /** the field-display controls (spec R15); empty for a source */
-  display: Map<string, Control>;
-  /** the "Field" group, shown only for a detector (spec R15) */
-  displayGroup: HTMLElement | null;
-  /** the component select, whose options come from the last result (spec R15) */
-  componentSelect: HTMLSelectElement | null;
-  /** the transform select, so a non-negative transform can dim the low color */
-  transformSelect: HTMLSelectElement | null;
+  /** whether the spec came from a loaded result (read-only, spec R16) */
+  adopted: boolean;
 }
 
-const TABS = ["Layout / Ports", "Sources / Detectors", "Simulation"];
+const TABS = ["Layout / Ports", "Sources / Detectors", "Simulation", "Result"];
 
 //: The order the type selector lists each category's types in (spec R12).
 const SOURCE_TYPES = ["ModePlaneSource", "GaussianPlaneSource", "UniformPlaneSource",
@@ -123,9 +126,22 @@ export class Explorer {
   private readonly simFields = new Map<string, Control>();
   private readonly simNote: HTMLElement;
   private readonly layoutPanel: HTMLElement;
-  //: each detector's recorded field components, from the last result (spec R15);
-  //: the component select's options come from here, keyed by spec id
-  private fieldComponents = new Map<string, string[]>();
+  private readonly resultPanel: HTMLElement;
+  private readonly resultNote: HTMLElement;
+  private readonly resultSections: HTMLElement;
+  /** the last result's per-detector field payloads, keyed by spec id (R15, R17) */
+  private fields: Record<string, FieldPayload> = {};
+  /** the Result tab's per-detector display controls, keyed by spec id (R17) */
+  private resultControls = new Map<string, Map<string, Control>>();
+  /**
+   * The Result tab's Layers-style rows (one per shaded detector), keyed by spec
+   * id — color and opacity of the result overlays, independent of the editor's
+   * Layers tab (levels).
+   */
+  private resultLayers = new Map<string, ResultLayerRow>();
+  private readonly resultLayersRoot: HTMLElement;
+  private readonly resultLayersList: HTMLElement;  /** each detector's frequency list, from its field payload (spec R17) */
+  private fieldFreqs = new Map<string, number[]>();
   private locked = false;
 
   constructor(
@@ -149,7 +165,16 @@ export class Explorer {
     const sim = this.buildSimForm();
     this.simNote = sim.note;
 
+    this.resultSections = document.createElement("div");
+    this.resultNote = emptyNote(
+      "No result loaded. Run the simulation (or call load_result) and each "
+      + "detector's plotting options appear here.",
+    );
+    this.resultLayersList = document.createElement("div");
+    this.resultLayersRoot = this.section("Layers", [this.resultLayersList]);
+
     this.layoutPanel = this.panel([]);
+    this.resultPanel = this.panel([this.resultNote, this.resultLayersRoot, this.resultSections]);
     this.panels = [
       this.layoutPanel,
       this.panel([
@@ -157,6 +182,7 @@ export class Explorer {
         this.section("Detectors", [this.detectorEmpty, this.detectorList], this.detectorAdd),
       ]),
       this.panel([this.section("Simulation", sim.rows)]),
+      this.resultPanel,
     ];
     this.buildLayout();
 
@@ -200,16 +226,18 @@ export class Explorer {
   }
 
   /**
-   * Records the last result's per-detector field components (spec R15).
+   * Records the last result's per-detector field payloads (spec R15, R17).
    *
-   * The component select's options are the components the result actually
-   * recorded, so a detector whose field is unavailable (or a result with no
-   * field) offers none. Called before :meth:`render`, which writes the rows.
+   * The Result tab is rebuilt from these — one section per detector that has a
+   * payload — and the frequency slider's range comes from each payload's
+   * `freqs`. Called before :meth:`render`, which writes the rows.
    */
-  setFieldComponents(fields: Record<string, FieldPayload>): void {
-    this.fieldComponents = new Map(
-      Object.entries(fields ?? {}).map(([id, entry]) => [id, entry.components ?? []]),
+  setFields(fields: Record<string, FieldPayload>): void {
+    this.fields = fields ?? {};
+    this.fieldFreqs = new Map(
+      Object.entries(this.fields).map(([id, entry]) => [id, entry.freqs ?? []]),
     );
+    this.renderResult();
   }
 
   render(state: StatePayload): void {
@@ -230,13 +258,13 @@ export class Explorer {
       if (row.visible.checked !== visible) row.visible.checked = visible;
     }
 
-    this.renderSpecs(state.sources, "source", this.sourceRows, this.sourceList, this.sourceEmpty, {});
+    this.renderSpecs(state.sources, "source", this.sourceRows, this.sourceList, this.sourceEmpty);
     this.renderSpecs(
       state.detectors, "detector", this.detectorRows, this.detectorList, this.detectorEmpty,
-      state.field_settings ?? {},
     );
     this.renderSettings(state.simulation);
     this.setLocked(state.running);
+    this.renderResult(state);
 
     for (const row of this.levelRows.values()) row.root.classList.remove("gfx-selected");
     for (const row of this.portRows.values()) row.root.classList.remove("gfx-selected");
@@ -340,7 +368,6 @@ export class Explorer {
     rows: Map<string, SpecRow>,
     list: HTMLElement,
     empty: HTMLElement,
-    fieldSettings: Record<string, FieldSettings>,
   ): void {
     const seen = new Set<string>();
     for (const spec of specs) {
@@ -352,15 +379,15 @@ export class Explorer {
         row = this.buildSpecRow(spec, type, kind);
         rows.set(spec.id, row);
         list.appendChild(row.root);
-      } else if (row.type !== spec.type) {
-        // the type selects which fields exist, so a type change rebuilds them;
-        // keep the row's collapse state across the rebuild
+      } else if (row.type !== spec.type || row.port !== spec.port) {
+        // the type and port select which fields exist, so a change rebuilds
+        // them; keep the row's collapse state across the rebuild
         const rebuilt = this.buildSpecRow(spec, type, kind, row.collapsed);
         row.root.replaceWith(rebuilt.root);
         rows.set(spec.id, rebuilt);
         row = rebuilt;
       }
-      this.fillSpecRow(row, spec, fieldSettings[spec.id]);
+      this.fillSpecRow(row, spec);
     }
     for (const [id, row] of rows) {
       if (seen.has(id)) continue;
@@ -417,9 +444,10 @@ export class Explorer {
       this.callbacks.onUpdateSpec(kind, spec.id, change);
     const setParam = (key: string, value: unknown): void => update({ params: { [key]: value } });
 
-    // port (spec R12)
+    // port (spec R12). "None" (spec R18) places the object absolutely: the
+    // port-frame rows below are replaced by axis/center/size.
     controls.set("port", this.selectControl(
-      this.meta.ports.map((p) => p.name), spec.port,
+      ["None", ...this.meta.ports.map((p) => p.name)], spec.port,
       (value) => update({ port: value }),
     ));
     // type (spec R12)
@@ -428,36 +456,55 @@ export class Explorer {
       typeNames.filter((n) => this.meta.types[n]), spec.type,
       (value) => update({ type: value }),
     ));
-    // direction (spec R12)
-    if (type.direction) {
-      controls.set("direction", this.selectControl(
-        ["in", "out"], "in",
-        (value) => setParam("direction", value),
+    // absolute placement (spec R18): only when the spec's port is "None". A
+    // point type (dipole) takes a center but no axis/size.
+    if (spec.port === "None") {
+      if (type.plane) {
+        controls.set("axis", this.selectControl(
+          ["0", "1", "2"], "2",
+          (value) => setParam("axis", Number(value)),
+        ));
+      }
+      controls.set("center", this.tripleControl(
+        (value) => setParam("center", value),
       ));
-    }
-    // port_offset (spec R12): live, so the plane moves as it is edited
-    controls.set("port_offset", this.numberControl(
-      0, 0.01, (value) => setParam("port_offset", value), true,
-    ));
-    // port_size_mult (spec R12)
-    if (type.plane) {
-      controls.set("port_size_mult", this.pairControl(
-        (value) => setParam("port_size_mult", value),
+      if (type.plane) {
+        controls.set("size", this.pairControl(
+          (value) => setParam("size", value),
+        ));
+      }
+    } else {
+      // direction (spec R12)
+      if (type.direction) {
+        controls.set("direction", this.selectControl(
+          ["in", "out"], "in",
+          (value) => setParam("direction", value),
+        ));
+      }
+      // port_offset (spec R12): live, so the plane moves as it is edited
+      controls.set("port_offset", this.numberControl(
+        0, 0.01, (value) => setParam("port_offset", value), true,
       ));
+      // port_size_mult (spec R12)
+      if (type.plane) {
+        controls.set("port_size_mult", this.pairControl(
+          (value) => setParam("port_size_mult", value),
+        ));
+      }
+      // level (spec R12). The empty choice is the port's own level union (a port)
+      // or the volume's mid-height (a plane); z_center pins either to the
+      // volume's mid-height explicitly, so a plane can be moved off a level.
+      if (this.meta.levels.length > 0) {
+        controls.set("level", this.selectControl(
+          ["", ...this.meta.levels.map((l) => l.name), Z_CENTER_LEVEL], "",
+          (value) => setParam("level", value || null),
+        ));
+      }
     }
     // wavelength(s) (spec R12)
     if (type.wave !== "none") {
       controls.set("wavelengths", this.textControl(
         (value) => setParam("wavelengths", parseWavelengths(value)),
-      ));
-    }
-    // level (spec R12). The empty choice is the port's own level union (a port)
-    // or the volume's mid-height (a plane); z_center pins either to the
-    // volume's mid-height explicitly, so a plane can be moved off a level.
-    if (this.meta.levels.length > 0) {
-      controls.set("level", this.selectControl(
-        ["", ...this.meta.levels.map((l) => l.name), Z_CENTER_LEVEL], "",
-        (value) => setParam("level", value || null),
       ));
     }
     // name (spec R12)
@@ -471,62 +518,9 @@ export class Explorer {
       fields.appendChild(fieldRow(key, control.element));
     }
 
-    // the field-display group (spec R15, D16): how this detector's last-result
-    // field is shaded. Only a detector has one, so a source builds none.
-    const display = new Map<string, Control>();
-    let displayGroup: HTMLElement | null = null;
-    let componentSelect: HTMLSelectElement | null = null;
-    let transformSelect: HTMLSelectElement | null = null;
-    if (kind === "detector") {
-      displayGroup = document.createElement("div");
-      displayGroup.className = "gfx-spec-fields gfx-field-group";
-      const heading = document.createElement("div");
-      heading.className = "gfx-group-heading";
-      heading.textContent = "Field (last result)";
-      displayGroup.appendChild(heading);
-      const addDisplay = (key: string, labelText: string, control: Control, hint: string): void => {
-        display.set(key, control);
-        displayGroup!.appendChild(fieldRow(labelText, control.element, hint));
-      };
-      // the component list is filled from the last result (spec R15): an empty
-      // select means no result yet, and the group is disabled until one lands
-      const component = this.selectControl([], "", (value) => setParam("field_component", value || null));
-      componentSelect = component.element as HTMLSelectElement;
-      addDisplay("field_component", "component", component,
-        "which recorded field component to shade the plane with");
-      const transform = this.selectControl(
-        [...FIELD_TRANSFORMS], "abs",
-        (value) => setParam("field_transform", value),
-      );
-      transformSelect = transform.element as HTMLSelectElement;
-      addDisplay("field_transform", "transform", transform,
-        "real/imag/phase are signed (two-color ramp); abs/logabs are non-negative");
-      addDisplay("field_color_low", "low color", this.colorControl(
-        (value) => setParam("field_color_low", value),
-      ), "the ramp's low-end color (signed transforms only)");
-      addDisplay("field_color_high", "high color", this.colorControl(
-        (value) => setParam("field_color_high", value),
-      ), "the ramp's high-end color");
-      addDisplay("field_opacity", "opacity", this.numberControl(
-        1, 0.05, (value) => setParam("field_opacity", value), true,
-      ), "the overlay's overall opacity, 0-1");
-      const visible = checkbox(true, (value) => setParam("field_visible", value));
-      display.set("field_visible", {
-        element: visible,
-        write(value) {
-          if (visible.checked !== Boolean(value)) visible.checked = Boolean(value);
-        },
-        setDisabled(value) {
-          visible.disabled = value;
-        },
-      });
-      displayGroup.appendChild(fieldRow("show", visible, "shade this detector's plane with the last result"));
-      fields.appendChild(displayGroup);
-    }
-
     const row: SpecRow = {
-      root, type: spec.type, twisty, collapsed, name, visible, remove, fields: controls,
-      display, displayGroup, componentSelect, transformSelect,
+      root, type: spec.type, port: spec.port, twisty, collapsed, name, visible, remove,
+      fields: controls, adopted: Boolean(spec.adopted),
     };
     // collapsing is view-only, so it lives in the row, not the kernel state: a
     // state round-trip must not expand a row the user collapsed
@@ -548,7 +542,7 @@ export class Explorer {
     row.twisty.setAttribute("aria-expanded", String(!row.collapsed));
   }
 
-  private fillSpecRow(row: SpecRow, spec: SpecPayload, fieldSettings?: FieldSettings): void {
+  private fillSpecRow(row: SpecRow, spec: SpecPayload): void {
     // the kernel names the object `<port>_<type>` unless params.name overrides
     // it (spec R12); the row shows the same name the placed object will carry
     const name = spec.params.name;
@@ -570,55 +564,17 @@ export class Explorer {
         control.write(spec.params.level ?? "");
         continue;
       }
+      if (key === "center") {
+        control.write(spec.params.center);
+        continue;
+      }
       control.write(values[key]);
     }
-    if (fieldSettings) this.fillDisplay(row, fieldSettings);
-  }
-
-  /**
-   * Writes a detector's field-display controls (spec R15, D16).
-   *
-   * The settings live in `state.field_settings[id]`, not `spec.params`, so they
-   * are merged in here rather than through the `values` map above. The
-   * component select is rebuilt from the last result's recorded components (the
-   * kernel sends them in `fields`); a non-negative transform dims the low color,
-   * which the ramp does not use (spec D16).
-   */
-  private fillDisplay(row: SpecRow, settings: FieldSettings): void {
-    const components = this.fieldComponents.get(row.root.dataset.name ?? "") ?? [];
-    if (row.componentSelect) {
-      const wanted = settings.field_component ?? "";
-      // the recorded components plus |E|, the total electric-field magnitude
-      // (spec R15); it needs no separate result, just the E components
-      const hasE = components.some((name) => name.startsWith("E"));
-      const options = ["", ...components, ...(hasE ? [TOTAL_COMPONENT] : [])];
-      if (row.componentSelect.options.length !== options.length) {
-        row.componentSelect.replaceChildren(
-          ...options.map((value) => {
-            const option = document.createElement("option");
-            option.value = value;
-            option.textContent = value || "(none)";
-            return option;
-          }),
-        );
-      }
-      if (document.activeElement !== row.componentSelect && row.componentSelect.value !== wanted) {
-        row.componentSelect.value = wanted;
-      }
-      // a detector with no result has no component to shade with (spec R15)
-      row.componentSelect.disabled = components.length === 0 || this.locked;
-    }
-    const nonNegative = settings.field_transform === "abs" || settings.field_transform === "logabs";
-    for (const [key, control] of row.display) {
-      if (key === "field_component") continue;
-      control.write(settings[key as keyof FieldSettings]);
-    }
-    // the low color is unused by a non-negative transform (spec D16): grey it out
-    const low = row.display.get("field_color_low");
-    if (low) {
-      low.element.classList.toggle("gfx-unused", nonNegative);
-      low.element.title = nonNegative ? "unused by abs/logabs" : "";
-    }
+    // an adopted spec is read-only except its display settings (spec R16): the
+    // Result tab owns those, so the setup controls grey out and remove hides
+    row.remove.hidden = row.adopted;
+    for (const control of row.fields.values()) control.setDisabled(this.locked || row.adopted);
+    if (!this.locked) row.remove.disabled = false;
   }
 
   // ------------------------------------------------------------------ settings
@@ -695,27 +651,226 @@ export class Explorer {
     this.locked = locked;
     const rows = [...this.sourceRows.values(), ...this.detectorRows.values()];
     for (const row of rows) {
-      for (const control of row.fields.values()) control.setDisabled(locked);
-      for (const control of row.display.values()) control.setDisabled(locked);
+      for (const control of row.fields.values()) control.setDisabled(locked || row.adopted);
       row.visible.disabled = locked;
-      // the remove button, not ``row.root.querySelector("button")`` — that
-      // would hit the twisty first and freeze collapse while a run is in flight
-      row.remove.disabled = locked;
-    }
-    // a locked detector's component select stays disabled even after unlock if
-    // the last result recorded no components (spec R15); re-apply that rule
-    if (!locked) {
-      for (const [id, row] of this.detectorRows) {
-        if (row.componentSelect) {
-          row.componentSelect.disabled = (this.fieldComponents.get(id) ?? []).length === 0;
-        }
-      }
+      row.remove.disabled = locked || row.adopted;
+      row.remove.hidden = row.adopted;
     }
     for (const control of this.simFields.values()) control.setDisabled(locked);
     this.sourceAdd.disabled = locked;
     this.detectorAdd.disabled = locked;
     this.simNote.hidden = !locked;
     if (locked) this.simNote.textContent = "The setup is locked while a run is in flight.";
+  }
+
+  // ------------------------------------------------------------------ result tab
+
+  /**
+   * (Re)builds and fills the Result tab (spec R17).
+   *
+   * One section per detector with an entry in the last `fields` payload — the
+   * widget's own runs and adopted foreign results alike — holding the detector's
+   * field-display controls and, for a multi-frequency detector, the frequency
+   * slider. Rebuilt only when the payload set changes (a run or a
+   * `load_result`); the per-render fill writes values in place so a slider drag
+   * is never torn down.
+   */
+  private renderResult(state?: StatePayload): void {
+    const ids = Object.keys(this.fields);
+    this.resultNote.hidden = ids.length > 0;
+    this.resultLayersRoot.hidden = ids.length === 0;
+
+    // rebuild the sections when the detector set changed
+    const current = new Set(ids);
+    for (const [id, controls] of [...this.resultControls]) {
+      if (current.has(id)) continue;
+      controls.get("section")?.element.remove();
+      this.resultControls.delete(id);
+    }
+    for (const [id, row] of [...this.resultLayers]) {
+      if (current.has(id)) continue;
+      row.root.remove();
+      this.resultLayers.delete(id);
+    }
+    for (const id of ids) {
+      if (this.resultControls.has(id)) continue;
+      const section = this.buildResultSection(id);
+      this.resultSections.appendChild(section);
+    }
+    for (const id of ids) {
+      if (this.resultLayers.has(id)) continue;
+      this.resultLayersList.appendChild(this.buildResultLayerRow(id));
+    }
+    if (!state) return;
+    const settings = state.field_settings ?? {};
+    for (const [id, controls] of this.resultControls) {
+      const s = settings[id];
+      if (!s) continue;
+      // the component select's options are the components the result recorded
+      // plus |E|, the total electric-field magnitude (spec R15)
+      const entry = this.fields[id];
+      const components = entry?.components ?? [];
+      const componentSelect = controls.get("field_component")?.element as HTMLSelectElement;
+      const hasE = components.some((name) => name.startsWith("E"));
+      const options = ["", ...components, ...(hasE ? [TOTAL_COMPONENT] : [])];
+      if (componentSelect.options.length !== options.length) {
+        componentSelect.replaceChildren(
+          ...options.map((value) => {
+            const option = document.createElement("option");
+            option.value = value;
+            option.textContent = value || "(none)";
+            return option;
+          }),
+        );
+      }
+      // the frequency slider only exists for a multi-frequency detector, and
+      // its range is that detector's recorded frame count (spec R17)
+      const freqs = this.fieldFreqs.get(id) ?? [];
+      const freq = controls.get("field_freq");
+      if (freq) {
+        const row = freq.element.parentElement;
+        if (row) row.hidden = freqs.length <= 1;
+        if (freqs.length > 1) freq.element.setAttribute("max", String(freqs.length - 1));
+      }
+      for (const [key, control] of controls) {
+        if (key === "section") continue;
+        control.write((s as unknown as Record<string, unknown>)[key]);
+      }
+      // the low color is unused by a non-negative transform (spec D16)
+      const nonNegative = s.field_transform === "abs" || s.field_transform === "logabs";
+      const low = controls.get("field_color_low");
+      if (low) {
+        low.element.classList.toggle("gfx-unused", nonNegative);
+        low.element.title = nonNegative ? "unused by abs/logabs" : "";
+      }
+      // the Layers row mirrors the section's show/high-color/opacity controls
+      const layer = this.resultLayers.get(id);
+      if (layer) {
+        if (layer.visible.checked !== s.field_visible) layer.visible.checked = s.field_visible;
+        const high = String(s.field_color_high);
+        if (layer.swatch.value !== high) layer.swatch.value = high;
+        const opacity = String(s.field_opacity);
+        if (layer.opacity.value !== opacity) layer.opacity.value = opacity;
+        layer.opacity.title = `opacity ${Number(s.field_opacity).toFixed(2)}`;
+      }
+    }
+  }
+
+  /**
+   * One Layers-style row in the Result tab: a detector's field overlay as
+   * show / high color / opacity, the same controls the editor's Layers tab
+   * offers for levels (spec R17). Writes the `field_*` display params, so this
+   * row and the detector's section stay in sync through the kernel round-trip;
+   * the editor's level colors are untouched.
+   */
+  private buildResultLayerRow(id: string): HTMLElement {
+    const entry = this.fields[id];
+    const root = document.createElement("div");
+    root.className = "gfx-row";
+    root.dataset.kind = "detector";
+    root.dataset.name = id;
+
+    const setParam = (key: string, value: unknown): void =>
+      this.callbacks.onUpdateSpec("detector", id, { params: { [key]: value } });
+
+    const visible = checkbox(true, (value) => setParam("field_visible", value));
+    const swatch = document.createElement("input");
+    swatch.type = "color";
+    swatch.className = "gfx-swatch";
+    swatch.addEventListener("input", () => setParam("field_color_high", swatch.value));
+    const opacity = document.createElement("input");
+    opacity.type = "range";
+    opacity.min = "0";
+    opacity.max = "1";
+    opacity.step = "0.05";
+    opacity.className = "gfx-opacity";
+    opacity.addEventListener("input", () => setParam("field_opacity", Number(opacity.value)));
+
+    root.append(visible, swatch, opacity, label(entry.name));
+    this.resultLayers.set(id, { root, visible, swatch, opacity });
+    return root;
+  }
+
+  /** One detector's display controls in the Result tab (spec R17). */
+  private buildResultSection(id: string): HTMLElement {
+    const entry = this.fields[id];
+    const section = document.createElement("div");
+    section.className = "gfx-section gfx-field-group";
+    const header = document.createElement("div");
+    header.className = "gfx-section-header";
+    header.appendChild(label(entry.name));
+    section.appendChild(header);
+
+    const fields = document.createElement("div");
+    fields.className = "gfx-spec-fields";
+    const controls = new Map<string, Control>();
+    const setParam = (key: string, value: unknown): void =>
+      this.callbacks.onUpdateSpec("detector", id, { params: { [key]: value } });
+
+    const component = this.selectControl([], "", (value) => setParam("field_component", value || null));
+    controls.set("field_component", component);
+    fields.appendChild(fieldRow("component", component.element,
+      "which recorded field component to shade the plane with"));
+    const transform = this.selectControl(
+      [...FIELD_TRANSFORMS], "abs",
+      (value) => setParam("field_transform", value),
+    );
+    controls.set("field_transform", transform);
+    fields.appendChild(fieldRow("transform", transform.element,
+      "real/imag/phase are signed (two-color ramp); abs/logabs are non-negative"));
+    const low = this.colorControl((value) => setParam("field_color_low", value));
+    controls.set("field_color_low", low);
+    fields.appendChild(fieldRow("low color", low.element,
+      "the ramp's low-end color (signed transforms only)"));
+    const high = this.colorControl((value) => setParam("field_color_high", value));
+    controls.set("field_color_high", high);
+    fields.appendChild(fieldRow("high color", high.element, "the ramp's high-end color"));
+    const opacity = this.numberControl(1, 0.05, (value) => setParam("field_opacity", value), true);
+    controls.set("field_opacity", opacity);
+    fields.appendChild(fieldRow("opacity", opacity.element, "the overlay's overall opacity, 0-1"));
+    const show = checkbox(true, (value) => setParam("field_visible", value));
+    controls.set("field_visible", {
+      element: show,
+      write(value) {
+        if (show.checked !== Boolean(value)) show.checked = Boolean(value);
+      },
+      setDisabled(value) {
+        show.disabled = value;
+      },
+    });
+    fields.appendChild(fieldRow("show", show, "shade this detector's plane with the last result"));
+    // the frequency slider (spec R17): client-side slicing of the multi-frame
+    // buffers, so a move re-shades with no kernel round-trip
+    const freqLabel = document.createElement("span");
+    freqLabel.className = "gfx-label";
+    const freq = document.createElement("input");
+    freq.type = "range";
+    freq.min = "0";
+    freq.step = "1";
+    freq.className = "gfx-opacity";
+    freq.addEventListener("input", () => setParam("field_freq", Number(freq.value)));
+    controls.set("field_freq", {
+      element: freq,
+      write(value) {
+        const frame = Math.max(0, Math.floor(Number(value ?? 0)));
+        if (document.activeElement !== freq && freq.value !== String(frame)) freq.value = String(frame);
+        // the readout shows the frequency the frame selects, in THz
+        const freqs = entry.freqs ?? [];
+        const hz = freqs[frame];
+        freqLabel.textContent = hz !== undefined ? `${(hz / 1e12).toFixed(4)} THz` : `frame ${frame}`;
+      },
+      setDisabled(value) {
+        freq.disabled = value;
+      },
+    });
+    const freqRow = fieldRow("frequency", freq, "which recorded frequency frame to shade");
+    freqRow.appendChild(freqLabel);
+    fields.appendChild(freqRow);
+
+    section.appendChild(fields);
+    controls.set("section", { element: section, write() {}, setDisabled() {} });
+    this.resultControls.set(id, controls);
+    return section;
   }
 
   // ------------------------------------------------------------------- controls
@@ -864,6 +1019,47 @@ export class Explorer {
       setDisabled(value) {
         a.disabled = value;
         b.disabled = value;
+      },
+    };
+  }
+
+  /**
+   * A three-number control — an absolute placement's `[x, y, z]` center in µm
+   * (spec R18). Unlike the pair control the values may be any finite number
+   * (the center can sit on a negative coordinate).
+   */
+  private tripleControl(onChange: (value: [number, number, number]) => void): Control {
+    const host = document.createElement("span");
+    host.className = "gfx-triple";
+    const axes = ["x", "y", "z"] as const;
+    const inputs: HTMLInputElement[] = [];
+    const emit = (): void => {
+      const values = inputs.map((input) => Number(input.value));
+      if (values.every((value) => Number.isFinite(value))) {
+        onChange(values as [number, number, number]);
+      }
+    };
+    for (const axis of axes) {
+      const input = document.createElement("input");
+      input.type = "number";
+      input.step = "0.1";
+      input.className = "gfx-numeric";
+      input.title = `${axis} center (µm)`;
+      input.addEventListener("change", emit);
+      inputs.push(input);
+      host.appendChild(input);
+    }
+    return {
+      element: host,
+      write(value) {
+        const triple = Array.isArray(value) ? (value as number[]) : [0, 0, 0];
+        inputs.forEach((input, index) => {
+          const shown = String(displayNumber(Number(triple[index] ?? 0)));
+          if (document.activeElement !== input && input.value !== shown) input.value = shown;
+        });
+      },
+      setDisabled(value) {
+        for (const input of inputs) input.disabled = value;
       },
     };
   }

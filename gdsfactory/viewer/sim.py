@@ -99,6 +99,12 @@ DEFAULT_DETECTOR = "ModeOverlapDetector"
 #: and is never passed to ``create_*_at``.
 _COMMON = ("port_offset", "level", "direction", "name", "wavelengths", "port_size_mult", "visible")
 
+#: The absolute-placement parameters a spec with ``port == "None"`` carries
+#: (spec R18): the plane's normal axis (0=x, 1=y, 2=z), the center in µm in
+#: stack coordinates, and the in-plane sizes in µm (plane types only). Never
+#: passed to ``create_*_at`` — they feed :func:`_create_absolute`.
+_ABSOLUTE = ("axis", "center", "size")
+
 #: The detector display parameters (spec R15, D16). Display-only, like
 #: ``visible``: they style the field overlay and are never passed to
 #: ``create_*_at``. Only detectors carry them.
@@ -109,6 +115,7 @@ _FIELD_PARAMS = (
     "field_color_high",
     "field_opacity",
     "field_visible",
+    "field_freq",
 )
 
 #: The display transforms a detector's field can take (spec R15).
@@ -125,18 +132,25 @@ class ObjectSpec:
 
     Attributes:
         type: a key of :data:`TYPES`.
-        port: the port name the object sits on.
+        port: the port name the object sits on, or ``"None"`` for absolute
+            placement (spec R18).
         params: the editable parameters (``port_offset``, ``port_size_mult``,
-            ``level``, ``direction``, ``wavelengths`` and any type-specific
-            extras). Absent keys fall back to the settings (spec R13).
+            ``level``, ``direction``, ``wavelengths``, the absolute-placement
+            keys and any type-specific extras). Absent keys fall back to the
+            settings (spec R13).
         id: a stable identity for update/remove/selection. Assigned by
             :class:`~gdsfactory.viewer.state.ViewerState`; empty until then.
+        glyph: an override for the wire glyph (spec D18). Set on adopted
+            foreign detectors, whose glyph is derived from their placed
+            ``grid_slice`` rather than a port frame; never sent through
+            ``to_wire`` — the wire glyph travels in ``state["glyphs"]``.
     """
 
     type: str
     port: str
     params: dict[str, Any] = field(default_factory=dict)
     id: str = ""
+    glyph: dict[str, Any] | None = None
 
     @property
     def category(self) -> str:
@@ -147,6 +161,11 @@ class ObjectSpec:
     def name(self) -> str:
         """The object's name (``params['name']`` or ``<port>_<type>``)."""
         return str(self.params.get("name") or f"{self.port}_{self.type}")
+
+    @property
+    def absolute(self) -> bool:
+        """Whether this spec is placed absolutely (``port == "None"``, R18)."""
+        return self.port == "None"
 
     def field_params(self) -> dict[str, Any]:
         """The detector's display settings with defaults filled in (spec R15).
@@ -163,6 +182,7 @@ class ObjectSpec:
             "field_color_high": str(self.params.get("field_color_high") or FIELD_COLOR_HIGH),
             "field_opacity": _field_opacity(self.params.get("field_opacity", 1.0)),
             "field_visible": bool(self.params.get("field_visible", True)),
+            "field_freq": int(self.params.get("field_freq", 0)),
         }
 
     def to_wire(self) -> dict[str, Any]:
@@ -179,9 +199,13 @@ class ObjectSpec:
         if not port:
             raise ValueError("A source/detector needs a port")
         params = dict(data.get("params") or {})
-        unknown = set(params) - set(_COMMON) - set(TYPES[type_name].extra)
+        allowed = set(_COMMON) - ({"port_offset", "level", "port_size_mult"} if port == "None" else set())
+        if port == "None":
+            allowed |= set(_ABSOLUTE)
+        unknown = set(params) - allowed - set(TYPES[type_name].extra)
         if unknown:
             raise ValueError(f"Unknown parameters for {type_name!r}: {sorted(unknown)}")
+        _validate_absolute(port, params)
         return cls(type=type_name, port=port, params=params, id=str(data.get("id") or ""))
 
 
@@ -381,6 +405,29 @@ def _field_opacity(value: Any) -> float:
     return min(1.0, max(0.0, float(value)))
 
 
+def _validate_absolute(port: str, params: dict[str, Any]) -> None:
+    """Checks a spec's absolute-placement params (spec R18).
+
+    Only invoked for ``port == "None"``. ``axis`` must be 0, 1 or 2;
+    ``center`` three finite floats (µm); ``size`` two positive floats (µm).
+    """
+    if port != "None":
+        return
+    axis = params.get("axis")
+    if not (isinstance(axis, int) and not isinstance(axis, bool) and axis in (0, 1, 2)):
+        raise ValueError(f"axis must be 0 (x), 1 (y) or 2 (z), got {axis!r}")
+    center = params.get("center")
+    if not (isinstance(center, (list, tuple)) and len(center) == 3
+            and all(isinstance(v, (int, float)) and math.isfinite(v) for v in center)):
+        raise ValueError(f"center must be three finite numbers (x, y, z in um), got {center!r}")
+    size = params.get("size")
+    if size is not None and not (
+        isinstance(size, (list, tuple)) and len(size) == 2
+        and all(isinstance(v, (int, float)) and math.isfinite(v) and v > 0 for v in size)
+    ):
+        raise ValueError(f"size must be two positive numbers (u, v in um), got {size!r}")
+
+
 def default_source_spec(port: str, settings: SimSettings) -> ObjectSpec:
     """The default source added by the "New source" control (spec R12)."""
     return ObjectSpec(DEFAULT_SOURCE, port, _default_params(DEFAULT_SOURCE, port, settings))
@@ -438,7 +485,73 @@ def _temporal_profile(settings: SimSettings, wave: Any) -> Any | None:
     )
 
 
-def _create(stack: Any, spec: ObjectSpec, settings: SimSettings) -> tuple[Any, list[Any]]:
+def _create_absolute(spec: ObjectSpec, settings: SimSettings,
+                     volume: Any | None, stack: Any) -> tuple[Any, list[Any]]:
+    """Builds a source/detector at an absolute position (spec R18).
+
+    The same object construction ``StackDevice._at_port`` does — a plane is one
+    grid cell thick along its normal axis and sized by ``partial_real_shape`` —
+    and the placement constraint references the stack the way
+    ``StackDevice._place_at`` does: margins from the box center (µm, stack
+    coordinates) to the spec's ``center``, so absolute and port placement land
+    in the same frame. The wave and extra-params handling matches
+    :func:`_create`.
+    """
+    import fdtdx
+
+    if volume is None:
+        raise ValueError(f"spec {spec.name!r}: absolute placement needs the simulation volume")
+    kind = TYPES[spec.type]
+    params = spec.params
+    axis = int(params.get("axis", 2))
+    center = tuple(float(v) for v in params["center"])  # validated by from_wire
+    cls = getattr(fdtdx, spec.type)
+
+    real: list[float | None] = [None, None, None]
+    grid: list[int | None] = [None, None, None]
+    if kind.plane:
+        size = params.get("size")
+        if not size:
+            raise ValueError(f"spec {spec.name!r}: a plane needs a size (u, v in um)")
+        u_axis, v_axis = _IN_PLANE[axis]
+        grid[axis] = 1
+        real[u_axis] = float(size[0]) * 1e-6
+        real[v_axis] = float(size[1]) * 1e-6
+
+    fields: dict[str, Any] = {"name": spec.name}
+    waves = _wave_characters(spec, settings)
+    wave = waves[0] if waves else _wave_character(settings.wavelength_um)
+    if kind.wave == "one":
+        fields["wave_character"] = wave
+        profile = _temporal_profile(settings, wave)
+        if profile is not None:
+            fields["temporal_profile"] = profile
+    elif kind.wave == "many":
+        fields["wave_characters"] = waves
+    if kind.direction:
+        # an absolute plane's direction is its normal axis' orientation: a
+        # source "in" along +axis launches towards +axis (spec R18)
+        fields["direction"] = "+" if params.get("direction", "in") == "in" else "-"
+    for key in kind.extra:
+        if key in params:
+            fields[key] = params[key]
+    if kind.category == "detector" and settings.pulse_width_frac > 0 and "scaling_mode" in kind.extra:
+        fields.setdefault("scaling_mode", "pulse")
+    obj = cls(partial_real_shape=tuple(real), partial_grid_shape=tuple(grid), **fields)
+
+    reference = (float(stack.center[0]), float(stack.center[1]), float(stack.z_center))
+    margins = tuple((c - r) * 1e-6 for c, r in zip(center, reference, strict=True))
+    cons = [
+        obj.place_relative_to(
+            stack, axes=(0, 1, 2), own_positions=(0, 0, 0), other_positions=(0, 0, 0),
+            margins=margins,
+        )
+    ]
+    return obj, cons
+
+
+def _create(stack: Any, spec: ObjectSpec, settings: SimSettings,
+            volume: Any | None = None) -> tuple[Any, list[Any]]:
     """Calls the device's ``create_*_at`` for one spec (spec D11).
 
     Builds the keyword arguments from the spec's parameters, falling back to the
@@ -447,6 +560,8 @@ def _create(stack: Any, spec: ObjectSpec, settings: SimSettings) -> tuple[Any, l
     object, so the port frame, plane sizing and constraints come for free.
     """
     kind = TYPES[spec.type]
+    if spec.absolute:
+        return _create_absolute(spec, settings, volume, stack)
     method = getattr(stack, kind.method)
     params = spec.params
     kwargs: dict[str, Any] = {
@@ -504,7 +619,9 @@ def build_objects(stack: Any, state: Any) -> tuple[list[Any], Any, list[Any]]:
     constraints = list(constraints)
 
     for spec in state.specs:
-        obj, cons = _create(stack, spec, settings)
+        if spec.id in getattr(state, "adopted", ()):
+            continue  # adopted foreign detectors are already placed (D18)
+        obj, cons = _create(stack, spec, settings, volume=volume)
         objects.append(obj)
         constraints += cons
 
@@ -635,6 +752,47 @@ def run(
 
 # --------------------------------------------------------------------- glyphs
 
+#: The in-plane axes of each normal axis (x→y,z; y→x,z; z→x,y). Shared with
+#: ``glyph_from_grid`` and the absolute-glyph math so u is always the lower
+#: in-plane stack axis and v the higher (spec D11, R18).
+_IN_PLANE = ((1, 2), (0, 2), (0, 1))
+
+
+def _absolute_glyph(spec: ObjectSpec, origin: tuple[float, float, float]) -> dict[str, Any]:
+    """The wire glyph of an absolutely-placed spec (spec R18).
+
+    Reads ``axis``/``center``/``size`` (µm, stack coordinates — the same frame
+    the box center the meshes are shifted by uses) instead of a port frame.
+    A point type (no size) has zero half-extents. Shared with
+    :func:`~gdsfactory.viewer.adopt.glyph_from_grid`, whose grid→µm conversion
+    feeds these same numbers.
+    """
+    kind = TYPES[spec.type]
+    params = spec.params
+    axis = int(params.get("axis", 2))
+    center = [float(v) for v in params.get("center") or (0.0, 0.0, 0.0)]
+    size = params.get("size") or (0.0, 0.0)
+    if kind.plane and len(size) == 2:
+        u_axis, v_axis = _IN_PLANE[axis]
+        u_half, v_half = 0.5 * float(size[0]), 0.5 * float(size[1])
+    else:
+        u_half = v_half = 0.0
+    ox, oy, oz = origin
+    return {
+        "id": spec.id,
+        "name": spec.name,
+        "kind": spec.category,
+        "type": spec.type,
+        "port": spec.port,
+        "center": [center[0] - ox, center[1] - oy, center[2] - oz],
+        "axis": axis,
+        "u_half": u_half,
+        "v_half": v_half,
+        "direction": params.get("direction"),
+        "visible": bool(params.get("visible", True)),
+    }
+
+
 def spec_glyph(stack: Any, spec: ObjectSpec, origin: tuple[float, float, float],
                settings: SimSettings) -> dict[str, Any]:
     """A source/detector's glyph, in the local frame the meshes use (spec D11).
@@ -656,6 +814,10 @@ def spec_glyph(stack: Any, spec: ObjectSpec, origin: tuple[float, float, float],
         (two specs may share a name, spec R12).
     """
     kind = TYPES[spec.type]
+    if spec.absolute:
+        return _absolute_glyph(spec, origin)
+    if spec.glyph is not None:
+        return {**spec.glyph}
     try:
         p, axis, _sign, center, height = stack._port_frame(
             spec.port, spec.params.get("level"), float(spec.params.get("port_offset", 0.0))

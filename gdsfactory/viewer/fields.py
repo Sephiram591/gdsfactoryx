@@ -25,7 +25,7 @@ from typing import Any
 
 import numpy as np
 
-__all__ = ["TRANSFORMS", "field_payload", "validate_result"]
+__all__ = ["TRANSFORMS", "field_payload", "validate_foreign_result", "validate_result"]
 
 #: The display transforms the browser applies to a component (spec R15).
 TRANSFORMS = ("real", "imag", "abs", "phase", "logabs")
@@ -56,13 +56,14 @@ def _grid_ndim(result: Any, name: str) -> int:
 
 
 def _detector_phasor(result: Any, name: str) -> np.ndarray | None:
-    """The complex field a detector recorded, as ``(num_components, *grid)``.
+    """The complex field a detector recorded, as ``(num_freqs, *grid)``.
 
-    The raw array is ``(..., num_components, *grid_shape)`` — the leading axes
-    are the run's frequencies and latent time steps, both singletons for the
-    widget's single-frequency CW runs, so they are peeled off and the first
-    frequency/latent frame is used. A detector that recorded no field, or whose
-    array does not fit that shape, yields None: it keeps its plain glyph.
+    The raw array is ``(latent, num_freqs, num_components, *grid_shape)`` — the
+    leading axis is the latent time step, a singleton for the phasor family
+    (``_num_latent_time_steps`` is 1). Only that one axis is peeled: the
+    frequency axis is kept, so a multi-frequency detector's every frame reaches
+    the browser. A detector that recorded no field, or whose array does not fit
+    that shape, yields None: it keeps its plain glyph.
     """
     try:
         state = result.arrays.detector_states[name]
@@ -75,10 +76,10 @@ def _detector_phasor(result: Any, name: str) -> np.ndarray | None:
     if not np.iscomplexobj(array):
         return None
     grid_ndim = _grid_ndim(result, name)
-    # peel the leading frame axes down to (num_components, *grid_shape)
-    while array.ndim > grid_ndim + 1 and array.shape[0] == 1:
+    # peel the single latent time step axis, keeping (num_freqs, components, *grid)
+    if array.ndim > grid_ndim + 2 and array.shape[0] == 1:
         array = array[0]
-    if array.ndim != grid_ndim + 1:
+    if array.ndim != grid_ndim + 2:
         return None
     return array
 
@@ -93,12 +94,35 @@ def _detector_components(result: Any, name: str) -> list[str]:
     return [str(c) for c in components] if components else []
 
 
-def field_payload(result: Any, name: str, spec_id: str) -> dict[str, Any] | None:
-    """One detector's raw field for the browser (spec R15, D16).
+def _detector_freqs(result: Any, name: str, num_freqs: int) -> list[float]:
+    """The frequencies a phasor detector recorded at, in Hz (spec R17).
 
-    Sends the real and imaginary parts of every recorded component as
-    contiguous float32 buffers, so the browser can apply any transform without a
-    further kernel round-trip. Returns None when the detector recorded no field,
+    Read from the placed detector's ``wave_characters`` (each
+    :class:`~fdtdx.core.wavelength.WaveCharacter` exposes ``get_frequency()``).
+    Falls back to frame indices when the object exposes none, or to as many
+    entries as frames when the counts disagree.
+    """
+    try:
+        obj = result.objects[name]
+        wcs = list(obj.wave_characters)
+    except (AttributeError, KeyError, TypeError):
+        return list(range(num_freqs))
+    try:
+        freqs = [float(wc.get_frequency()) for wc in wcs]
+    except (AttributeError, TypeError, ValueError):
+        return list(range(num_freqs))
+    return freqs if len(freqs) == num_freqs else list(range(num_freqs))
+
+
+def field_payload(result: Any, name: str, spec_id: str) -> dict[str, Any] | None:
+    """One detector's raw field for the browser (spec R15, D16, R17).
+
+    Sends the real and imaginary parts of every recorded component of every
+    recorded frequency as contiguous float32 buffers shaped
+    ``(num_freqs, v, u)`` per part, so the browser can apply any transform and
+    pick any frequency frame without a further kernel round-trip. A
+    single-frequency run sends one frame, laid out exactly as before the
+    frequency axis existed. Returns None when the detector recorded no field,
     so it keeps its plain glyph.
 
     Args:
@@ -107,40 +131,43 @@ def field_payload(result: Any, name: str, spec_id: str) -> dict[str, Any] | None
         spec_id: the spec id, so the browser matches the field to its glyph.
 
     Returns:
-        ``{"id", "name", "components", "grid", "real", "imag"}`` with the two
-        buffers as ``memoryview``s, or None.
+        ``{"id", "name", "components", "grid", "freqs", "freq", "real",
+        "imag"}`` with the two buffers as ``memoryview``s, or None.
     """
     phasor = _detector_phasor(result, name)
-    if phasor is None or phasor.ndim < 3:
+    if phasor is None or phasor.ndim < 4:
         # no field, or a volume-reduced detector with no in-plane grid to draw
         return None
     components = _detector_components(result, name)
-    if not components or phasor.shape[0] != len(components):
+    if not components or phasor.shape[1] != len(components):
         # fall back to generic names so the field is still plottable
-        components = [f"c{i}" for i in range(phasor.shape[0])]
+        components = [f"c{i}" for i in range(phasor.shape[1])]
     # the two in-plane axes, with the detector's normal axis (a singleton)
     # dropped. The normal is not always last — an xz detector's is the middle
     # axis — so the singleton is found by value, not position. The axes run in
     # stack order (x, y, z), which is (u, v) for every plane: the glyph's u is
     # the lower of the two in-plane stack axes and v the higher (spec D11).
-    in_plane = [i for i in range(1, phasor.ndim) if phasor.shape[i] > 1]
+    in_plane = [i for i in range(2, phasor.ndim) if phasor.shape[i] > 1]
     if len(in_plane) != 2:
         return None
-    # drop the normal axis, leaving (components, u, v) in stack order
-    plane = np.squeeze(phasor, axis=tuple(i for i in range(1, phasor.ndim) if i not in in_plane))
+    # drop the normal axis, leaving (num_freqs, components, u, v) in stack order
+    plane = np.squeeze(phasor, axis=tuple(i for i in range(2, phasor.ndim) if i not in in_plane))
     # The browser textures a plane row-major with the rows as v and the columns
     # as u (the same order the 2D blit and the 3D ``DataTexture`` use), so the
-    # field is transposed to (components, v, u). Sending it in stack order would
-    # swap the axes of any non-square plane — a 450x75 xz plane would read as
-    # 75x450.
-    ordered = np.ascontiguousarray(np.swapaxes(plane, 1, 2))
+    # field is transposed to (num_freqs, components, v, u). Sending it in stack
+    # order would swap the axes of any non-square plane — a 450x75 xz plane
+    # would read as 75x450.
+    ordered = np.ascontiguousarray(np.swapaxes(plane, 2, 3))
     real = np.ascontiguousarray(ordered.real, dtype=np.float32)
     imag = np.ascontiguousarray(ordered.imag, dtype=np.float32)
+    num_freqs = int(ordered.shape[0])
     return {
         "id": spec_id,
         "name": name,
         "components": components,
-        "grid": [int(ordered.shape[1]), int(ordered.shape[2])],
+        "grid": [int(ordered.shape[2]), int(ordered.shape[3])],
+        "freqs": _detector_freqs(result, name, num_freqs),
+        "freq": 0,
         "real": real.data,
         "imag": imag.data,
     }
@@ -193,12 +220,12 @@ def validate_result(state: Any, result: Any) -> None:
         if phasor is None:
             continue  # no field recorded: nothing to mis-shade
         components = _detector_components(result, name)
-        if components and phasor.shape[0] != len(components):
+        if components and phasor.shape[1] != len(components):
             raise ValueError(
-                f"detector {name!r}: the result has {phasor.shape[0]} components but "
+                f"detector {name!r}: the result has {phasor.shape[1]} components but "
                 f"the detector records {len(components)}"
             )
-        grid = tuple(int(v) for v in phasor.shape[1:])
+        grid = tuple(int(v) for v in phasor.shape[2:])
         if not _grid_matches(state, spec, grid, resolution):
             raise ValueError(
                 f"detector {name!r}: the result's {grid} grid does not match the "
@@ -241,3 +268,71 @@ def _grid_matches(state: Any, spec: Any, grid: tuple[int, ...], resolution_um: f
     return len(in_plane) == 2 and all(
         abs(a - b) <= _GRID_TOL for a, b in zip(sorted(in_plane), expected)
     )
+
+
+def validate_foreign_result(
+    objects: Any, arrays: Any, config: Any, stack: Any = None
+) -> None:
+    """Accepts-or-refuses a result from arbitrary user code (spec R16, D18).
+
+    Deliberately lenient — the goal is to display a foreign result, not to gate
+    it — but a result that could never shade (or whose grid disagrees with the
+    stack it is drawn on) is refused with a reason instead of silently
+    rendering nothing. The strict name-based :func:`validate_result` is a
+    different, tighter contract for :meth:`Viewer.show_result` and stays as is.
+
+    Args:
+        objects: the result's placed ``ObjectContainer`` (needs ``.detectors``
+            and ``.volume``).
+        arrays: the result's arrays (needs ``.detector_states``).
+        config: the result's ``SimulationConfig`` (needs a positive
+            ``.resolution``).
+        stack: the :class:`~gdsfactory.fdtdx_stack.StackDevice` the viewer will
+            rebuild its geometry from, if known.
+
+    Raises:
+        ValueError: if any required piece is missing, a phasor-family detector
+            would never shade, or the stack's box disagrees with the result's
+            grid.
+    """
+    detector_states = getattr(arrays, "detector_states", None)
+    if not hasattr(detector_states, "get"):
+        raise ValueError("the result needs .arrays.detector_states")
+    detectors = getattr(objects, "detectors", None)
+    volume = getattr(objects, "volume", None)
+    if detectors is None or volume is None:
+        raise ValueError("the result needs .objects.detectors and .objects.volume")
+    resolution = getattr(config, "resolution", None)
+    if resolution is None or not float(resolution) > 0:
+        raise ValueError("the result needs a positive .config.resolution")
+
+    for obj in detectors:
+        state = detector_states.get(obj.name) if hasattr(detector_states, "get") else None
+        phasor = state.get("phasor") if hasattr(state, "get") else None
+        if phasor is None or not np.iscomplexobj(np.asarray(phasor)):
+            continue  # a plain detector: listed, never shaded — nothing to check
+        shape = np.asarray(phasor).shape
+        widths = [int(obj.grid_slice[i].stop - obj.grid_slice[i].start) for i in range(3)]
+        if sum(1 for w in widths if w > 1) != 2:
+            raise ValueError(
+                f"detector {obj.name!r} records a phasor but is not a plane "
+                f"(grid widths {widths}); its field could never shade"
+            )
+        if shape[-3:] != tuple(widths):
+            raise ValueError(
+                f"detector {obj.name!r}: phasor grid shape {shape[-3:]} does not "
+                f"match the placed detector's {tuple(widths)}"
+            )
+
+    if stack is not None:
+        real_shape_m = tuple(float(v) for v in stack.partial_real_shape)
+        grid_shape = tuple(int(v) for v in volume.grid_shape)
+        for i in range(3):
+            grid_m = grid_shape[i] * float(resolution)
+            if abs(grid_m - real_shape_m[i]) > float(resolution):
+                raise ValueError(
+                    f"the result's grid extent along axis {i} ({grid_shape[i]} cells "
+                    f"at {float(resolution)} m) does not fit the stack's box "
+                    f"({real_shape_m[i]:g} m, tolerance one cell); pass the stack "
+                    "the result was recorded on"
+                )

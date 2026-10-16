@@ -20,6 +20,7 @@ from typing import Any, NamedTuple
 
 from gdsfactory.viewer.palette import fallback_color
 from gdsfactory.viewer.sim import (
+    _ABSOLUTE,
     _FIELD_PARAMS,
     FIELD_TRANSFORMS,
     TYPES,
@@ -54,11 +55,12 @@ PLANE_FADE_FRAC = 0.05
 PLANES = ("xy", "xz", "yz")
 
 #: Every parameter name a source/detector spec may carry (spec R12): the common
-#: fields plus each type's extras. ``type`` and ``port`` are separate. The
-#: detector display settings (spec R15) are included, so a detector spec may
-#: carry them; a source never uses them.
+#: fields, the absolute-placement keys (spec R18), plus each type's extras.
+#: ``type`` and ``port`` are separate. The detector display settings (spec R15)
+#: are included, so a detector spec may carry them; a source never uses them.
 _SPEC_PARAM_KEYS = frozenset(
     {"port_offset", "level", "direction", "name", "wavelengths", "port_size_mult", "visible"}
+    | set(_ABSOLUTE)
     | set(_FIELD_PARAMS)
     | {key for kind in TYPES.values() for key in kind.extra}
 )
@@ -107,11 +109,13 @@ def _default_color(layer: int | None, index: int) -> str:
 class ViewerState:
     """Everything the viewer shows and how it is styled (spec R1, R2, D9, D10)."""
 
-    def __init__(self, stack: Any) -> None:
+    def __init__(self, stack: Any, settings: SimSettings | None = None) -> None:
         """Builds the device's geometry once and sets the default styles.
 
         Args:
             stack: a :class:`~gdsfactory.fdtdx_stack.StackDevice`.
+            settings: kernel-side simulation settings for the new state;
+                defaults to fresh defaults (used by ``load_result``, R16).
         """
         self.stack = stack
         #: the device as built and its box, kept so a ``boundary_offset`` edit
@@ -160,8 +164,11 @@ class ViewerState:
         #: the sources and detectors as declarative specs (spec R12, D11); the
         #: widget creates nothing until retrieval, so this is the whole setup
         self.specs: list[ObjectSpec] = []
+        #: ids of specs adopted from a loaded foreign result (spec R16); they
+        #: are read-only, skipped by ``build_objects`` and flagged in ``to_state``
+        self.adopted: set[str] = set()
         #: the setup-wide simulation settings (spec R13)
-        self.settings = SimSettings()
+        self.settings = settings if settings is not None else SimSettings()
         #: true while a mode-1 run is in flight; the kernel rejects setup edits
         #: in this state (spec D15). Set by the widget's run worker.
         self.running: bool = False
@@ -269,12 +276,33 @@ class ViewerState:
         """Adds a source/detector spec, assigning it an id (spec R12, D11).
 
         Raises:
-            ValueError: if the spec names a port this device does not have.
+            ValueError: if the spec names a port this device does not have
+                ("None", absolute placement, is always accepted — spec R18).
         """
-        if spec.port not in self.port_visible:
+        if spec.port != "None" and spec.port not in self.port_visible:
             raise ValueError(f"Unknown port {spec.port!r}")
         if not spec.id:
             spec.id = self._new_id(spec.category)
+        self.specs.append(spec)
+        return spec
+
+    def adopt_spec(self, spec: ObjectSpec) -> ObjectSpec:
+        """Adds a read-only spec describing an adopted result detector (R16).
+
+        Unlike :meth:`add_spec` there is no port check — an adopted spec is
+        always placed absolutely — and the spec's id is recorded in
+        :attr:`adopted`, so setup edits to it are refused and
+        ``build_objects`` skips it.
+
+        Args:
+            spec: the spec to adopt; its ``glyph`` may already be set.
+
+        Returns:
+            The spec, with an id assigned.
+        """
+        if not spec.id:
+            spec.id = self._new_id(spec.category)
+        self.adopted.add(spec.id)
         self.specs.append(spec)
         return spec
 
@@ -294,8 +322,28 @@ class ViewerState:
 
         ``data`` is ``{"id", "type"?, "port"?, "params"?}``; omitted fields are
         kept. Parameters are merged, so a one-field edit does not drop the rest.
+
+        An adopted spec (spec R16) accepts only its display params — the
+        detector's field settings and ``visible`` — since it describes a live
+        placed object; anything else raises ``ValueError``.
+
+        Raises:
+            ValueError: on an unknown type, port or parameter, or a
+                non-display edit to an adopted spec.
         """
         spec = self.find_spec(str(data.get("id", "")))
+        if spec.id in self.adopted:
+            if "type" in data or "port" in data:
+                raise ValueError(
+                    f"detector {spec.name!r} comes from the loaded result and is read-only"
+                )
+            if "params" in data:
+                bad = set(data["params"]) - set(_FIELD_PARAMS) - {"visible"}
+                if bad:
+                    raise ValueError(
+                        f"detector {spec.name!r} comes from the loaded result; only its "
+                        f"display settings are editable (refused: {sorted(bad)})"
+                    )
         if "type" in data:
             type_name = str(data["type"])
             if type_name not in TYPES:
@@ -303,7 +351,7 @@ class ViewerState:
             spec.type = type_name
         if "port" in data:
             port = str(data["port"])
-            if port not in self.port_visible:
+            if port != "None" and port not in self.port_visible:
                 raise ValueError(f"Unknown port {port!r}")
             spec.port = port
         if "params" in data:
@@ -315,8 +363,16 @@ class ViewerState:
         return spec
 
     def remove_spec(self, spec_id: str) -> None:
-        """Removes a source/detector spec (spec R12)."""
+        """Removes a source/detector spec (spec R12).
+
+        Raises:
+            ValueError: if the spec was adopted from the loaded result (R16).
+        """
         spec = self.find_spec(spec_id)
+        if spec.id in self.adopted:
+            raise ValueError(
+                f"detector {spec.name!r} comes from the loaded result and cannot be removed"
+            )
         self.specs.remove(spec)
         if self.selection and self.selection.get("name") == spec_id:
             self.selection = None
@@ -446,7 +502,11 @@ class ViewerState:
             "plane_bounds": list(self.plane_bounds()),
             "plane_fade_frac": self.plane_fade_frac,
             "sources": [s.to_wire() for s in self.specs if s.category == "source"],
-            "detectors": [s.to_wire() for s in self.specs if s.category == "detector"],
+            "detectors": [
+                {**s.to_wire(), "adopted": s.id in self.adopted}
+                for s in self.specs
+                if s.category == "detector"
+            ],
             "field_settings": {
                 s.id: s.field_params() for s in self.specs if s.category == "detector"
             },

@@ -47,7 +47,7 @@ import traitlets
 
 from gdsfactory.viewer.fields import validate_result
 from gdsfactory.viewer.payload import build_field_payload, build_payload, build_section_payload
-from gdsfactory.viewer.sim import RunStopped, build_objects
+from gdsfactory.viewer.sim import RunResult, RunStopped, build_objects
 from gdsfactory.viewer.sim import run as _run_sim
 from gdsfactory.viewer.state import ViewerState
 
@@ -340,6 +340,69 @@ class Viewer(anywidget.AnyWidget):
         self._run_error = None
         self.run_result = {"status": "done", "detectors": _detector_names(result)}
         self.fields = build_field_payload(self._viewer_state, result)
+
+    def load_result(
+        self,
+        objects: Any,
+        arrays: Any,
+        config: Any,
+        stack: Any = None,
+        *,
+        settings: Any = None,
+    ) -> None:
+        """Displays a completed simulation from arbitrary user code (spec R16, D18).
+
+        Takes the three pieces fdtdx hands out directly —
+        :func:`fdtdx.place_objects` returns ``(objects, config)`` and
+        :func:`fdtdx.run_fdtd` returns ``(time_step, arrays)`` — so nothing is
+        assembled for it; the widget's own run result passes as
+        ``load_result(*result)``. The viewer rebuilds its geometry from
+        ``stack`` (defaulting to the stack it was built from), adopts one
+        read-only spec per detector in ``objects.detectors`` (spec R16), and
+        re-shades the phasor-family detectors from ``arrays.detector_states``.
+
+        The adopted detectors are excluded from a later :meth:`run`: the setup
+        after a ``load_result`` is effectively fresh, and the foreign detectors
+        are not re-created in it.
+
+        Args:
+            objects: the result's placed :class:`fdtdx.objects.container.ObjectContainer`.
+            arrays: the result's fdtdx ``ArrayContainer``.
+            config: the result's :class:`fdtdx.config.SimulationConfig`.
+            stack: the :class:`~gdsfactory.fdtdx_stack.StackDevice` the result
+                was recorded on; defaults to the widget's current stack.
+            settings: kernel-side :class:`~gdsfactory.viewer.sim.SimSettings`
+                for the rebuilt state; defaults to fresh default settings.
+
+        Raises:
+            RuntimeError: if a run is in flight (spec D15).
+            ValueError: if the result lacks a required piece, a phasor detector
+                could never shade, or ``stack`` disagrees with the result's
+                grid. The previous result and overlays are left untouched.
+        """
+        if self._viewer_state.running:
+            raise RuntimeError("a run is in flight; load_result is refused")
+        from gdsfactory.viewer.adopt import adopt_result
+        from gdsfactory.viewer.fields import validate_foreign_result
+
+        if stack is None:
+            stack = self._viewer_state.stack
+        validate_foreign_result(objects, arrays, config, stack=stack)
+        new_state = ViewerState(stack, settings=settings)
+        adopt_result(new_state, objects, config)
+        result = RunResult(objects, arrays, config)
+        self._viewer_state = new_state
+        self._prepared = None  # the cached build belongs to the old state
+        self._run_result = result
+        self._run_error = None
+        self._previous_result = None
+        geometry, meta = build_payload(new_state)
+        self.geometry = geometry
+        self.meta = meta
+        self.state = new_state.to_state()
+        self.section = build_section_payload(new_state)
+        self.run_result = {"status": "done", "detectors": _detector_names(result)}
+        self.fields = build_field_payload(new_state, result)
 
     # ------------------------------------------------------------------ messages
 

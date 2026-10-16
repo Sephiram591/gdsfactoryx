@@ -509,6 +509,111 @@ AC:
   - translucent volume box in 3D and outline in 2D, with visibility toggles
   - open: also show the PML boundaries in the viewports?
 
+### R16. Adopting a foreign completed result: *Must* (2026-10-16)
+
+A user (or agent) with a **completed** fdtdx simulation — their own
+`StackDevice`, source and detectors created directly with fdtdx, never through
+the viewer's placeholders — can display it in the viewer via a kernel-side API,
+without re-authoring the setup:
+
+- **`Viewer.load_result(objects, arrays, config, stack=None, *, settings=None)`.**
+  The three pieces fdtdx hands out (`place_objects` returns the objects/config,
+  `run_fdtd` the arrays) pass straight through; the widget's own `RunResult`
+  passes as `load_result(*result)`. `show_result` keeps its stricter,
+  name-matched contract unchanged.
+- **Lenient validation.** Refused only what can never render: missing
+  `arrays.detector_states`, missing `objects.detectors`/`objects.volume`, a
+  non-positive `config.resolution`, a phasor detector that is not a plane, a
+  phasor whose grid shape disagrees with its placement, or a `stack` whose box
+  disagrees with the result's grid by more than one cell. Everything else is
+  accepted — the goal is to display, not to gate.
+- **Geometry rebuild (D18).** The viewer rebuilds its state from `stack`
+  (default: the stack it was built from), so a foreign device's box becomes the
+  displayed geometry.
+- **Phasor-family overlays only.** Detectors with a `"phasor"` state key
+  (`PhasorDetector`, `ModeOverlapDetector`) shade (R15); every other detector
+  is listed with a plain glyph and is selectable but never shaded.
+- **Run lock.** `load_result` while a run is in flight raises `RuntimeError`
+  (D15). A refused result raises `ValueError` and leaves the previous result,
+  specs and overlays untouched.
+- **After adoption a later `run()` is effectively fresh**: the adopted
+  detectors are read-only descriptions of the foreign result and are excluded
+  from `build_objects` (D18).
+
+AC:
+- A foreign result whose stack differs from the viewer's is loaded by passing
+  `stack=...`; the geometry payload reflects the new box and the old specs are
+  replaced by the adopted ones (checked in a test).
+- A result missing `detector_states` raises and leaves the previous result and
+  overlays unchanged (checked in a test).
+- `load_result` during a run raises `RuntimeError` (checked in a test).
+- Adopted specs round-trip through the wire as valid `SpecPayload`s (checked in
+  a test).
+
+### R17. Result tab with a frequency slider: *Must* (2026-10-16)
+
+The explorer gains a fourth tab, **Result**, that holds each detector's field
+*plotting* options (the `field_*` group) for every detector in the last result
+— the widget's own runs and adopted foreign results alike — instead of the
+Sources/Detectors tab, which keeps authoring params only.
+
+- **Frequency slider.** A multi-frequency detector (a `PhasorDetector` with
+  several `wave_characters`) gets a slider selecting which frequency frame is
+  shaded, with a readout of the frequency in THz. The kernel sends **all**
+  frames in the payload (`freqs` in Hz plus the full `(num_freqs, v, u)`
+  buffers); the browser slices locally, so a slider move re-shades with no
+  kernel round-trip. Single-frequency detectors get no slider.
+- The controls write the same `field_*` params (plus the new `field_freq`),
+  so shading, the colorbar and persistence work unchanged; a single detector
+  yields the same UI with one section, and no result shows a short note.
+- **Layers section.** The Result tab opens with its own **Layers** section —
+  one compact row per shaded detector, styled like the editor's Layers tab:
+  show checkbox, color swatch (the ramp's high color) and opacity slider. It
+  styles the *result overlays* only and shares the same `field_visible` /
+  `field_color_high` / `field_opacity` params as the per-detector section
+  below it, so the two views stay in sync through the kernel round-trip. The
+  editor's level colors (the Layers tab on Layout/Ports) are untouched.
+
+AC:
+- A multi-frequency payload carries every frame, `freqs` from the detector's
+  wave characters, and `freq = 0` by default (checked in a test).
+- `field_freq` round-trips through the spec patch path like the other
+  display params (checked in a test).
+- A single-frequency payload's buffers are unchanged in layout — one frame
+  (checked in a test; the whole R15 field suite guards this).
+- A Layers-row patch (`field_visible`/`field_color_high`/`field_opacity`)
+  round-trips on an adopted spec too — display params are allowed there
+  (checked kernel-side against a live adopted result, 2026-10-16).
+
+### R18. "None" port: absolute placement: *Must* (2026-10-16)
+
+A source/detector's port select gains a **"None"** choice that replaces the
+port-dependent controls with absolute placement params: `axis` (the plane's
+normal, 0/1/2 = x/y/z), `center` (x, y, z in µm, stack coordinates) and `size`
+(in-plane extents in µm; plane types only). Point types (dipole) take `center`
+only.
+
+- The placement constraint mirrors `StackDevice._place_at`: margins from the
+  stack box center to `center`, so absolute and port-frame placement land in
+  the same frame and resolve through the same `place_objects`.
+- **Mode sources/detectors work on any plane** — the mode solve runs on the
+  permittivity cross-section the placed plane cuts (`mode.py` →
+  `compute_mode`), not on a port. Caveat: a plane cutting nothing guided yields
+  radiation modes (`mode_index`/`filter_pol` index those) — a user-facing note,
+  not a restriction.
+- Adopted foreign detectors use the same representation, read-only (D18), so
+  the two features share one path.
+
+AC:
+- A "None"-port detector's glyph sits where the params say (in the meshes'
+  local frame) and moves when `center` is edited (checked in a test).
+- The constraint resolves through a real `place_objects` to the requested
+  center, within grid snapping (checked in a test).
+- A port-placed detector and an absolute one at the same center land on the
+  same grid cells within one cell (checked in a test).
+- Switching back to a real port restores the port-frame path (checked in a
+  test).
+
 ---
 
 ## 7. Decisions
@@ -1071,6 +1176,43 @@ through fdtdx's own loop condition instead.
 
 ---
 
+### D18. Adoption rebuilds the ViewerState from the result: *Accepted* (2026-10-16)
+
+How `load_result` (R16) turns a foreign result into display state.
+
+- **A fresh `ViewerState` per load.** The viewer never merges foreign
+  detectors into its live specs: it builds a new state from the result's
+  `stack` (default: its own), with fresh default `SimSettings` unless the
+  caller passes `settings=`. The memoized `_prepare` cache is reset on the
+  swap (its revision counter starts at 0 for every state, so a stale cache
+  would otherwise survive the swap).
+- **One read-only "None"-port spec per detector.** Every detector in
+  `objects.detectors` (names read from the placed objects — fdtdx may
+  auto-generate) gets a spec with `port == "None"` (R18) whose `axis`/`center`/
+  `size` params describe the placement, in stack µm. The ids live in
+  `state.adopted`:
+  - display edits (`field_*`, `visible`) pass and patch the display settings;
+  - type/port/position edits and removal are refused with `ValueError`, and
+    the refused patch re-syncs unchanged (the D10 contract).
+- **The glyph is the rendered truth.** An adopted spec's glyph is derived from
+  its placed `grid_slice` and the result's resolution (`adopt.glyph_from_grid`),
+  not re-derived from the params — so a detector whose real extent differs from
+  an axis-aligned reading still draws right. The conversion relies on the fdtdx
+  invariant that the volume's grid slices start at 0; if that does not hold the
+  spec falls back to a point glyph at the grid centroid.
+- **Sub-cell accuracy.** Fields live at Yee half-cell offsets per component;
+  the adopted rectangle can be half a cell off the true support. Accepted —
+  below the resolution the grid draws at.
+- **All frames travel.** A multi-frequency phasor's payload carries the full
+  `(num_freqs, v, u)` float32 stacks (R17); a handful of frames is fine, a
+  100-frame detector is ~30 MB per 450×75 plane. Accepted for this cut.
+- **Implemented in M4** (`gdsfactory/viewer/adopt.py`, `fields.py`,
+  `state.py`, `sim.py`, `widget.py`; `js/viewer/explorer.ts`, `wire.ts`,
+  `glyphs.ts`, `section.ts`, `index.ts`).
+- **Relates to R15, R16, R17, R18.**
+
+---
+
 ## 8. Open questions
 
 - **Q1.** *Resolved 2026-10-12:* an `anywidget` is the v1 host (D2). The
@@ -1480,3 +1622,19 @@ through fdtdx's own loop condition instead.
     the previous result's overlays stay on screen) and the `stopping` trait.
     Dropped §2's "Cancelling a run from the widget" non-goal, and updated R14
     mode 1, its AC, D12 and D15 (R13, R14, D15).
+
+- 2026-10-16: adopting a foreign completed result. `Viewer.load_result(
+  objects, arrays, config, stack=None)` accepts the three pieces fdtdx hands
+  out from arbitrary user code and displays them (R16): the geometry rebuilds
+  from the result's stack, every detector becomes a read-only "None"-port spec
+  with a `grid_slice`-derived glyph, phasor-family detectors shade, and lenient
+  validation refuses only what could never render (D18). The explorer's new
+  **Result** tab holds each result detector's plotting options, and
+  multi-frequency detectors get a frequency slider that re-shades client-side —
+  the kernel sends all `(num_freqs, v, u)` frames in the payload (R17). A
+  source/detector's port select gains a **"None"** choice for absolute
+  placement (`axis`/`center`/`size` in stack µm), placed through the same
+  margin frame as `_place_at`; mode sources/detectors work on any plane, not
+  only ports (R18). The Result tab also opens with a **Layers** section — one
+  row per shaded detector with show/color/opacity for the result overlays,
+  independent of the editor's level Layers (R17).

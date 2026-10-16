@@ -545,7 +545,7 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
       if (glyph.kind !== "detector") continue;
       planes.setField(glyph.id, fields[glyph.id] ?? null, settings[glyph.id], logRange);
     }
-    explorer.setFieldComponents(fields);
+    explorer.setFields(fields);
     section.setFields(fields);
     renderColorbar(state, fields);
   }
@@ -576,7 +576,7 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
     }
     const s = settings[entry.id];
     const field = fields[entry.id];
-    const data = componentData(field, s.field_component!);
+    const data = componentData(field, s.field_component!, s.field_freq ?? 0);
     if (!data) {
       colorbar.hidden = true;
       return;

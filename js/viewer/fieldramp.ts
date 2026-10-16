@@ -33,19 +33,29 @@ export function isSigned(transform: Transform): boolean {
  * ``TOTAL_COMPONENT`` returns the total electric-field magnitude as a real
  * value (imaginary part zero): the Cartesian components are orthogonal, so
  * ``|E|^2 = |Ex|^2 + |Ey|^2 + |Ez|^2``. Only the ``E`` components contribute.
+ *
+ * The buffers are frequency-major stacks (spec R17); ``frame`` selects one
+ * frequency, clamped to what the buffers hold, so a stale `field_freq` from a
+ * previous result cannot read out of bounds.
  */
 export function componentData(
   field: FieldPayload,
   component: string,
+  frame = 0,
 ): { real: Float32Array; imag: Float32Array } | null {
   const [rows, cols] = field.grid;
   const count = rows * cols;
+  const perFrame = field.components.length * count;
+  const total = Math.floor(field.real.byteLength / 4);
+  const maxFrame = perFrame > 0 ? Math.floor(total / perFrame) - 1 : 0;
+  const f = Math.min(Math.max(0, Math.floor(frame)), Math.max(0, maxFrame));
+  const base = f * perFrame;
   if (component === TOTAL_COMPONENT) {
     const real = new Float32Array(count);
     for (let i = 0; i < field.components.length; i += 1) {
       if (!field.components[i].startsWith("E")) continue;
-      const re = decodeFloat32(field.real, i * count, count);
-      const im = decodeFloat32(field.imag, i * count, count);
+      const re = decodeFloat32(field.real, base + i * count, count);
+      const im = decodeFloat32(field.imag, base + i * count, count);
       for (let k = 0; k < count; k += 1) real[k] += re[k] * re[k] + im[k] * im[k];
     }
     for (let k = 0; k < count; k += 1) real[k] = Math.sqrt(real[k]);
@@ -54,8 +64,8 @@ export function componentData(
   const index = field.components.indexOf(component);
   if (index < 0) return null;
   return {
-    real: decodeFloat32(field.real, index * count, count),
-    imag: decodeFloat32(field.imag, index * count, count),
+    real: decodeFloat32(field.real, base + index * count, count),
+    imag: decodeFloat32(field.imag, base + index * count, count),
   };
 }
 

@@ -84,11 +84,15 @@ export interface Selection {
 
 //: A source/detector as data, not a live object (spec D11). `id` is stable;
 //: `params` holds the editable fields (absent ones fall back to the settings).
+//: A spec with `port: "None"` is placed absolutely (axis/center/size params,
+//: spec R18); one with `adopted: true` came from a loaded result and is
+//: read-only except its display settings (spec R16).
 export interface SpecPayload {
   id: string;
   type: string;
   port: string;
   params: Record<string, unknown>;
+  adopted?: boolean;
 }
 
 //: A source/detector plane glyph, in the local frame the meshes use (spec C5,
@@ -130,9 +134,12 @@ export interface SimSettingsPayload {
   keep_partial: boolean;
 }
 
-//: One detector's field from the last result (spec R15, D16). `real`/`imag` are
-//: component-major float32 planes: component `c` occupies `grid[0]*grid[1]`
-//: values starting at `c * grid[0] * grid[1]`.
+//: One detector's field from the last result (spec R15, D16, R17). The float32
+//: buffers are frequency-major stacks: frequency `f` occupies
+//: `components.length * grid[0] * grid[1]` values starting at
+//: `f * components.length * grid[0] * grid[1]`, and within a frequency,
+//: component `c` occupies `grid[0]*grid[1]` values at
+//: `(f * components.length + c) * grid[0] * grid[1]`.
 export interface FieldPayload {
   //: the spec's id (matches a `SpecPayload.id`)
   id: string;
@@ -140,6 +147,11 @@ export interface FieldPayload {
   components: string[];
   //: `[rows, cols]` of one component plane
   grid: [number, number];
+  //: the recorded frequencies in Hz (spec R17); frame `i` of the buffers is
+  //: `freqs[i]`
+  freqs?: number[];
+  //: the initially selected frequency frame
+  freq?: number;
   real: DataView | ArrayBuffer;
   imag: DataView | ArrayBuffer;
 }
@@ -153,6 +165,8 @@ export interface FieldSettings {
   field_color_high: string;
   field_opacity: number;
   field_visible: boolean;
+  //: the selected frequency frame of a multi-frequency detector (spec R17)
+  field_freq?: number;
 }
 
 export interface StatePayload {

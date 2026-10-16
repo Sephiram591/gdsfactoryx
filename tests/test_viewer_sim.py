@@ -769,9 +769,9 @@ def _spy_create(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     calls: list[str] = []
     real = sim._create
 
-    def wrapper(stack: Any, spec: Any, settings: Any) -> Any:
+    def wrapper(stack: Any, spec: Any, settings: Any, **kwargs: Any) -> Any:
         calls.append(spec.type)
-        return real(stack, spec, settings)
+        return real(stack, spec, settings, **kwargs)
 
     monkeypatch.setattr(sim, "_create", wrapper)
     return calls
