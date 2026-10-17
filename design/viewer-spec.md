@@ -1267,6 +1267,51 @@ How `load_result` (R16) turns a foreign result into display state.
 
 ---
 
+### D19. The Result tab routes worlds by the active tab: *Accepted* (2026-10-16)
+
+How the Result tab (R17) actually operates: one widget, two `ViewerState`s,
+one wire — and every routing decision keyed on the active tab.
+
+- **Two worlds, one wire.** The widget keeps the editor's state
+  (`_viewer_state`) and, once a result exists, a separate result world
+  (`_result_state`, built by adoption, D18). There are still only four
+  routed traits — `geometry`/`meta`/`section`/`state` — and only one value of
+  each on the wire at a time: `active_tab` (carried on the editor state) picks
+  which world each trait is *sent from*. The kernel re-sends the whole set on
+  a tab switch, `state` first, so a browser rebuild sees the incoming world's
+  styles before the geometry it must style.
+- **Which world answers.** While the Result tab is active, a *display* edit
+  arriving as `update_spec` routes to `_result_state`; any other tab routes
+  the same event to the editor's setup. Routing is **by tab, not by id**:
+  editor and result worlds number their spec ids independently (each via its
+  own `_new_id` sequence), so `detector-1` legitimately exists in both, and
+  id-matching could silently patch the wrong world. Setup events
+  (`add_spec`/`remove_spec`/type/port/position edits) always go to the editor:
+  adopted specs refuse them kernel-side anyway (D18). Styles patched from the
+  Result tab's Layers section follow the same rule — they reach the result
+  world's `styles`, never the editor's level colors.
+- **The echo back is the tab's world.** `_wire_state(active)` publishes the
+  active world and — when the result world is published — also echoes the
+  editor's `active_tab` onto the wire, so the browser's
+  `state.active_tab === "result"` gate stays true on a rebuild triggered by
+  the result world's own payload. Without this echo a result-world update
+  would arrive with a stale/non-result `active_tab` and the field shading
+  would silently drop (the bug that motivated the rule).
+- **Browser-side gating only.** The kernel sends the `fields` payload on any
+  tab; the browser decides where shading appears: `applyFields` shades 3D
+  planes and 2D sections and shows the colorbar only while
+  `state.active_tab === "result"` (and per-glyph, only where the glyph is
+  `visible` and `field_visible`). No kernel-side suppression, no extra trait.
+- **Per-world caches.** `_prepare`'s geometry cache is keyed per world
+  (`_prepared` resets on a world swap), so a re-boxed editor device and an
+  adopted result cannot cross-contaminate payloads.
+- **Implemented in M4** (`gdsfactory/viewer/widget.py` `_wire_state` and the
+  `_on_msg` routing; `state.py` `active_tab`; `js/viewer/index.ts`
+  `applyFields`).
+- **Relates to R17, D18.**
+
+---
+
 ## 8. Open questions
 
 - **Q1.** *Resolved 2026-10-12:* an `anywidget` is the v1 host (D2). The
@@ -1708,4 +1753,6 @@ How `load_result` (R16) turns a foreign result into display state.
   display edit routes to the result world by the active tab rather than by
   id-matching, so same-named editor specs cannot be misrouted. The header
   checkbox writes the spec's `visible` param — unchecking hides the whole
-  detector (glyph, 2D shading, colorbar), not just the overlay.
+  detector (glyph, 2D shading, colorbar), not just the overlay. The Result
+  tab's operation — the two-world split, tab-keyed routing and browser-side
+  shading gate — is written up as D19.
