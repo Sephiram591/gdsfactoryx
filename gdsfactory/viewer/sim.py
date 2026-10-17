@@ -116,6 +116,7 @@ _FIELD_PARAMS = (
     "field_opacity",
     "field_visible",
     "field_freq",
+    "field_outline",
 )
 
 #: The display transforms a detector's field can take (spec R15).
@@ -183,6 +184,7 @@ class ObjectSpec:
             "field_opacity": _field_opacity(self.params.get("field_opacity", 1.0)),
             "field_visible": bool(self.params.get("field_visible", True)),
             "field_freq": int(self.params.get("field_freq", 0)),
+            "field_outline": bool(self.params.get("field_outline", True)),
         }
 
     def to_wire(self) -> dict[str, Any]:

@@ -131,6 +131,11 @@ export class Explorer {
   private readonly resultPanel: HTMLElement;
   private readonly resultNote: HTMLElement;
   private readonly resultSections: HTMLElement;
+  /** the Result tab's source rows (read-only, visibility-only), keyed by id */
+  private readonly resultSourceList: HTMLElement;
+  private resultSourceRows = new Map<string, { root: HTMLElement; visible: HTMLInputElement; name: HTMLElement }>();
+  /** collapse state per detector section, kept across rebuilds (like the spec rows) */
+  private resultCollapsed = new Set<string>();
   /** the last result's per-detector field payloads, keyed by spec id (R15, R17) */
   private fields: Record<string, FieldPayload> = {};
   /** the Result tab's per-detector display controls, keyed by spec id (R17) */
@@ -168,6 +173,8 @@ export class Explorer {
     this.simNote = sim.note;
 
     this.resultSections = document.createElement("div");
+    this.resultSourceList = document.createElement("div");
+    this.resultSourceList.className = "gfx-spec-list";
     this.resultNote = emptyNote(
       "No result loaded. Run the simulation (or call load_result) and each "
       + "detector's plotting options appear here.",
@@ -176,7 +183,11 @@ export class Explorer {
     this.resultLayersRoot = this.section("Layers", [this.resultLayersList]);
 
     this.layoutPanel = this.panel([]);
-    this.resultPanel = this.panel([this.resultNote, this.resultLayersRoot, this.resultSections]);
+    this.resultPanel = this.panel([
+      this.resultNote, this.resultLayersRoot,
+      this.section("Sources", [this.resultSourceList]),
+      this.resultSections,
+    ]);
     this.panels = [
       this.layoutPanel,
       this.panel([
@@ -682,12 +693,38 @@ export class Explorer {
     const ids = Object.keys(this.fields);
     this.resultNote.hidden = ids.length > 0;
 
-    // rebuild the sections when the detector set changed
+    // the result world's sources (spec R17): a visibility-only row each,
+    // reconciled like the spec rows so a collapse is never torn down
+    const specs = state?.sources ?? [];
+    const seen = new Set<string>();
+    for (const source of specs) {
+      seen.add(source.id);
+      let row = this.resultSourceRows.get(source.id);
+      if (!row) {
+        row = this.buildResultSourceRow(source);
+        this.resultSourceList.appendChild(row.root);
+        this.resultSourceRows.set(source.id, row);
+      }
+      const name = source.params.name;
+      const text = typeof name === "string" && name ? name : `${source.port}_${source.type}`;
+      if (row.name.textContent !== text) row.name.textContent = text;
+      const visible = source.params.visible ?? true;
+      if (row.visible.checked !== Boolean(visible)) row.visible.checked = Boolean(visible);
+    }
+    for (const [id, row] of this.resultSourceRows) {
+      if (seen.has(id)) continue;
+      row.root.remove();
+      this.resultSourceRows.delete(id);
+    }
+
+    // rebuild the sections when the detector set changed; a rebuilt section
+    // keeps its collapse state (view-only, like the spec rows)
     const current = new Set(ids);
     for (const [id, controls] of [...this.resultControls]) {
       if (current.has(id)) continue;
       controls.get("section")?.element.remove();
       this.resultControls.delete(id);
+      this.resultCollapsed.delete(id);
     }
     for (const id of ids) {
       if (this.resultControls.has(id)) continue;
@@ -752,6 +789,19 @@ export class Explorer {
     // the Layers rows show the style set currently on the wire (spec R17):
     // the result world's styles while the Result tab is active
     if (state) {
+      // the header checkboxes follow the detector specs' `visible` param, not
+      // the field settings — unchecking hides the whole detector (glyph too)
+      const specs = new Set((state.detectors ?? []).map((d) => d.id));
+      for (const [id, controls] of this.resultControls) {
+        if (!specs.has(id)) continue;
+        const spec = (state.detectors ?? []).find((d) => d.id === id);
+        const visible = Boolean(spec?.params.visible ?? true);
+        const header = controls.get("field_visible");
+        if (header && header.element instanceof HTMLInputElement
+            && header.element.checked !== visible) {
+          header.element.checked = visible;
+        }
+      }
       for (const [name, row] of this.resultLayers) {
         const style = state.styles?.[name];
         if (!style) continue;
@@ -808,54 +858,117 @@ export class Explorer {
     return root;
   }
 
+  /**
+   * One result source's row (spec R17): an unlabeled visibility checkbox, then
+   * the name — read-only, since the row describes a placed object.
+   */
+  private buildResultSourceRow(source: SpecPayload): { root: HTMLElement; visible: HTMLInputElement; name: HTMLElement } {
+    const root = document.createElement("div");
+    root.className = "gfx-row";
+    root.dataset.kind = "source";
+    root.dataset.name = source.id;
+    const visible = checkbox(true, (value) =>
+      this.callbacks.onUpdateSpec("source", source.id, { params: { visible: value } }),
+    );
+    visible.disabled = this.locked;
+    const name = label("");
+    root.append(visible, name);
+    return { root, visible, name };
+  }
+
   /** One detector's display controls in the Result tab (spec R17). */
   private buildResultSection(id: string): HTMLElement {
     const entry = this.fields[id];
     const section = document.createElement("div");
-    section.className = "gfx-section gfx-field-group";
+    section.className = "gfx-spec gfx-field-group";
+    section.dataset.kind = "detector";
+    section.dataset.name = id;
+
     const header = document.createElement("div");
-    header.className = "gfx-section-header";
-    header.appendChild(label(entry.name));
-    section.appendChild(header);
+    header.className = "gfx-spec-header";
+    // the collapse arrow (spec R12): hides the row's fields, leaving the header
+    const twisty = document.createElement("button");
+    twisty.type = "button";
+    twisty.className = "gfx-twisty";
+    // the visibility toggle sits unlabeled in the header, before the name
+    // (spec R17): it hides the whole detector — glyph and shading — via the
+    // spec's `visible` param, the same one the Sources/Detectors rows write
+    const headerVisible = document.createElement("input");
+    headerVisible.type = "checkbox";
+    headerVisible.title = "show this detector";
+    const name = label(entry.name);
+    header.append(twisty, headerVisible, name);
+
+    let collapsed = this.resultCollapsed.has(id);
+    const applyCollapsed = (): void => {
+      section.classList.toggle("gfx-collapsed", collapsed);
+      twisty.textContent = collapsed ? "▶" : "▼";
+      twisty.title = collapsed ? "expand" : "collapse";
+      twisty.setAttribute("aria-expanded", String(!collapsed));
+    };
+    twisty.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const next = !this.resultCollapsed.has(id);
+      if (next) this.resultCollapsed.add(id);
+      else this.resultCollapsed.delete(id);
+      collapsed = next;
+      applyCollapsed();
+    });
+    applyCollapsed();
+    // the header checkbox and the visibility row write the same param
+    headerVisible.addEventListener("change", () =>
+      this.setParam(id, "visible", headerVisible.checked));
 
     const fields = document.createElement("div");
     fields.className = "gfx-spec-fields";
     const controls = new Map<string, Control>();
-    const setParam = (key: string, value: unknown): void =>
-      this.callbacks.onUpdateSpec("detector", id, { params: { [key]: value } });
 
-    const component = this.selectControl([], "", (value) => setParam("field_component", value || null));
+    const component = this.selectControl([], "", (value) => this.setParam(id, "field_component", value || null));
     controls.set("field_component", component);
     fields.appendChild(fieldRow("component", component.element,
       "which recorded field component to shade the plane with"));
     const transform = this.selectControl(
       [...FIELD_TRANSFORMS], "abs",
-      (value) => setParam("field_transform", value),
+      (value) => this.setParam(id, "field_transform", value),
     );
     controls.set("field_transform", transform);
     fields.appendChild(fieldRow("transform", transform.element,
       "real/imag/phase are signed (two-color ramp); abs/logabs are non-negative"));
-    const low = this.colorControl((value) => setParam("field_color_low", value));
+    const low = this.colorControl((value) => this.setParam(id, "field_color_low", value));
     controls.set("field_color_low", low);
     fields.appendChild(fieldRow("low color", low.element,
       "the ramp's low-end color (signed transforms only)"));
-    const high = this.colorControl((value) => setParam("field_color_high", value));
+    const high = this.colorControl((value) => this.setParam(id, "field_color_high", value));
     controls.set("field_color_high", high);
     fields.appendChild(fieldRow("high color", high.element, "the ramp's high-end color"));
-    const opacity = this.numberControl(1, 0.05, (value) => setParam("field_opacity", value), true);
+    const opacity = this.numberControl(1, 0.05, (value) => this.setParam(id, "field_opacity", value), true);
     controls.set("field_opacity", opacity);
     fields.appendChild(fieldRow("opacity", opacity.element, "the overlay's overall opacity, 0-1"));
-    const show = checkbox(true, (value) => setParam("field_visible", value));
+    // "show" lives unlabeled in the header (spec R17); it writes the spec's
+    // `visible` param, synced from the detector's spec payload (not the field
+    // settings), so unchecking hides the glyph as well as the shading
     controls.set("field_visible", {
-      element: show,
+      element: headerVisible,
       write(value) {
-        if (show.checked !== Boolean(value)) show.checked = Boolean(value);
+        if (headerVisible.checked !== Boolean(value)) headerVisible.checked = Boolean(value);
       },
       setDisabled(value) {
-        show.disabled = value;
+        headerVisible.disabled = value;
       },
     });
-    fields.appendChild(fieldRow("show", show, "shade this detector's plane with the last result"));
+    // the outline toggle (spec R17): the border drawn around the plane while it
+    // is shaded, so the extent stays visible under a busy field
+    const outline = checkbox(true, (value) => this.setParam(id, "field_outline", value));
+    controls.set("field_outline", {
+      element: outline,
+      write(value) {
+        if (outline.checked !== Boolean(value)) outline.checked = Boolean(value);
+      },
+      setDisabled(value) {
+        outline.disabled = value;
+      },
+    });
+    fields.appendChild(fieldRow("outline", outline, "draw the plane's outline while shaded"));
     // the frequency slider (spec R17): client-side slicing of the multi-frame
     // buffers, so a move re-shades with no kernel round-trip
     const freqLabel = document.createElement("span");
@@ -865,7 +978,7 @@ export class Explorer {
     freq.min = "0";
     freq.step = "1";
     freq.className = "gfx-opacity";
-    freq.addEventListener("input", () => setParam("field_freq", Number(freq.value)));
+    freq.addEventListener("input", () => this.setParam(id, "field_freq", Number(freq.value)));
     controls.set("field_freq", {
       element: freq,
       write(value) {
@@ -884,10 +997,14 @@ export class Explorer {
     freqRow.appendChild(freqLabel);
     fields.appendChild(freqRow);
 
-    section.appendChild(fields);
+    section.append(header, fields);
     controls.set("section", { element: section, write() {}, setDisabled() {} });
     this.resultControls.set(id, controls);
     return section;
+  }
+
+  private setParam(id: string, key: string, value: unknown): void {
+    this.callbacks.onUpdateSpec("detector", id, { params: { [key]: value } });
   }
 
   // ------------------------------------------------------------------- controls

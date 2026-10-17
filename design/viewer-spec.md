@@ -586,9 +586,23 @@ Sources/Detectors tab, which keeps authoring params only.
   frames in the payload (`freqs` in Hz plus the full `(num_freqs, v, u)`
   buffers); the browser slices locally, so a slider move re-shades with no
   kernel round-trip. Single-frequency detectors get no slider.
-- The controls write the same `field_*` params (plus the new `field_freq`),
-  so shading, the colorbar and persistence work unchanged; a single detector
-  yields the same UI with one section, and no result shows a short note.
+- The controls write the same `field_*` params (plus the new `field_freq` and
+  `field_outline`), so shading, the colorbar and persistence work unchanged; a
+  single detector yields the same UI with one section, and no result shows a
+  short note.
+- **Collapsible sections (2026-10-16).** Each detector's section is a
+  `gfx-spec` card like the Sources/Detectors rows: a twisty collapses the
+  controls (view-only state, kept across re-renders), and the section header
+  carries the visibility checkbox **unlabeled before the name** — it writes the
+  spec's `visible` param, so unchecking hides the whole detector (glyph, 2D
+  shading and colorbar entry), not just the overlay. A `field_outline`
+  checkbox (default on) toggles the outline drawn around the plane while it is
+  shaded.
+- **Sources section.** The result world's adopted sources are listed under a
+  Sources heading — one read-only row each, an unlabeled visibility checkbox
+  writing `visible` on the adopted source's spec, then its name. Adoption now
+  covers `objects.sources` as well as detectors (the same "None"-port spec,
+  glyph from the placed `grid_slice`, no field params).
 - **Layers section.** The Result tab opens with its own **Layers** section —
   one compact row per shaded detector, styled like the editor's Layers tab:
   show checkbox, color swatch (the ramp's high color) and opacity slider. It
@@ -614,6 +628,13 @@ AC:
 - Field shading appears only while the Result tab is active (checked kernel-side:
   the payload is published on any tab, the browser's `applyFields` gates on
   `state.active_tab === "result"`).
+- A Result-tab display edit (field params on a detector, `visible` on a source)
+  is routed to the result world while its tab is active, and to the editor's
+  setup otherwise — the same update_spec event serves both tabs (checked in a
+  test: `test_result_tab_routes_source_visibility_to_the_result_world`).
+- Adoption covers sources: one adopted spec per placed source with a
+  grid-derived glyph and no field params (checked in
+  `test_adopt_result_adopts_sources_with_visibility`).
 
 ### R18. "None" port: absolute placement: *Must* (2026-10-16)
 
@@ -1678,4 +1699,13 @@ How `load_result` (R16) turns a foreign result into display state.
   editor untouched), and field shading applies only while the Result tab is
   active (R17, D18). fdtdx 0.6.3 compatibility: `SimulationConfig(grid=...)`,
   `uniform_spacing()`, the 5-tuple `place_objects`, and the PML CPML
-  coefficient dtype re-cast (C7).
+  coefficient dtype re-cast (C7). Later still: adoption covers the result's
+  **sources** too — one read-only "None"-port spec each, listed in the Result
+  tab's new Sources section with an unlabeled visibility checkbox (R17); the
+  detector sections became collapsible `gfx-spec` cards with the show checkbox
+  unlabeled in the header beside the name, and a `field_outline` display param
+  (default on) toggles the plane's outline while shaded (R17). A Result-tab
+  display edit routes to the result world by the active tab rather than by
+  id-matching, so same-named editor specs cannot be misrouted. The header
+  checkbox writes the spec's `visible` param — unchecking hides the whole
+  detector (glyph, 2D shading, colorbar), not just the overlay.

@@ -580,7 +580,7 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
     const settings = state.field_settings ?? {};
     const logRange = state.simulation?.log_range ?? 6;
     const entry = (state.glyphs ?? []).find((glyph) => {
-      if (glyph.kind !== "detector") return false;
+      if (glyph.kind !== "detector" || !glyph.visible) return false;
       const s = settings[glyph.id];
       const field = fields[glyph.id];
       return Boolean(s?.field_visible && field && s.field_component);

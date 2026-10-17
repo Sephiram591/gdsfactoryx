@@ -9,6 +9,8 @@ specs, so adoption rebuilds the display from the placed objects themselves:
 - every detector in ``objects.detectors`` becomes a read-only "None"-port spec
   (absolute placement, spec R18) whose glyph is derived from the detector's
   ``grid_slice`` and the result's resolution;
+- every source in ``objects.sources`` becomes the same kind of read-only spec,
+  so the Result tab can list it with a visibility toggle (spec R17);
 - only phasor-family detectors (a ``"phasor"`` key in
   ``arrays.detector_states[name]``) shade; the rest are listed with plain
   glyphs.
@@ -92,10 +94,18 @@ def glyph_from_grid(
     }
 
 
-def _spec_type_for(obj: Any) -> str:
-    """The viewer type name for a placed fdtdx detector (spec D18)."""
+def _spec_type_for(obj: Any, category: str) -> str:
+    """The viewer type name for a placed fdtdx source or detector (spec D18)."""
     type_name = type(obj).__name__
-    return type_name if type_name in TYPES else "PhasorDetector"
+    if type_name in TYPES and TYPES[type_name].category == category:
+        return type_name
+    # a subclass the viewer does not name: fall back to the category's first
+    # type, so the spec stays listable (a phasor-family detector still shades
+    # through its "phasor" detector state, not its type name)
+    for kind in TYPES.values():
+        if kind.category == category:
+            return kind.name
+    return type_name
 
 
 def _absolute_params(
@@ -132,7 +142,7 @@ def _config_spacing(config: Any) -> float | None:
 
 
 def adopt_result(state: Any, objects: Any, config: Any) -> list[ObjectSpec]:
-    """Creates one read-only "None"-port spec per detector in the result (R16).
+    """Creates one read-only "None"-port spec per source and detector (R16).
 
     Names are read from the placed objects — fdtdx auto-generates
     ``Object_{n}`` names, never assume. The specs describe the placement; they
@@ -145,7 +155,7 @@ def adopt_result(state: Any, objects: Any, config: Any) -> list[ObjectSpec]:
         config: the result's ``SimulationConfig`` (for the resolution).
 
     Returns:
-        The adopted specs, in ``objects.detectors`` order.
+        The adopted specs, sources first, in container order within each kind.
     """
     resolution_m = _config_spacing(config)
     if resolution_m is None:
@@ -157,23 +167,43 @@ def adopt_result(state: Any, objects: Any, config: Any) -> list[ObjectSpec]:
     anchored = all(getattr(volume_slice[i], "start", 0) == 0 for i in range(3))
 
     specs: list[ObjectSpec] = []
-    for obj in objects.detectors:
-        name = str(obj.name)
-        type_name = _spec_type_for(obj)
-        params: dict[str, Any] = {"name": name, "visible": True}
-        if anchored:
+    for category, placed in (
+        ("source", getattr(objects, "sources", ())),
+        ("detector", objects.detectors),
+    ):
+        for obj in placed:
+            specs.append(_adopt_object(
+                state, obj, category, anchored, resolution_m, volume_grid_shape, origin_um,
+            ))
+    return specs
+
+
+def _adopt_object(
+    state: Any,
+    obj: Any,
+    category: str,
+    anchored: bool,
+    resolution_m: float,
+    volume_grid_shape: tuple[int, int, int],
+    origin_um: tuple[float, float, float],
+) -> ObjectSpec:
+    """One placed object's read-only "None"-port spec (spec R16, D18)."""
+    name = str(obj.name)
+    type_name = _spec_type_for(obj, category)
+    params: dict[str, Any] = {"name": name, "visible": True}
+    spec = ObjectSpec(type=type_name, port="None", params=params)
+    if anchored:
+        try:
             params.update(_absolute_params(
                 tuple(obj.grid_slice), resolution_m, volume_grid_shape, origin_um,
             ))
-        spec = ObjectSpec(type=type_name, port="None", params=params)
-        if anchored:
-            try:
-                spec.glyph = glyph_from_grid(
-                    tuple(obj.grid_slice), resolution_m, volume_grid_shape, origin_um,
-                    spec_id="", name=name, type_name=type_name, category="detector",
-                )
-            except (TypeError, ValueError):
-                spec.glyph = None
-        state.adopt_spec(spec)
-        specs.append(spec)
-    return specs
+            spec.glyph = glyph_from_grid(
+                tuple(obj.grid_slice), resolution_m, volume_grid_shape, origin_um,
+                spec_id="", name=name, type_name=type_name, category=category,
+            )
+        except (AttributeError, TypeError, ValueError):
+            # no usable grid_slice (or not yet placed): list it without a glyph
+            # rather than refusing the whole result
+            spec.glyph = None
+    state.adopt_spec(spec)
+    return spec

@@ -302,7 +302,7 @@ class ViewerState:
         return spec
 
     def adopt_spec(self, spec: ObjectSpec) -> ObjectSpec:
-        """Adds a read-only spec describing an adopted result detector (R16).
+        """Adds a read-only spec describing an adopted result object (R16).
 
         Unlike :meth:`add_spec` there is no port check — an adopted spec is
         always placed absolutely — and the spec's id is recorded in
@@ -350,7 +350,7 @@ class ViewerState:
         if spec.id in self.adopted:
             if "type" in data or "port" in data:
                 raise ValueError(
-                    f"detector {spec.name!r} comes from the loaded result and is read-only"
+                    f"{spec.category} {spec.name!r} comes from the loaded result and is read-only"
                 )
             if "params" in data:
                 bad = set(data["params"]) - set(_FIELD_PARAMS) - {"visible"}
@@ -524,7 +524,11 @@ class ViewerState:
             "plane_position": self.plane_position,
             "plane_bounds": list(self.plane_bounds()),
             "plane_fade_frac": self.plane_fade_frac,
-            "sources": [s.to_wire() for s in self.specs if s.category == "source"],
+            "sources": [
+                {**s.to_wire(), "adopted": s.id in self.adopted}
+                for s in self.specs
+                if s.category == "source"
+            ],
             "detectors": [
                 {**s.to_wire(), "adopted": s.id in self.adopted}
                 for s in self.specs

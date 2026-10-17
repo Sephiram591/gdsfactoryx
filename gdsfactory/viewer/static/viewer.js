@@ -29575,6 +29575,9 @@ var Explorer = class {
     this.sourceRows = /* @__PURE__ */ new Map();
     this.detectorRows = /* @__PURE__ */ new Map();
     this.simFields = /* @__PURE__ */ new Map();
+    this.resultSourceRows = /* @__PURE__ */ new Map();
+    /** collapse state per detector section, kept across rebuilds (like the spec rows) */
+    this.resultCollapsed = /* @__PURE__ */ new Set();
     /** the last result's per-detector field payloads, keyed by spec id (R15, R17) */
     this.fields = {};
     /** the Result tab's per-detector display controls, keyed by spec id (R17) */
@@ -29603,13 +29606,20 @@ var Explorer = class {
     const sim = this.buildSimForm();
     this.simNote = sim.note;
     this.resultSections = document.createElement("div");
+    this.resultSourceList = document.createElement("div");
+    this.resultSourceList.className = "gfx-spec-list";
     this.resultNote = emptyNote(
       "No result loaded. Run the simulation (or call load_result) and each detector's plotting options appear here."
     );
     this.resultLayersList = document.createElement("div");
     this.resultLayersRoot = this.section("Layers", [this.resultLayersList]);
     this.layoutPanel = this.panel([]);
-    this.resultPanel = this.panel([this.resultNote, this.resultLayersRoot, this.resultSections]);
+    this.resultPanel = this.panel([
+      this.resultNote,
+      this.resultLayersRoot,
+      this.section("Sources", [this.resultSourceList]),
+      this.resultSections
+    ]);
     this.panels = [
       this.layoutPanel,
       this.panel([
@@ -30077,11 +30087,33 @@ var Explorer = class {
   renderResult(state) {
     const ids = Object.keys(this.fields);
     this.resultNote.hidden = ids.length > 0;
+    const specs = state?.sources ?? [];
+    const seen = /* @__PURE__ */ new Set();
+    for (const source of specs) {
+      seen.add(source.id);
+      let row2 = this.resultSourceRows.get(source.id);
+      if (!row2) {
+        row2 = this.buildResultSourceRow(source);
+        this.resultSourceList.appendChild(row2.root);
+        this.resultSourceRows.set(source.id, row2);
+      }
+      const name = source.params.name;
+      const text = typeof name === "string" && name ? name : `${source.port}_${source.type}`;
+      if (row2.name.textContent !== text) row2.name.textContent = text;
+      const visible = source.params.visible ?? true;
+      if (row2.visible.checked !== Boolean(visible)) row2.visible.checked = Boolean(visible);
+    }
+    for (const [id, row2] of this.resultSourceRows) {
+      if (seen.has(id)) continue;
+      row2.root.remove();
+      this.resultSourceRows.delete(id);
+    }
     const current = new Set(ids);
     for (const [id, controls] of [...this.resultControls]) {
       if (current.has(id)) continue;
       controls.get("section")?.element.remove();
       this.resultControls.delete(id);
+      this.resultCollapsed.delete(id);
     }
     for (const id of ids) {
       if (this.resultControls.has(id)) continue;
@@ -30137,6 +30169,16 @@ var Explorer = class {
       }
     }
     if (state) {
+      const specs2 = new Set((state.detectors ?? []).map((d) => d.id));
+      for (const [id, controls] of this.resultControls) {
+        if (!specs2.has(id)) continue;
+        const spec = (state.detectors ?? []).find((d) => d.id === id);
+        const visible = Boolean(spec?.params.visible ?? true);
+        const header = controls.get("field_visible");
+        if (header && header.element instanceof HTMLInputElement && header.element.checked !== visible) {
+          header.element.checked = visible;
+        }
+      }
       for (const [name, row2] of this.resultLayers) {
         const style = state.styles?.[name];
         if (!style) continue;
@@ -30187,20 +30229,62 @@ var Explorer = class {
     this.resultLayers.set(name, { root, visible, swatch, opacity });
     return root;
   }
+  /**
+   * One result source's row (spec R17): an unlabeled visibility checkbox, then
+   * the name — read-only, since the row describes a placed object.
+   */
+  buildResultSourceRow(source) {
+    const root = document.createElement("div");
+    root.className = "gfx-row";
+    root.dataset.kind = "source";
+    root.dataset.name = source.id;
+    const visible = checkbox(
+      true,
+      (value) => this.callbacks.onUpdateSpec("source", source.id, { params: { visible: value } })
+    );
+    visible.disabled = this.locked;
+    const name = label("");
+    root.append(visible, name);
+    return { root, visible, name };
+  }
   /** One detector's display controls in the Result tab (spec R17). */
   buildResultSection(id) {
     const entry = this.fields[id];
     const section = document.createElement("div");
-    section.className = "gfx-section gfx-field-group";
+    section.className = "gfx-spec gfx-field-group";
+    section.dataset.kind = "detector";
+    section.dataset.name = id;
     const header = document.createElement("div");
-    header.className = "gfx-section-header";
-    header.appendChild(label(entry.name));
-    section.appendChild(header);
+    header.className = "gfx-spec-header";
+    const twisty = document.createElement("button");
+    twisty.type = "button";
+    twisty.className = "gfx-twisty";
+    const headerVisible = document.createElement("input");
+    headerVisible.type = "checkbox";
+    headerVisible.title = "show this detector";
+    const name = label(entry.name);
+    header.append(twisty, headerVisible, name);
+    let collapsed = this.resultCollapsed.has(id);
+    const applyCollapsed = () => {
+      section.classList.toggle("gfx-collapsed", collapsed);
+      twisty.textContent = collapsed ? "\u25B6" : "\u25BC";
+      twisty.title = collapsed ? "expand" : "collapse";
+      twisty.setAttribute("aria-expanded", String(!collapsed));
+    };
+    twisty.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const next = !this.resultCollapsed.has(id);
+      if (next) this.resultCollapsed.add(id);
+      else this.resultCollapsed.delete(id);
+      collapsed = next;
+      applyCollapsed();
+    });
+    applyCollapsed();
+    headerVisible.addEventListener("change", () => this.setParam(id, "visible", headerVisible.checked));
     const fields = document.createElement("div");
     fields.className = "gfx-spec-fields";
     const controls = /* @__PURE__ */ new Map();
-    const setParam = (key, value) => this.callbacks.onUpdateSpec("detector", id, { params: { [key]: value } });
-    const component = this.selectControl([], "", (value) => setParam("field_component", value || null));
+    const component = this.selectControl([], "", (value) => this.setParam(id, "field_component", value || null));
     controls.set("field_component", component);
     fields.appendChild(fieldRow(
       "component",
@@ -30210,7 +30294,7 @@ var Explorer = class {
     const transform = this.selectControl(
       [...FIELD_TRANSFORMS],
       "abs",
-      (value) => setParam("field_transform", value)
+      (value) => this.setParam(id, "field_transform", value)
     );
     controls.set("field_transform", transform);
     fields.appendChild(fieldRow(
@@ -30218,30 +30302,39 @@ var Explorer = class {
       transform.element,
       "real/imag/phase are signed (two-color ramp); abs/logabs are non-negative"
     ));
-    const low = this.colorControl((value) => setParam("field_color_low", value));
+    const low = this.colorControl((value) => this.setParam(id, "field_color_low", value));
     controls.set("field_color_low", low);
     fields.appendChild(fieldRow(
       "low color",
       low.element,
       "the ramp's low-end color (signed transforms only)"
     ));
-    const high = this.colorControl((value) => setParam("field_color_high", value));
+    const high = this.colorControl((value) => this.setParam(id, "field_color_high", value));
     controls.set("field_color_high", high);
     fields.appendChild(fieldRow("high color", high.element, "the ramp's high-end color"));
-    const opacity = this.numberControl(1, 0.05, (value) => setParam("field_opacity", value), true);
+    const opacity = this.numberControl(1, 0.05, (value) => this.setParam(id, "field_opacity", value), true);
     controls.set("field_opacity", opacity);
     fields.appendChild(fieldRow("opacity", opacity.element, "the overlay's overall opacity, 0-1"));
-    const show = checkbox(true, (value) => setParam("field_visible", value));
     controls.set("field_visible", {
-      element: show,
+      element: headerVisible,
       write(value) {
-        if (show.checked !== Boolean(value)) show.checked = Boolean(value);
+        if (headerVisible.checked !== Boolean(value)) headerVisible.checked = Boolean(value);
       },
       setDisabled(value) {
-        show.disabled = value;
+        headerVisible.disabled = value;
       }
     });
-    fields.appendChild(fieldRow("show", show, "shade this detector's plane with the last result"));
+    const outline = checkbox(true, (value) => this.setParam(id, "field_outline", value));
+    controls.set("field_outline", {
+      element: outline,
+      write(value) {
+        if (outline.checked !== Boolean(value)) outline.checked = Boolean(value);
+      },
+      setDisabled(value) {
+        outline.disabled = value;
+      }
+    });
+    fields.appendChild(fieldRow("outline", outline, "draw the plane's outline while shaded"));
     const freqLabel = document.createElement("span");
     freqLabel.className = "gfx-label";
     const freq = document.createElement("input");
@@ -30249,7 +30342,7 @@ var Explorer = class {
     freq.min = "0";
     freq.step = "1";
     freq.className = "gfx-opacity";
-    freq.addEventListener("input", () => setParam("field_freq", Number(freq.value)));
+    freq.addEventListener("input", () => this.setParam(id, "field_freq", Number(freq.value)));
     controls.set("field_freq", {
       element: freq,
       write(value) {
@@ -30266,12 +30359,15 @@ var Explorer = class {
     const freqRow = fieldRow("frequency", freq, "which recorded frequency frame to shade");
     freqRow.appendChild(freqLabel);
     fields.appendChild(freqRow);
-    section.appendChild(fields);
+    section.append(header, fields);
     controls.set("section", { element: section, write() {
     }, setDisabled() {
     } });
     this.resultControls.set(id, controls);
     return section;
+  }
+  setParam(id, key, value) {
+    this.callbacks.onUpdateSpec("detector", id, { params: { [key]: value } });
   }
   // ------------------------------------------------------------------- controls
   selectControl(options, initial, onChange) {
@@ -30870,7 +30966,7 @@ var PlaneGlyphs = class {
     item.fieldMaterial.map = item.texture;
     item.fieldMaterial.opacity = 1;
     item.fieldMaterial.needsUpdate = true;
-    if (item.outline) item.outline.visible = true;
+    if (item.outline) item.outline.visible = settings.field_outline !== false;
     item.material.visible = false;
   }
   clearField(item) {
@@ -35860,7 +35956,7 @@ function render({ model, el }) {
     const settings2 = state.field_settings ?? {};
     const logRange = state.simulation?.log_range ?? 6;
     const entry = (state.glyphs ?? []).find((glyph) => {
-      if (glyph.kind !== "detector") return false;
+      if (glyph.kind !== "detector" || !glyph.visible) return false;
       const s2 = settings2[glyph.id];
       const field2 = fields[glyph.id];
       return Boolean(s2?.field_visible && field2 && s2.field_component);

@@ -167,6 +167,8 @@ export interface FieldSettings {
   field_visible: boolean;
   //: the selected frequency frame of a multi-frequency detector (spec R17)
   field_freq?: number;
+  //: whether shading draws the plane's outline (spec R17); default true
+  field_outline?: boolean;
 }
 
 export interface StatePayload {

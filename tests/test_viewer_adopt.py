@@ -107,12 +107,61 @@ def test_adopt_result_builds_none_port_specs() -> None:
 
     fresh = ViewerState(viewer.stack)
     specs = adopt.adopt_result(fresh, result.objects, result.config)
-    assert len(specs) == len(result.objects.detectors)
-    for spec, obj in zip(specs, result.objects.detectors, strict=True):
+    detectors = [s for s in specs if s.category == "detector"]
+    assert len(detectors) == len(result.objects.detectors)
+    for spec, obj in zip(detectors, result.objects.detectors, strict=True):
         assert spec.port == "None"
         assert spec.params["name"] == obj.name
         assert spec.id in fresh.adopted
         assert spec.glyph is not None
+
+
+def test_adopt_result_adopts_sources_with_visibility() -> None:
+    """R17: every placed source becomes a read-only spec with a grid glyph.
+
+    The Result tab lists the result world's sources with a visibility toggle,
+    so adoption must cover them: same "None"-port representation, a glyph from
+    the placed ``grid_slice``, and no field params (they are detector-only).
+    """
+    viewer = _detector_viewer()
+    result = _run(viewer)
+    from gdsfactory.viewer.state import ViewerState
+
+    fresh = ViewerState(viewer.stack)
+    specs = adopt.adopt_result(fresh, result.objects, result.config)
+    sources = [s for s in specs if s.category == "source"]
+    assert len(sources) == len(result.objects.sources)
+    for spec, obj in zip(sources, result.objects.sources, strict=True):
+        assert spec.port == "None"
+        assert spec.params["name"] == obj.name
+        assert spec.id in fresh.adopted
+        assert spec.glyph is not None
+        assert spec.glyph["kind"] == "source"
+        # the glyph's center is the grid slice's centroid, in the mesh frame
+        lo, hi = adopt.grid_bounds_um(
+            tuple(obj.grid_slice), 0.1e-6,
+            tuple(int(v) for v in result.objects.volume.grid_shape),
+            tuple(float(v) for v in fresh.origin),
+        )
+        assert spec.glyph["center"] == pytest.approx(
+            [0.5 * (l + h) for l, h in zip(lo, hi, strict=True)], abs=1e-9)
+        assert spec.field_params() == {}
+    # the wire carries them with adopted: true, so the tab can reconcile rows
+    wire = fresh.to_state()["sources"]
+    assert all(entry["adopted"] for entry in wire)
+
+
+def test_adopt_result_source_type_maps_to_a_viewer_type() -> None:
+    """R17: a foreign source's type lands in TYPES with the source category."""
+    viewer = _detector_viewer()
+    result = _run(viewer)
+    from gdsfactory.viewer.state import ViewerState
+
+    fresh = ViewerState(viewer.stack)
+    specs = adopt.adopt_result(fresh, result.objects, result.config)
+    for spec in (s for s in specs if s.category == "source"):
+        assert spec.type in sim.TYPES
+        assert sim.TYPES[spec.type].category == "source"
 
 
 # ----------------------------------------------- R16: validate_foreign_result
@@ -205,6 +254,24 @@ def test_load_result_different_stack_rebuilds_geometry() -> None:
         [float(v) * 1e6 for v in other.partial_real_shape], abs=1e-5)
     # the result world's specs are the adopted ones
     assert all(s.id in viewer._result_state.adopted for s in viewer._result_state.specs)
+
+
+def test_result_tab_wire_carries_active_tab() -> None:
+    """R17: the wire's active_tab says "result" while the result world is up.
+
+    The tab lives on the editor state; the result world's own fresh default
+    ("layout") must not leak onto the wire, or the browser's shading gate
+    (state.active_tab === "result") never fires and nothing shades.
+    """
+    viewer = _detector_viewer()
+    result = _run(viewer)
+    viewer.load_result(*result)
+    viewer._on_msg(None, {"event": "set_state", "patch": {"active_tab": "result"}}, [])
+    assert viewer._result_state.active_tab == "layout"  # the result world never owns it
+    assert viewer.state["active_tab"] == "result"
+    # and back: the editor world's tab is authoritative again
+    viewer._on_msg(None, {"event": "set_state", "patch": {"active_tab": "layout"}}, [])
+    assert viewer.state["active_tab"] == "layout"
 
 
 def test_adopted_specs_are_read_only() -> None:
@@ -365,6 +432,56 @@ def test_field_freq_round_trips_through_the_patch_path() -> None:
         [],
     )
     assert viewer.state["field_settings"][spec.id]["field_freq"] == 0
+
+
+def test_field_outline_defaults_true_and_round_trips() -> None:
+    """R17: field_outline defaults on and patches like the other display params."""
+    viewer = _detector_viewer()
+    spec = next(s for s in viewer.specs if s.category == "detector")
+    assert spec.field_params()["field_outline"] is True
+    viewer._on_msg(
+        None,
+        {"event": "update_spec", "kind": "detector",
+         "spec": {"id": spec.id, "params": {"field_outline": False}}},
+        [],
+    )
+    assert viewer.state["field_settings"][spec.id]["field_outline"] is False
+    # and back on
+    viewer._on_msg(
+        None,
+        {"event": "update_spec", "kind": "detector",
+         "spec": {"id": spec.id, "params": {"field_outline": True}}},
+        [],
+    )
+    assert viewer.state["field_settings"][spec.id]["field_outline"] is True
+
+
+def test_result_tab_routes_source_visibility_to_the_result_world() -> None:
+    """R17: while the Result tab is active an update_spec hits the result world.
+
+    The Result tab's source rows write ``visible`` through the same
+    ``update_spec`` event as the setup tab's rows; the widget must route it to
+    the result world's adopted source, not the editor's, and the editor's
+    same-named spec must be untouched.
+    """
+    viewer = _detector_viewer()
+    editor_source = next(s for s in viewer.specs if s.category == "source")
+    result = _run(viewer)
+    viewer.load_result(*result)
+    assert viewer._result_state is not None
+    adopted_source = next(
+        s for s in viewer._result_state.specs if s.category == "source")
+
+    viewer._on_msg(None, {"event": "set_state", "patch": {"active_tab": "result"}}, [])
+    viewer._on_msg(
+        None,
+        {"event": "update_spec", "kind": "source",
+         "spec": {"id": adopted_source.id, "params": {"visible": False}}},
+        [],
+    )
+    assert adopted_source.params["visible"] is False
+    # the editor's source is untouched
+    assert editor_source.params.get("visible", True) is True
 
 
 def test_single_frequency_payload_layout_is_unchanged() -> None:

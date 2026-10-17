@@ -195,6 +195,19 @@ class Viewer(anywidget.AnyWidget):
             return self._result_state
         return self._viewer_state
 
+    def _wire_state(self, active: ViewerState) -> dict[str, Any]:
+        """The state for the wire: the active world's, with the tab echoed.
+
+        ``active_tab`` lives on the editor state (it routes the worlds, spec
+        R17), so when the result world is on the wire its own ``active_tab``
+        — a fresh default — must not leak out: the browser shades only while
+        the wire says the Result tab is active.
+        """
+        state = active.to_state()
+        if active is not self._viewer_state:
+            state["active_tab"] = self._viewer_state.active_tab
+        return state
+
     def _sync_active(self, *, force: bool = False) -> None:
         """Sends the active world's traits (spec R17).
 
@@ -207,7 +220,7 @@ class Viewer(anywidget.AnyWidget):
         """
         active = self._active_state()
         if force or active is self._result_state:
-            self.state = active.to_state()
+            self.state = self._wire_state(active)
             self.geometry = self._cached_payloads(active)[0]
             self.meta = self._cached_payloads(active)[1]
             self.section = (
@@ -226,7 +239,7 @@ class Viewer(anywidget.AnyWidget):
         if self._result_state is not None and self._fields_state is not self._result_state:
             self.fields = build_field_payload(self._result_state, self._run_result)
             self._fields_state = self._result_state
-        self.state = active.to_state()
+        self.state = self._wire_state(active)
 
     def _cached_payloads(self, state: ViewerState) -> tuple[dict[str, Any], dict[str, Any]]:
         """The state's ``(geometry, meta)`` payloads, cached per world (spec R17).
@@ -568,18 +581,19 @@ class Viewer(anywidget.AnyWidget):
                     active.apply_patch(patch)
             elif event in _SETUP_EVENTS:
                 # setup events author the editor's setup (spec R17) — except a
-                # detector's display edit (the Result tab's field controls, spec
-                # R17): the result world's adopted specs own those, so an id
-                # adopted there is routed to it
-                if event == "update_spec" and self._result_state is not None:
-                    adopted = {s.id for s in self._result_state.specs
-                               if s.id in self._result_state.adopted}
-                    if content.get("kind") == "detector" and content.get("spec", {}).get("id") in adopted:
-                        self._result_state.apply_patch(
-                            {"detectors": [{"op": "update", **content["spec"]}]}
-                        )
-                        self.state = self._result_state.to_state()
-                        return
+                # display edit from the Result tab (a field setting or an
+                # adopted row's visibility, spec R17): the result world's
+                # adopted specs own those, so while its tab is active the edit
+                # is routed to it
+                if event == "update_spec" and self._result_state is not None \
+                        and self._viewer_state.active_tab == "result":
+                    self._result_state.apply_patch(
+                        {f"{content.get('kind', 'detector')}s": [
+                            {"op": "update", **content.get("spec", {})},
+                        ]}
+                    )
+                    self.state = self._wire_state(self._result_state)
+                    return
                 self._apply_setup_event(event, content)
             else:
                 return
@@ -591,7 +605,7 @@ class Viewer(anywidget.AnyWidget):
             # tabs the editor's, so re-send the now-active world's set
             self._sync_active(force=True)
             return
-        self.state = active.to_state()
+        self.state = self._wire_state(active)
         if active is self._result_state:
             return  # the result world tracks no editor edits; styles ride `state`
         if self._viewer_state.geometry_changed:
