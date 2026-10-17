@@ -35566,6 +35566,7 @@ var CONTROL_LABELS = {
   orbit: "Orbit (turntable)"
 };
 var SAVE_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>';
+var COPY_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
 var GEAR_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
 var FIT_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><polyline points="21 15 21 21 15 21"/><polyline points="3 9 3 3 9 3"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/><line x1="21" y1="21" x2="14" y2="14"/><line x1="3" y1="3" x2="10" y2="10"/></svg>';
 var RUN_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1" stroke-linejoin="round" aria-hidden="true"><path d="M7 4.5v15l13-7.5z"/></svg>';
@@ -35615,9 +35616,14 @@ function render({ model, el }) {
   save.className = "gfx-button gfx-save";
   save.title = "save the current viewport as a PNG";
   save.innerHTML = SAVE_ICON;
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "gfx-button gfx-copy";
+  copy.title = "copy the current viewport image to the clipboard";
+  copy.innerHTML = COPY_ICON;
   const spacer = document.createElement("div");
   spacer.className = "gfx-spacer";
-  menubar.append(to3d, to2d, fit, exaggeration, spacer, runPhase, runProgress, run, save, settings);
+  menubar.append(to3d, to2d, fit, exaggeration, spacer, runPhase, runProgress, run, save, copy, settings);
   const sectionControls = document.createElement("div");
   sectionControls.className = "gfx-section-controls";
   sectionControls.hidden = true;
@@ -35897,16 +35903,32 @@ function render({ model, el }) {
     closeSettings();
     sendPatch(model, { active_viewport: "2d" });
   });
-  save.addEventListener("click", () => {
+  const captureShot = () => {
     const is2d = currentState(model)?.active_viewport === "2d";
     const viewportPng = is2d ? section.toPng() : scene.toPng();
-    const shot = readShotWhole() ? captureShell(el, viewportPng).then(
+    return readShotWhole() ? captureShell(el, viewportPng).then(
       (png) => [png, is2d ? "viewer-2d.png" : "viewer-3d.png"]
     ) : Promise.resolve([viewportPng, is2d ? "cross-section.png" : "view-3d.png"]);
-    shot.then(([png, filename]) => {
+  };
+  save.addEventListener("click", () => {
+    captureShot().then(([png, filename]) => {
       if (readSaveTarget() === "server") send(model, { event: "save_image", data: png, filename });
       else download(png, filename);
     });
+  });
+  copy.addEventListener("click", () => {
+    let write;
+    try {
+      write = navigator.clipboard.write([]);
+    } catch {
+      showToast("clipboard is not available here");
+      return;
+    }
+    captureShot().then(
+      ([png]) => write.then(() => fetch(png)).then((r) => r.blob()).then(
+        (blob) => navigator.clipboard.write([new ClipboardItem({ "image/png": blob })])
+      ).then(() => showToast("copied image to the clipboard")).catch(() => showToast("copy failed: clipboard blocked or unsupported"))
+    );
   });
   let pendingPosition = null;
   let positionFrame = 0;

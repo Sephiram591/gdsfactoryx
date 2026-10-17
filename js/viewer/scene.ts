@@ -177,7 +177,7 @@ export class Scene3D {
     this.camera.position.set(0, -2, 2);
 
     // preserveDrawingBuffer keeps the frame readable after compositing, so a
-    // whole-widget capture (html2canvas) can draw this canvas without it coming
+    // whole-widget capture (`captureShell`) can read this canvas without it coming
     // out blank (spec D14)
     this.renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
     this.renderer.setPixelRatio(window.devicePixelRatio);
