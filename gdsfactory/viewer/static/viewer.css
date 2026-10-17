@@ -75,6 +75,12 @@
   justify-content: center;
   padding: 4px 8px;
 }
+.gfx-export-code {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 8px;
+}
 .gfx-settings {
   display: inline-flex;
   align-items: center;

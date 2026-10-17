@@ -41,7 +41,7 @@ from gdsfactory.viewer.solids import (
     plane_ports,
 )
 
-__all__ = ["LayerStyle", "ViewerState", "spec_glyphs"]
+__all__ = ["LayerStyle", "ViewerState", "rebox_stack", "spec_glyphs"]
 
 #: Default opacity of a fill level and of every other level (spec R2, Q5).
 FILL_OPACITY = 0.15
@@ -541,6 +541,39 @@ class ViewerState:
             "simulation": self.settings.to_wire(),
             "running": self.running,
         }
+
+
+def rebox_stack(device: Any, boundary_offset: Any) -> Any:
+    """A copy of ``device`` with the box moved by ``boundary_offset`` (spec R13).
+
+    The public form of the re-box :meth:`ViewerState.rebox` applies to its own
+    device: ``boundary_offset`` is ``(x+, x-, y+, y-, z+, z-)`` in µm off the
+    box the device was built with. Also used by the launch-code emitter (spec
+    R14 mode 3), so a viewer-edited offset is reproduced by the emitted script.
+
+    Raises:
+        ValueError: if the offset is not 6 finite numbers, or moves a face
+            past its opposite (an empty box).
+    """
+    offset = tuple(float(v) for v in boundary_offset)
+    if len(offset) != 6 or not all(math.isfinite(v) for v in offset):
+        raise ValueError(f"boundary_offset must be 6 finite numbers, got {boundary_offset!r}")
+    base_shape = tuple(float(v) for v in device.partial_real_shape)
+    base_center = (float(device.center[0]), float(device.center[1]))
+    base_z = float(device.z_center)
+    shape = (
+        base_shape[0] + (offset[0] - offset[1]) * 1e-6,
+        base_shape[1] + (offset[2] - offset[3]) * 1e-6,
+        base_shape[2] + (offset[4] - offset[5]) * 1e-6,
+    )
+    if min(shape) <= 0:
+        raise ValueError(f"boundary_offset collapses the box to {shape} m")
+    center = (
+        base_center[0] + 0.5 * (offset[0] + offset[1]),
+        base_center[1] + 0.5 * (offset[2] + offset[3]),
+    )
+    z_center = base_z + 0.5 * (offset[4] + offset[5])
+    return _rebox_stack(device, shape, center, z_center)
 
 
 def _rebox_stack(device: Any, shape: tuple[float, float, float], center: tuple[float, float], z_center: float) -> Any:

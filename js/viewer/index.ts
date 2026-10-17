@@ -64,6 +64,16 @@ const COPY_ICON =
   '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>' +
   '<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
 
+//: An "export code" glyph for the launch-code button (spec R14 mode 3, D12):
+//: a box with the code chevrons `</>` inside — the code-like indicator the
+//: milestone asks for. It copies the kernel's launch code to the clipboard.
+const CODE_ICON =
+  '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+  'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+  '<rect x="2" y="3" width="20" height="18" rx="2" ry="2"/>' +
+  '<polyline points="9 10 6.5 12 9 14"/>' +
+  '<polyline points="15 10 17.5 12 15 14"/></svg>';
+
 //: A gear glyph for the settings button (spec R3).
 const GEAR_ICON =
   '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
@@ -150,12 +160,18 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   copy.className = "gfx-button gfx-copy";
   copy.title = "copy the current viewport image to the clipboard";
   copy.innerHTML = COPY_ICON;
+  const exportCode = document.createElement("button");
+  exportCode.type = "button";
+  exportCode.className = "gfx-button gfx-export-code";
+  exportCode.title = "copy the simulation launch code to the clipboard";
+  exportCode.innerHTML = CODE_ICON;
   // the view controls sit left (3D, 2D, Fit, then the shared z multiplier);
   // the spacer starts the right-hand group, which reads left to right: the
-  // run's phase label and progress bar, then Run, Save, Copy and Settings
+  // run's phase label and progress bar, then Run, Save, Copy, Export code
+  // and Settings
   const spacer = document.createElement("div");
   spacer.className = "gfx-spacer";
-  menubar.append(to3d, to2d, fit, exaggeration, spacer, runPhase, runProgress, run, save, copy, settings);
+  menubar.append(to3d, to2d, fit, exaggeration, spacer, runPhase, runProgress, run, save, copy, exportCode, settings);
 
   // -- section controls (2D only, spec R4) ---------------------------------
   const sectionControls = document.createElement("div");
@@ -546,6 +562,20 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
         .then(() => showToast("copied image to the clipboard"))
         .catch(() => showToast("copy failed: clipboard blocked or unsupported")),
     );
+  });
+  // the launch code rides the `launch_code` trait, refreshed on every setup
+  // edit (spec D12), so the copy is synchronous — no kernel round trip — and
+  // keeps the user-gesture permission the clipboard API requires
+  exportCode.addEventListener("click", () => {
+    const code = String(model.get("launch_code") || "");
+    if (!code) {
+      showToast("no launch code yet");
+      return;
+    }
+    navigator.clipboard
+      .writeText(code)
+      .then(() => showToast("copied launch code to the clipboard"))
+      .catch(() => showToast("copy failed: clipboard blocked or unsupported"));
   });
 
   // The slider drags faster than the kernel can round trip (spec D10), so

@@ -99,6 +99,14 @@
   padding: 4px 8px;
 }
 
+/* launch-code export button: sits beside the copy button, same look */
+.gfx-export-code {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 8px;
+}
+
 /* settings button: a gear beside Fit, opening the settings screen */
 .gfx-settings {
   display: inline-flex;

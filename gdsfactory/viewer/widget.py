@@ -30,7 +30,10 @@ The three run modes (spec R14) hang off the handle:
   while the run is in flight: ``state["running"]`` is set, and the kernel
   rejects setup edits in :meth:`_on_msg`. fdtdx's ``progress_callback`` is
   mirrored into the ``progress`` trait, which the browser draws as a bar.
-- ``.launch_code()`` — mode 3, the script tail (spec D12). M5.
+- ``.launch_code`` — mode 3: the ``launch_code`` trait carries the script tail
+  that rebuilds this setup (spec D12), refreshed on every setup edit; the
+  browser's export button copies it. The programmatic emitter is
+  :func:`gdsfactory.viewer.sim.launch_code`.
 """
 
 from __future__ import annotations
@@ -47,7 +50,7 @@ import traitlets
 
 from gdsfactory.viewer.fields import validate_result
 from gdsfactory.viewer.payload import build_field_payload, build_payload, build_section_payload
-from gdsfactory.viewer.sim import RunResult, RunStopped, build_objects
+from gdsfactory.viewer.sim import RunResult, RunStopped, build_objects, launch_code as _launch_code_text
 from gdsfactory.viewer.sim import run as _run_sim
 from gdsfactory.viewer.state import ViewerState
 __all__ = ["Viewer", "view"]
@@ -111,6 +114,10 @@ class Viewer(anywidget.AnyWidget):
     #: the absolute folder a server-side save writes into (spec D14). Settable
     #: from the browser, so the settings screen can offer a folder field.
     save_dir = traitlets.Unicode(default_value="").tag(sync=True)
+    #: the launch code — the script tail that rebuilds this setup (spec R14
+    #: mode 3, D12) — refreshed on every setup edit, so the browser's export
+    #: button copies the current text with no kernel round trip
+    launch_code = traitlets.Unicode(default_value="").tag(sync=True)
 
     def __init__(self, stack: Any, save_dir: Path | str | None = None, **kwargs: Any) -> None:
         """Builds the device's geometry and prepares the widget.
@@ -162,6 +169,7 @@ class Viewer(anywidget.AnyWidget):
         self.state = self._viewer_state.to_state()
         self.section = build_section_payload(self._viewer_state)
         self.save_dir = str(initial_save_dir.resolve())
+        self.launch_code = _launch_code_text(self.stack, self._viewer_state)
         self.on_msg(self._on_msg)
 
     # ------------------------------------------------------------------ worlds
@@ -566,6 +574,7 @@ class Viewer(anywidget.AnyWidget):
             return
         before = (self._viewer_state.plane, self._viewer_state.plane_position)
         tab_before = self._viewer_state.active_tab
+        revision_before = self._viewer_state.revision
         patch = dict(content.get("patch") or {}) if event == "set_state" else None
         if patch is not None and "active_tab" in patch:
             # the tab itself routes the worlds (spec R17), so it always edits
@@ -605,6 +614,10 @@ class Viewer(anywidget.AnyWidget):
             # tabs the editor's, so re-send the now-active world's set
             self._sync_active(force=True)
             return
+        if self._viewer_state.revision != revision_before:
+            # a setup edit landed (spec R12/R13): refresh the launch code so
+            # the browser's export button copies the current tail (spec D12)
+            self.launch_code = _launch_code_text(self.stack, self._viewer_state)
         self.state = self._wire_state(active)
         if active is self._result_state:
             return  # the result world tracks no editor edits; styles ride `state`

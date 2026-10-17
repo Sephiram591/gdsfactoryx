@@ -791,3 +791,76 @@ def _spy_create(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
     monkeypatch.setattr(sim, "_create", wrapper)
     return calls
+
+
+# ------------------------------------------------------ R14 mode 3: launch code
+
+
+def test_launch_code_matches_mode_2_objects() -> None:
+    """R14 AC: the emitted tail builds the same object list as mode 2.
+
+    The code is exec'd against a namespace holding only ``stack`` (plus the
+    imports the tail itself makes), cut at the run marker so no FDTD runs, then
+    the built object list is compared to the mode-2 retrieval's, name by name
+    and type by type.
+    """
+    viewer = widget.view(f1_stack())
+    _coarse(viewer)
+    viewer._on_msg(None, {"event": "add_source", "port": "o1"}, [])
+    viewer._on_msg(None, {"event": "add_detector", "port": "o2"}, [])
+
+    code = viewer.launch_code
+    assert code and "stack" in code
+    build_only = code.split("# --- run:")[0]
+
+    namespace: dict[str, Any] = {"stack": viewer.stack}
+    exec(compile(build_only, "<launch_code>", "exec"), namespace)
+
+    built = namespace["objects"]
+    expected, config, _ = viewer._prepare()
+    assert namespace["config"] is not None
+    assert namespace["config"].time == config.time
+    assert namespace["config"].grid.spacing == config.grid.spacing
+    assert len(built) == len(expected)
+    for got, want in zip(built, expected, strict=True):
+        assert type(got) is type(want)
+        # fdtdx auto-names the PMLs with a module-global counter, so the two
+        # runs' Object_N differ; only compare names the setup chose itself
+        if type(got).__name__ != "PerfectlyMatchedLayer":
+            assert got.name == want.name
+
+
+def test_launch_code_is_a_pure_string_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D11/D12: emitting the code creates nothing (no ``create_*_at`` call)."""
+    calls = _spy_create(monkeypatch)
+    viewer = widget.view(f1_stack())
+    viewer._on_msg(None, {"event": "add_source", "port": "o1"}, [])
+    before = len(calls)
+    code = viewer.launch_code
+    assert len(calls) == before
+    assert "create_mode_plane_source_at" in code
+
+
+def test_launch_code_reproduces_a_boundary_offset() -> None:
+    """R13: a non-zero ``boundary_offset`` is emitted as a ``rebox_stack`` call."""
+    viewer = widget.view(f1_stack())
+    _coarse(viewer)
+    viewer._on_msg(
+        None,
+        {"event": "set_settings", "settings": {"boundary_offset": [1.0, -1.0, 0, 0, 0, 0]}},
+        [],
+    )
+    code = viewer.launch_code
+    assert "rebox_stack" in code
+    # the emitted box is the re-boxed one: the x faces moved 1 um each
+    assert "rebox_stack(stack, (1, -1, 0, 0, 0, 0,))" in code
+
+
+def test_launch_code_skips_adopted_specs() -> None:
+    """D18: adopted foreign detectors are not re-created by the emitted code."""
+    viewer = widget.view(f1_stack())
+    _coarse(viewer)
+    viewer._on_msg(None, {"event": "add_source", "port": "o1"}, [])
+    viewer._viewer_state.adopted.add(viewer._viewer_state.specs[0].id)
+    code = sim.launch_code(viewer.stack, viewer._viewer_state)
+    assert "create_mode_plane_source_at" not in code

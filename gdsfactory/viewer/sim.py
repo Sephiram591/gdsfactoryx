@@ -33,6 +33,7 @@ __all__ = [
     "default_detector_spec",
     "default_source_spec",
     "export",
+    "launch_code",
     "run",
     "spec_glyph",
 ]
@@ -668,6 +669,251 @@ def build_objects(stack: Any, state: Any) -> tuple[list[Any], Any, list[Any]]:
 def export(stack: Any, state: Any) -> tuple[list[Any], Any, list[Any]]:
     """Alias of :func:`build_objects` for the mode-2 retrieval (spec R14)."""
     return build_objects(stack, state)
+
+
+# ------------------------------------------------------------------- mode 3
+
+def _num(value: Any) -> str:
+    """A float as source text; whole numbers kept integer-shaped (``1``, not ``1.0``)."""
+    f = float(value)
+    return str(int(f)) if f.is_integer() and abs(f) < 1e16 else repr(f)
+
+
+def _seq(values: Any) -> str:
+    """A tuple literal from a sequence of numbers."""
+    return "(" + ", ".join(_num(v) for v in values) + ",)"
+
+
+def _repr(value: Any) -> str:
+    """Source text for a parameter value (spec R12 extras)."""
+    if isinstance(value, bool):
+        return repr(value)
+    if isinstance(value, (int, float)):
+        return _num(value)
+    if isinstance(value, str):
+        return repr(value)
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(_repr(v) for v in value) + "]"
+    return repr(value)
+
+
+_LAUNCH_HEADER = """\
+# --- viewer launch code (spec R14 mode 3) ------------------------------------
+# Assumes `stack` (the StackDevice) is in scope. Appending this tail to the
+# script that defines it builds the same setup the viewer shows. Run it on a
+# GPU allocation."""
+
+
+def _waves_tuple(wavelengths: Any) -> str:
+    """Source text for the ``wave_characters`` tuple of a spec's wavelengths."""
+    return "(" + ", ".join(f"_wave({w})" for w in wavelengths) + ",)"
+
+
+def _absolute_lines(spec: ObjectSpec, kind: ObjectType, settings: SimSettings,
+                    wavelengths: Any, stack: Any) -> list[str]:
+    """The emitted construction for an absolutely-placed spec (spec R18).
+
+    Mirrors :func:`_create_absolute`: the object is hand-constructed — no
+    ``create_*_at`` covers absolute placement — and placed relative to the
+    stack with margins from the stack's box center to the spec's center.
+    """
+    axis = int(spec.params.get("axis", 2))
+    center = [float(v) for v in spec.params["center"]]
+    lines = [f"# {spec.name}: absolute placement (no create_*_at for it)"]
+    lines.append(f"{spec.name} = fdtdx.{spec.type}(")
+    if kind.plane:
+        size = spec.params.get("size") or (0.0, 0.0)
+        real: list[str | None] = ["None", "None", "None"]
+        grid = ["None", "None", "None"]
+        u_axis, v_axis = _IN_PLANE[axis]
+        grid[axis] = "1"
+        real[u_axis] = f"{_num(size[0])} * 1e-6"
+        real[v_axis] = f"{_num(size[1])} * 1e-6"
+        lines.append(f"    partial_real_shape=({real[0]}, {real[1]}, {real[2]}),")
+        lines.append(f"    partial_grid_shape=({grid[0]}, {grid[1]}, {grid[2]}),")
+    else:
+        lines.append("    partial_grid_shape=(1, 1, 1),")
+    lines.append(f"    name={spec.name!r},")
+    if kind.wave == "one":
+        lines.append(f"    wave_character=_wave({wavelengths[0]}),")
+        if settings.pulse_width_frac > 0:
+            lines.append(f"    temporal_profile=_pulse(_wave({wavelengths[0]})),")
+    elif kind.wave == "many":
+        lines.append(f"    wave_characters={_waves_tuple(wavelengths)},")
+    if kind.direction:
+        # an absolute plane's direction is its normal axis' orientation (R18)
+        char = "+" if spec.params.get("direction", "in") == "in" else "-"
+        lines.append(f"    direction={char!r},")
+    for key in kind.extra:
+        if key in spec.params:
+            lines.append(f"    {key}={_repr(spec.params[key])},")
+    if kind.category == "detector" and settings.pulse_width_frac > 0 and "scaling_mode" in kind.extra:
+        lines.append("    scaling_mode='pulse',")
+    lines.append(")")
+    lines.append(f"cons_{spec.name} = [{spec.name}.place_relative_to(")
+    lines.append("    stack, axes=(0, 1, 2), own_positions=(0, 0, 0), other_positions=(0, 0, 0),")
+    lines.append("    margins=(")
+    lines.append(f"        ({_num(center[0])} - float(stack.center[0])) * 1e-6,")
+    lines.append(f"        ({_num(center[1])} - float(stack.center[1])) * 1e-6,")
+    lines.append(f"        ({_num(center[2])} - float(stack.z_center)) * 1e-6,")
+    lines.append("    ),")
+    lines.append(")]")
+    return lines
+
+
+_LAUNCH_PRELUDE = """\
+
+# --- helpers the viewer's run uses -------------------------------------------
+import fdtdx
+import jax
+
+from gdsfactory.fdtdx_stack import apply_stack, init_stack_params
+
+
+def _wave(wavelength_um):
+    return fdtdx.WaveCharacter(wavelength=wavelength_um * 1e-6)
+
+
+def _pulse(wave):
+    return fdtdx.GaussianPulseProfile(
+        center_wave=wave,
+        spectral_width=fdtdx.WaveCharacter(
+            frequency={pwf} * wave.get_frequency()
+        ),
+    )
+
+
+def _pml_coeffs_in_config_dtype(objects, config):
+    # fdtdx 0.6.3: gdsfactory enables jax x64, so the PML coefficients come
+    # out float64 regardless of config.dtype; the CPML update then promotes
+    # the float32 psi fields and eqxi.while_loop rejects the changed tree.
+    import jax.numpy as jnp
+    from fdtdx.fdtd.container import ObjectContainer
+
+    out = []
+    for obj in objects.object_list:
+        if type(obj).__name__ == "PerfectlyMatchedLayer":
+            for name in ("pml_a_E", "pml_b_E", "inv_kappa_E",
+                         "pml_a_H", "pml_b_H", "inv_kappa_H"):
+                value = getattr(obj, name, None)
+                if value is not None:
+                    obj = obj.aset(name, value.astype(config.dtype))
+        out.append(obj)
+    return ObjectContainer(object_list=out, volume_idx=objects.volume_idx)
+"""
+
+
+def launch_code(stack: Any, state: Any) -> str:
+    """The script tail that rebuilds the viewer's setup (spec R14 mode 3, D12).
+
+    A pure string build — no ``create_*_at`` is called here (spec D11), no
+    object is constructed — so it is safe to refresh on every setup edit. The
+    emitted code mirrors :func:`build_objects` line for line: the simulation
+    volume, every source/detector through ``stack.create_<object>_at``, the
+    ``SimulationConfig`` and the PML boundaries, then the
+    place/apply/run sequence :func:`run` uses — including the fdtdx 0.6.3
+    PML dtype re-cast, without which ``run_fdtd`` rejects the loop body.
+
+    Appending the result to a script that defines ``stack`` (the
+    :class:`~gdsfactory.fdtdx_stack.StackDevice`) builds the same object list
+    mode 2 returns. A non-zero ``boundary_offset`` is emitted as a
+    ``rebox_stack`` call reproducing the viewer's re-box (spec R13).
+
+    Args:
+        stack: the :class:`~gdsfactory.fdtdx_stack.StackDevice` the code names
+            (only its ``center``/``z_center`` are read, for absolute specs).
+        state: a :class:`~gdsfactory.viewer.state.ViewerState` holding the
+            specs and settings.
+
+    Returns:
+        The copyable Python source.
+    """
+    settings: SimSettings = state.settings
+    lines: list[str] = [_LAUNCH_HEADER]
+    # the helpers the tail calls at import time must be defined before use
+    lines.append(_LAUNCH_PRELUDE.replace("{pwf}", _num(settings.pulse_width_frac)))
+
+    # a viewer-edited boundary_offset re-boxed the device (spec R13): the
+    # emitted code must reproduce that box before anything is placed on it
+    if tuple(settings.boundary_offset) != (0.0,) * 6:
+        lines.append("from gdsfactory.viewer.state import rebox_stack")
+        lines.append(f"stack = rebox_stack(stack, {_seq(settings.boundary_offset)})")
+        lines.append("")
+
+    # the volume and the device — the head of build_objects' object list
+    lines.append("volume, constraints = stack.get_simulation_volume()")
+    lines.append("objects = [volume, stack]")
+
+    # one call per spec, in spec order, with the same fallbacks _create applies
+    for spec in state.specs:
+        if spec.id in getattr(state, "adopted", ()):
+            continue  # adopted foreign detectors are already placed (D18)
+        kind = TYPES[spec.type]
+        if kind.wave != "none":
+            wavelengths = spec.params.get("wavelengths") or [settings.wavelength_um]
+        else:
+            wavelengths = None
+        if spec.absolute:
+            # R18: no create_*_at exists for absolute placement, so the tail
+            # constructs the object directly, as _create_absolute does
+            lines.extend(_absolute_lines(spec, kind, settings, wavelengths, stack))
+            lines.append(f"objects.append({spec.name})")
+            lines.append(f"constraints += cons_{spec.name}")
+            continue
+        args = [f"port={spec.port!r}"]
+        if kind.plane:
+            mult = spec.params.get("port_size_mult") or list(settings.port_size_mult)
+            args.append(f"port_size_mult={_seq(mult)}")
+        if kind.wave == "one":
+            args.append(f"wave_character=_wave({wavelengths[0]})")
+            if settings.pulse_width_frac > 0:
+                args.append(f"temporal_profile=_pulse(_wave({wavelengths[0]}))")
+        elif kind.wave == "many":
+            args.append("wave_characters=" + _waves_tuple(wavelengths))
+        if kind.direction:
+            args.append(f"direction={spec.params.get('direction', 'in' if kind.category == 'source' else 'out')!r}")
+        for key in kind.extra:
+            if key in spec.params:
+                args.append(f"{key}={_repr(spec.params[key])}")
+        if kind.category == "detector" and settings.pulse_width_frac > 0 and "scaling_mode" in kind.extra:
+            args.append("scaling_mode='pulse'")
+        if spec.params.get("level") is not None:
+            args.append(f"level={spec.params['level']!r}")
+        args.append(f"port_offset={_num(spec.params.get('port_offset', 0.0))}")
+        args.append(f"name={spec.name!r}")
+        lines.append(f"{spec.name}, cons_{spec.name} = stack.{kind.method}(")
+        for arg in args:
+            lines.append(f"    {arg},")
+        lines.append(")")
+        lines.append(f"objects.append({spec.name})")
+        lines.append(f"constraints += cons_{spec.name}")
+
+    # the config and the PML boundaries, as build_objects builds them
+    lines.append("config = fdtdx.SimulationConfig(")
+    lines.append(f"    time={_num(settings.time_s)},")
+    lines.append("    grid=fdtdx.core.grid.UniformGrid(spacing="
+                 f"{_num(settings.resolution_um)} * 1e-6),")
+    lines.append(")")
+    lines.append(f"pml = fdtdx.BoundaryConfig.from_uniform_bound(thickness={int(settings.pml_thickness)})")
+    lines.append("boundaries, cons = fdtdx.boundary_objects_from_config(pml, volume)")
+    lines.append("objects += list(boundaries.values())")
+    lines.append("constraints += cons")
+
+    # the run sequence, exactly as sim.run does it; the marker lets a reader
+    # (or a test) cut the tail after building, before the FDTD run
+    lines.append("# --- run: delete below to only build the setup -------------------------------")
+    lines.append("key = jax.random.PRNGKey(0)")
+    lines.append("objects, arrays, params, config, _ = fdtdx.place_objects(objects, config, constraints, key)")
+    lines.append("objects = _pml_coeffs_in_config_dtype(objects, config)")
+    lines.append("arrays, objects, _ = apply_stack(arrays, objects, {**params, **init_stack_params(objects)}, key)")
+    lines.append("_, arrays = fdtdx.run_fdtd(")
+    lines.append("    arrays=arrays,")
+    lines.append("    objects=objects,")
+    lines.append("    config=config,")
+    lines.append("    key=key,")
+    lines.append("    show_progress=True,")
+    lines.append(")")
+    return "\n".join(lines) + "\n"
 
 
 def run(
