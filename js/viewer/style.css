@@ -91,6 +91,14 @@
   margin-left: 4px;
 }
 
+/* clipboard button: sits beside the save button, same look */
+.gfx-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 8px;
+}
+
 /* settings button: a gear beside Fit, opening the settings screen */
 .gfx-settings {
   display: inline-flex;

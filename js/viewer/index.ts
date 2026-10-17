@@ -56,6 +56,14 @@ const SAVE_ICON =
   '<path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>' +
   '<circle cx="12" cy="13" r="4"/></svg>';
 
+//: A "copy" glyph (two overlapping rectangles) for the clipboard button: it
+//: copies the same image the save button captures, into the browser clipboard.
+const COPY_ICON =
+  '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+  'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+  '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>' +
+  '<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+
 //: A gear glyph for the settings button (spec R3).
 const GEAR_ICON =
   '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
@@ -137,12 +145,17 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   save.className = "gfx-button gfx-save";
   save.title = "save the current viewport as a PNG";
   save.innerHTML = SAVE_ICON;
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "gfx-button gfx-copy";
+  copy.title = "copy the current viewport image to the clipboard";
+  copy.innerHTML = COPY_ICON;
   // the view controls sit left (3D, 2D, Fit, then the shared z multiplier);
   // the spacer starts the right-hand group, which reads left to right: the
-  // run's phase label and progress bar, then Run, Save and Settings
+  // run's phase label and progress bar, then Run, Save, Copy and Settings
   const spacer = document.createElement("div");
   spacer.className = "gfx-spacer";
-  menubar.append(to3d, to2d, fit, exaggeration, spacer, runPhase, runProgress, run, save, settings);
+  menubar.append(to3d, to2d, fit, exaggeration, spacer, runPhase, runProgress, run, save, copy, settings);
 
   // -- section controls (2D only, spec R4) ---------------------------------
   const sectionControls = document.createElement("div");
@@ -495,20 +508,44 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
     closeSettings();
     sendPatch(model, { active_viewport: "2d" });
   });
-  save.addEventListener("click", () => {
+  // the two capture buttons share one shot: the active viewport, or the whole
+  // widget when the settings toggle says so (the widget is the heavier capture,
+  // so the result is delivered once it is ready)
+  const captureShot = (): Promise<[string, string]> => {
     const is2d = currentState(model)?.active_viewport === "2d";
     const viewportPng = is2d ? section.toPng() : scene.toPng();
-    // the whole widget is a heavier capture (rasterizing the shell), so build
-    // it first and deliver the result once it is ready
-    const shot: Promise<[string, string]> = readShotWhole()
+    return readShotWhole()
       ? captureShell(el, viewportPng).then(
           (png): [string, string] => [png, is2d ? "viewer-2d.png" : "viewer-3d.png"],
         )
       : Promise.resolve([viewportPng, is2d ? "cross-section.png" : "view-3d.png"]);
-    shot.then(([png, filename]) => {
+  };
+  save.addEventListener("click", () => {
+    captureShot().then(([png, filename]) => {
       if (readSaveTarget() === "server") send(model, { event: "save_image", data: png, filename });
       else download(png, filename);
     });
+  });
+  // the clipboard write must be permitted as a user gesture, so it starts
+  // directly in the click handler; only the (possibly slow) capture is async
+  copy.addEventListener("click", () => {
+    let write: Promise<void>;
+    try {
+      write = navigator.clipboard.write([]);
+    } catch {
+      showToast("clipboard is not available here");
+      return;
+    }
+    captureShot().then(([png]) =>
+      write
+        .then(() => fetch(png))
+        .then((r) => r.blob())
+        .then((blob) =>
+          navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]),
+        )
+        .then(() => showToast("copied image to the clipboard"))
+        .catch(() => showToast("copy failed: clipboard blocked or unsupported")),
+    );
   });
 
   // The slider drags faster than the kernel can round trip (spec D10), so
