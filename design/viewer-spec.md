@@ -1,6 +1,6 @@
 # gdsfactoryx viewer: spec
 
-**Status:** drafting · **Owner:** floresh2 · **Last updated:** 2026-10-14
+**Status:** drafting · **Owner:** floresh2 · **Last updated:** 2026-10-16
 
 How to use this file: we workshop it, then distill only the **Accepted** items
 into an implementation brief for an agent. IDs (G#, C#, R#, D#, Q#, F#, M#) are
