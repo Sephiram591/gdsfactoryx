@@ -14,7 +14,7 @@ The device also builds a simulation volume that fits it and places sources and
 detectors directly on the component's ports. You don't export a GDS, and you
 don't re-describe the geometry with fdtdx primitives.
 
-Install the integration with the `fdtdx` extra (requires `fdtdx >= 0.6.2`):
+Install the integration with the `fdtdx` extra (requires `fdtdx >= 0.6.3`):
 
 ```bash
 pip install "gdsfactory[fdtdx] @ git+https://github.com/Sephiram591/gdsfactoryx.git"

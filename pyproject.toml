@@ -58,7 +58,7 @@ version = "9.51.0"
 [project.optional-dependencies]
 bench = ["asv>=0.6,<1"]
 cad = ["kweb>=1.1.9,<2.1"]
-fdtdx = ["fdtdx>=0.6.2"]
+fdtdx = ["fdtdx>=0.6.3"]
 gui = ["anywidget>=0.9", "manifold3d>=3.0"]
 dev = [
   "hypothesis",
