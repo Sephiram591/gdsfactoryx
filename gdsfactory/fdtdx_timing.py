@@ -11,13 +11,23 @@ nothing to traced code. Turn it on with :func:`record_timings`::
 
 Steps nest (``write/weights/source_sdfs``). Each record is classified:
 
-- **traced:** the step ran while JAX traced a function (``jax.jit``,
-  ``jax.grad``): its wall time is tracing time, which is part of compiling.
-- **eager:** the step ran on concrete values. Its outputs are waited for
+- **traced:** the step ran while JAX traced a function for ``jax.jit`` (or
+  ``lax.scan`` and the like): its wall time is tracing time, which is part of
+  compiling.
+- **eager:** the step ran on concrete values, also under eager autodiff
+  (``jax.grad`` or ``jax.value_and_grad`` without ``jit``, whose tracers carry
+  concrete primals). Its outputs (their primals) are waited for
   (``jax.block_until_ready``) at the step's end, outside any trace, so the
   wall time includes the device work. JAX compile events (tracing, lowering
   and XLA compilation, from ``jax.monitoring``) that happen while the step is
-  open are its compile time; the rest is run time.
+  open are its compile time; the rest is run time. The backward pass of an
+  eager ``jax.grad`` runs after the steps returned and belongs to no step: time
+  the whole call with :func:`timed_step` to see it.
+
+Work outside every step is not lost: compile events that fire while no step is
+open are summed in :attr:`StepTimings.outside_compile` (lowering and XLA
+compilation of jitted callers), and the timing plugin reports each test's time
+outside the steps.
 
 Timing never changes results or gradients: it only reads the clock, waits for
 eager outputs, and listens to JAX's monitoring events.
@@ -104,6 +114,8 @@ class StepTimings:
         """Creates an empty recorder."""
         #: per step key ("parent/child"), the accumulated record
         self.steps: dict[str, StepRecord] = {}
+        #: compile events (start, end) that fired while no step was open
+        self.outside: list[tuple[float, float]] = []
         self._stack: list[_Open] = []
         self._lock = threading.Lock()
 
@@ -111,9 +123,13 @@ class StepTimings:
 
     def _on_event(self, event: str, duration: float, **_: Any) -> None:
         """jax.monitoring listener: a compile interval for every open step."""
-        if event not in COMPILE_EVENTS or not self._stack:
+        if event not in COMPILE_EVENTS:
             return
         end = time.perf_counter()
+        if not self._stack:
+            with self._lock:
+                self.outside.append((end - duration, end))
+            return
         with self._lock:
             for frame in self._stack:
                 frame.intervals.append((end - duration, end))
@@ -156,6 +172,13 @@ class StepTimings:
             rec.traced += end - start
         else:
             rec.compile += min(_merged_length(intervals, start, end), end - start)
+
+    @property
+    def outside_compile(self) -> float:
+        """Compile time (s) outside every step: lowering and XLA compilation of jitted callers (merged events)."""
+        if not self.outside:
+            return 0.0
+        return _merged_length(self.outside, min(a for a, _ in self.outside), max(b for _, b in self.outside))
 
     # ------------------------------------------------------------ reporting
 
@@ -205,25 +228,46 @@ def _merged_length(intervals: list[tuple[float, float]], start: float, end: floa
 
 
 def _wait(value: Any) -> bool:
-    """Waits for the eager arrays in ``value``; True if it holds tracers or JAX is tracing.
+    """Waits for the eager arrays in ``value``; True if it holds jit tracers or JAX is tracing for jit.
 
-    Nothing is waited for under a trace, so no host sync enters traced code.
+    Nothing is waited for under a jit trace, so no host sync enters traced code.
+    Tracers of eager autodiff carry concrete primals, which are waited for.
     """
     leaves = jax.tree_util.tree_leaves(value)
-    if any(isinstance(x, jax.core.Tracer) for x in leaves) or _tracing():
+    if _jit_tracing() or any(_is_jit_tracer(x) for x in leaves):
         return True
-    arrays = [x for x in leaves if isinstance(x, jax.Array)]
+    arrays = [x for x in map(_concrete, leaves) if isinstance(x, jax.Array)]
     if arrays:
         jax.block_until_ready(arrays)
     return False
 
 
-def _tracing() -> bool:
-    """True while JAX traces a function (jit, grad, vmap, ...)."""
+def _concrete(x: Any) -> Any:
+    """The concrete primal under eager-autodiff tracers (x itself otherwise)."""
+    while isinstance(x, jax.core.Tracer) and hasattr(x, "primal"):
+        x = x.primal
+    return x
+
+
+def _is_jit_tracer(x: Any) -> bool:
+    """True for a tracer without a concrete primal (jit / scan tracing)."""
+    return isinstance(_concrete(x), jax.core.Tracer)
+
+
+def _jit_tracing() -> bool:
+    """True while JAX traces a function into a jaxpr (jit, scan, ...), also under autodiff of it.
+
+    Eager autodiff alone (``jax.grad`` without ``jit``) is not tracing: its steps run on concrete values.
+    """
     try:
         from jax._src import core
 
-        return not core.trace_state_clean()
+        trace = core.trace_ctx.trace
+        while trace is not None:
+            if type(trace).__name__ == "DynamicJaxprTrace":
+                return True
+            trace = getattr(trace, "parent_trace", None)
+        return False
     except Exception:  # pragma: no cover - private API changed
         return False
 

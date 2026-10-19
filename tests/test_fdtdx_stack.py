@@ -3386,7 +3386,7 @@ def test_step_timings_change_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
             a, _, _ = apply_stack(arrays, objects, p, jax.random.PRNGKey(0))
             return jnp.sum(1.0 / a.inv_permittivities)
 
-        value, grad = jax.value_and_grad(loss)(0.5)  # traced: write and its steps are traced
+        value, grad = jax.value_and_grad(loss)(0.5)  # eager autodiff: write and its steps run on concrete primals
         weights = d.material_weights(params["stack"])[1]  # eager
         jitted = jax.jit(lambda p: d.material_weights(p)[1])(params["stack"])
         return [np.asarray(x) for x in (value, grad, weights, jitted)]
@@ -3413,7 +3413,8 @@ def test_step_timings_change_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     assert expected <= set(steps), sorted(expected - set(steps))
     assert {"composite", "composite_samples"} & set(steps)
     assert "normal_tensor" in steps
-    assert steps["write"].traced_calls == steps["write"].calls > 0  # inside jax.value_and_grad
+    # inside jax.value_and_grad without jit: eager autodiff, not tracing (R3-timing-2)
+    assert steps["write"].calls > 0 and steps["write"].traced_calls == 0
     top = timings.steps["weights"]  # material_weights called directly (not under write)
     assert top.traced_calls >= 1 and top.calls > top.traced_calls  # under jax.jit, and eager
     assert all(r.wall >= 0 and r.compile >= 0 and r.run >= 0 for r in timings.steps.values())
@@ -3427,6 +3428,66 @@ def test_step_timings_merge_compile_intervals() -> None:
     assert _merged_length([(1.0, 2.0), (1.5, 1.8), (1.9, 3.0)], 0.0, 2.5) == pytest.approx(1.5)
     assert _merged_length([(0.0, 1.0)], 2.0, 3.0) == 0.0
     assert _merged_length([], 0.0, 1.0) == 0.0
+
+
+def test_step_timings_tell_jit_tracing_from_eager_autodiff() -> None:
+    """Steps under jit are traced; under eager jax.grad they are eager (compile events counted, outputs
+    waited for); compile events outside every step are summed apart (R3-timing-2, -3)."""
+    from gdsfactory.fdtdx_timing import StepTimings, record_timings, timed_step
+
+    def work(x, name):
+        with timed_step(name) as step:
+            return step.done(jnp.sin(x) * 2.0)
+
+    timings = StepTimings()
+    with record_timings(timings):
+        jax.jit(lambda x: work(x, "in_jit").sum())(jnp.arange(7.0))  # traced step; jit's own compile is outside
+        jax.grad(lambda x: work(x, "in_grad").sum())(jnp.arange(5.0))  # eager autodiff
+        work(jnp.arange(3.0), "in_eager")
+        with timed_step("whole_grad") as step:  # the caller's boundary sees the backward pass
+            step.done(jax.value_and_grad(lambda x: work(x, "in_grad2").sum())(jnp.arange(4.0)))
+    assert timings.steps["in_jit"].traced_calls == 1
+    assert timings.steps["in_grad"].traced_calls == 0 and timings.steps["in_grad"].calls == 1
+    assert timings.steps["in_eager"].traced_calls == 0
+    assert timings.steps["whole_grad/in_grad2"].traced_calls == 0
+    assert timings.steps["whole_grad"].wall >= timings.steps["whole_grad/in_grad2"].wall
+    assert timings.outside_compile > 0.0  # the jit's lowering and XLA compile belong to no step
+
+
+def test_timing_plugin_skips_the_xdist_controller_and_tags_workers(tmp_path) -> None:
+    """Under xdist only workers record, each into its own file (the controller used to overwrite theirs)."""
+    import importlib.util
+    import pathlib
+    import types
+
+    spec = importlib.util.spec_from_file_location(
+        "fdtdx_timing_plugin_test", pathlib.Path(__file__).with_name("fdtdx_timing_plugin.py")
+    )
+    plugin = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(plugin)
+
+    class Manager:
+        registered: list = []
+
+        def register(self, obj, name):
+            self.registered.append(obj)
+
+    def config(**attrs):
+        manager = Manager()
+        manager.registered = []
+        return types.SimpleNamespace(
+            getoption=lambda *a, **k: "x", pluginmanager=manager, rootpath=tmp_path, **attrs
+        ), manager
+
+    cfg, manager = config(option=types.SimpleNamespace(numprocesses=4))  # controller
+    plugin.configure(cfg)
+    assert manager.registered == []
+    cfg, manager = config(option=types.SimpleNamespace(numprocesses=None))  # plain pytest
+    plugin.configure(cfg)
+    assert [p.path.name for p in manager.registered] == ["x.json"]
+    cfg, manager = config(option=types.SimpleNamespace(numprocesses=None), workerinput={"workerid": "gw1"})
+    plugin.configure(cfg)
+    assert [p.path.name for p in manager.registered] == ["x.gw1.json"]
 
 
 def test_stack_options() -> None:
@@ -3599,3 +3660,48 @@ def test_exact_mode_at_zero_bias_is_close_to_composite() -> None:
     assert errors["composite"].sum() < 0.5
     assert errors["exact"].sum() < 2.0 * errors["composite"].sum()
     assert float((errors["exact"] - errors["composite"]).max()) < 0.3
+
+
+# ---------------------------------------------------------------- the FDTD solve (timed by the timing plugin)
+
+
+def test_fdtd_solve_forward_and_gradient() -> None:
+    """A small solve through a StackDevice: forward, and a jax.grad of the detected energy with respect to the
+    core thickness. Both run inside timed steps (``fdtd_solve_forward``, ``fdtd_solve_gradient``: eager calls
+    whose outputs are waited for, compile and backward pass included), which the timing plugin reports."""
+    from gdsfactory.fdtdx_timing import timed_step
+
+    ls = LayerStack(layers={k: stack().layers[k] for k in ("box", "core", "clad")})
+    d = StackDevice.from_layer_stack(
+        _straight(0.0, width=0.5), ls, MATERIALS, background="air", name="stack", included_layers=["core"],
+        boundary_offset=(0.0, 0.0, 0.3, -0.3, 0.3, -0.2),
+    )
+    wave = fdtdx.WaveCharacter(wavelength=1.55e-6)
+    source, c1 = d.create_point_dipole_source_at("o1", wave_character=wave, polarization="y", port_offset=0.2)
+    probe, c2 = d.create_energy_detector_at("o2", (2, 3), reduce_volume=True, port_offset=0.2)
+    volume, constraints = d.get_simulation_volume()
+    config = fdtdx.SimulationConfig(
+        time=40e-15,
+        grid=fdtdx.core.grid.UniformGrid(spacing=RES * 1e-6),
+        backend=jax.default_backend(),
+        dtype=jnp.float32,
+        gradient_config=fdtdx.GradientConfig(method="checkpointed", num_checkpoints=8),
+    )
+    key = jax.random.PRNGKey(0)
+    objects, arrays, params, config, _ = fdtdx.place_objects(
+        object_list=[volume, d, source, probe], config=config, constraints=[*constraints, *c1, *c2], key=key
+    )
+    params = {**params, **init_stack_params(objects)}
+
+    def energy(thickness):
+        p = {**params, "stack": {**params["stack"], "thickness/core": thickness}}
+        new, objs, _ = apply_stack(arrays, objects, p, key)
+        _, final = fdtdx.run_fdtd(arrays=new, objects=objs, config=config, key=key, show_progress=False)
+        return 1e24 * jnp.sum(final.detector_states[probe.name]["energy"])  # SI energies are ~1e-25 J
+
+    with timed_step("fdtd_solve_forward") as step:
+        value = step.done(energy(0.22))
+    assert np.isfinite(float(value)) and float(value) > 0
+    with timed_step("fdtd_solve_gradient") as step:
+        value, grad = step.done(jax.value_and_grad(energy)(0.22))
+    assert np.isfinite(float(grad)) and float(grad) != 0.0

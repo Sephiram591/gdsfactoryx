@@ -9,6 +9,16 @@ per-step table (wall, compile, run; see :mod:`gdsfactory.fdtdx_timing`) and the
 slowest tests with their steps, and writes everything as JSON to
 ``.scratch/fdtdx_work/timings/<name>.json`` (or to ``<name>`` itself if it ends
 in ``.json``).
+
+Time outside the steps is reported too: per test (``outside``: the test's
+duration less its top-level steps, and ``outside_compile``: the JAX compile
+events that fired while no step was open, i.e. lowering and compilation of
+jitted callers) and for the session. The steps alone are lower bounds of what a
+feature costs.
+
+Under pytest-xdist only the workers record (the controller runs no tests); each
+writes ``<name>.<worker id>.json`` (e.g. ``<name>.gw0.json``), to be merged by
+the reader.
 """
 
 from __future__ import annotations
@@ -39,15 +49,22 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 class FdtdxTimingPlugin:
     """Records per-test step timings and reports them at the end of the session."""
 
-    def __init__(self, name: str, root: pathlib.Path) -> None:
-        """Creates the plugin writing ``<root>/.scratch/fdtdx_work/timings/<name>.json``."""
+    def __init__(self, name: str, root: pathlib.Path, worker: str | None = None) -> None:
+        """Creates the plugin writing ``<root>/.scratch/fdtdx_work/timings/<name>.json`` (``<name>.<worker>.json``)."""
         from gdsfactory.fdtdx_timing import StepTimings
 
         path = pathlib.Path(name)
-        self.path = path if path.suffix == ".json" else root / ".scratch/fdtdx_work/timings" / f"{name}.json"
+        tag = f".{worker}" if worker else ""
+        self.path = (
+            path.with_suffix(f"{tag}.json")
+            if path.suffix == ".json"
+            else root / ".scratch/fdtdx_work/timings" / f"{name}{tag}.json"
+        )
         self.name = name
         self.session = StepTimings()
         self.tests: dict[str, dict[str, Any]] = {}
+        #: over all tests: their duration, the part inside top-level steps, the compile outside every step
+        self.total = {"tests": 0.0, "in_steps": 0.0, "outside_compile": 0.0}
         self.start = time.perf_counter()
         self._patched: list[tuple[Any, str, Any]] = []
 
@@ -78,9 +95,15 @@ class FdtdxTimingPlugin:
         duration = time.perf_counter() - t0
         for key, rec in timings.steps.items():
             self.session.steps.setdefault(key, type(rec)()).add(rec)
-        if timings.steps:
+        in_steps = sum(rec.wall for key, rec in timings.steps.items() if "/" not in key)
+        self.total["tests"] += duration
+        self.total["in_steps"] += in_steps
+        self.total["outside_compile"] += timings.outside_compile
+        if timings.steps or timings.outside:
             self.tests[item.nodeid] = {
                 "duration": duration,
+                "outside": max(duration - in_steps, 0.0),
+                "outside_compile": timings.outside_compile,
                 "steps": {k: v.as_dict() for k, v in timings.by_leaf().items()},
                 "keys": timings.as_dict(),
             }
@@ -93,6 +116,7 @@ class FdtdxTimingPlugin:
         data = {
             "name": self.name,
             "suite_wall": wall,
+            "total": {**self.total, "outside": max(self.total["tests"] - self.total["in_steps"], 0.0)},
             "by_step": {k: v.as_dict() for k, v in sorted(self.session.by_leaf().items())},
             "by_key": self.session.as_dict(),
             "tests": self.tests,
@@ -110,11 +134,19 @@ class FdtdxTimingPlugin:
         tr.write_line(f"suite wall {getattr(self, 'suite_wall', 0.0):.1f} s; JSON {self.path}")
         tr.write_line("by step (inclusive; nested steps also count in their callers):")
         tr.write_line(format_table(self.session.by_leaf()))
+        outside = max(self.total["tests"] - self.total["in_steps"], 0.0)
+        tr.write_line(
+            f"tests {self.total['tests']:.1f} s: {self.total['in_steps']:.1f} s in top-level steps, {outside:.1f} s "
+            f"outside them (of which compile outside steps: {self.total['outside_compile']:.1f} s)"
+        )
         tr.write_line("")
         tr.write_line(f"slowest {TOP_TESTS} tests with their slowest {TOP_STEPS} steps:")
         slow = sorted(self.tests.items(), key=lambda kv: -kv[1]["duration"])[:TOP_TESTS]
         for nodeid, t in slow:
-            tr.write_line(f"{t['duration']:8.2f} s  {nodeid}")
+            tr.write_line(
+                f"{t['duration']:8.2f} s  {nodeid}  (outside steps {t['outside']:.2f} s, "
+                f"compile there {t['outside_compile']:.2f} s)"
+            )
             steps = sorted(t["steps"].items(), key=lambda kv: -kv[1]["wall"])[:TOP_STEPS]
             for key, r in steps:
                 rec = StepRecord(**{k: r[k] for k in ("calls", "traced_calls", "wall", "traced", "compile")})
@@ -125,7 +157,16 @@ class FdtdxTimingPlugin:
 
 
 def configure(config: pytest.Config) -> None:
-    """Registers the plugin if ``--fdtdx-timings`` or ``FDTDX_TIMINGS`` names a run."""
+    """Registers the plugin if ``--fdtdx-timings`` or ``FDTDX_TIMINGS`` names a run.
+
+    Under pytest-xdist the controller runs no tests and does not register; each
+    worker registers and writes its own file.
+    """
     name = config.getoption("--fdtdx-timings", default=None) or os.environ.get(ENV)
-    if name:
-        config.pluginmanager.register(FdtdxTimingPlugin(name, pathlib.Path(config.rootpath)), "fdtdx-timings")
+    if not name:
+        return
+    workerinput = getattr(config, "workerinput", None)
+    if workerinput is None and getattr(config.option, "numprocesses", None):
+        return  # xdist controller
+    worker = None if workerinput is None else workerinput["workerid"]
+    config.pluginmanager.register(FdtdxTimingPlugin(name, pathlib.Path(config.rootpath), worker), "fdtdx-timings")

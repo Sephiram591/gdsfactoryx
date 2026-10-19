@@ -251,18 +251,27 @@ or `E`, `set_permittivity`, `conductivity`, step `dispersion`) and, inside
 `layer_geometry` (where derived shapes are evaluated), `source_sdfs`,
 `corner_plan`, `corner_capacity`, `corner_inputs`, `composite` or
 `composite_samples`, `corner_pass` and `normal_tensor`. Nested steps also
-count in their callers. A step that runs while JAX traces (inside `jax.jit` or
-`jax.grad`) counts its wall time as tracing time, which is part of compiling. A
-step on concrete values waits for its outputs (`jax.block_until_ready`) when it
+count in their callers. A step that runs while JAX traces a function for
+`jax.jit` counts its wall time as tracing time, which is part of compiling. A
+step on concrete values, also under eager `jax.grad` (without `jit`), waits for
+its outputs (`jax.block_until_ready`; their primals under autodiff) when it
 ends, and splits its time into compile (JAX's tracing, lowering and XLA
-compile events while it runs) and run. Nothing waits inside traced code.
+compile events while it runs) and run. Nothing waits inside traced code. The
+backward pass of an eager `jax.grad` and the lowering and compilation of jitted
+callers happen outside every step: `StepTimings.outside_compile` sums the
+compile events that fire while no step is open, and `timed_step(name)` around
+the whole call (forward and backward) times them.
 
 The fdtdx test suites time themselves with
 `FDTDX_TIMINGS=<name> pytest tests/test_fdtdx_stack.py tests/test_fdtdx_geometry.py`
 (or `--fdtdx-timings=<name>`): the plugin `tests/fdtdx_timing_plugin.py` also
-times `fdtdx.place_objects` and `fdtdx.run_fdtd` (step `fdtd_solve`), prints the
-per-step table and the slowest tests with their steps, and writes the data to
-`.scratch/fdtdx_work/timings/<name>.json`.
+times `fdtdx.place_objects` and `fdtdx.run_fdtd` (step `fdtd_solve`; the test
+`test_fdtd_solve_forward_and_gradient` adds `fdtd_solve_forward` and
+`fdtd_solve_gradient`, the whole forward and `jax.value_and_grad` calls with
+compile and backward pass), prints the per-step table, the time outside the
+steps (per test and in total) and the slowest tests with their steps, and
+writes the data to `.scratch/fdtdx_work/timings/<name>.json`. Under pytest-xdist
+each worker writes `<name>.<worker id>.json`.
 
 ### Geometry options and their cost
 
@@ -281,7 +290,9 @@ Each option is also a StackDevice field and can still be passed on its own
 (`corner_lines=0`), but not both ways at once. The costs below are wall time
 over the full fdtdx test suites (205 tests, 34 min on one L40S, timed with the
 plugin above), where most of the time is compiling: tests build many small
-devices and compile each once.
+devices and compile each once. They are lower bounds: the steps leave out the
+lowering and compilation of jitted callers and the backward passes (about a
+third of the test time in that run), and no suite was run with a feature off.
 
 | Option (default) | What it buys | Suite cost |
 |---|---|---|
