@@ -137,7 +137,9 @@ regular fdtdx devices and other objects as usual.
 import jax
 import jax.numpy as jnp
 
-config = fdtdx.SimulationConfig(time=200e-15, resolution=20e-9, dtype=jnp.float32)
+config = fdtdx.SimulationConfig(
+    time=200e-15, grid=fdtdx.core.grid.UniformGrid(spacing=20e-9), dtype=jnp.float32
+)
 pml = fdtdx.BoundaryConfig.from_uniform_bound(thickness=25)
 boundaries, c = fdtdx.boundary_objects_from_config(pml, volume)
 objects += boundaries.values()

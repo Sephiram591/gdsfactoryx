@@ -5681,19 +5681,22 @@ class StackDevice(StaticMultiMaterialObject):
         c1, c2 are the slot constants in every voxel, also where no material
         with that pole is (c3 = 0 keeps P = 0 there, and the adjoint of c3 sees
         the material's recurrence); ``c3 = sum_m w_m c3_m``. Slots that other
-        objects need beyond the stack's own are zeroed in the box.
+        objects need beyond the stack's own are zeroed in the box. The slots
+        are isotropic; they fill whatever component axes the arrays have (other
+        objects may make them per-axis, or c3 a 3x3 tensor).
 
         Args:
             arrays: fdtdx ArrayContainer with dispersive arrays.
             w: (M, nx, ny, nz) material fractions in fdtdx's material order.
 
         Returns:
-            The arrays with c1, c2, c3 and inv_c2 overwritten in the box.
+            The arrays with c1, c2 and c3 overwritten in the box.
 
         Raises:
             ValueError: if the arrays have fewer pole slots than the device needs.
         """
-        n_slots = arrays.dispersive_c1.shape[0]
+        n_slots, n_comp = arrays.dispersive_c1.shape[:2]
+        n_coupling = arrays.dispersive_c3.shape[1]
         dtype = arrays.dispersive_c1.dtype
         dt = self._config.time_step_duration
         slots = pole_slots(self.materials)
@@ -5703,14 +5706,16 @@ class StackDevice(StaticMultiMaterialObject):
                 f"{self.name!r} needs {n} pole slots but the arrays have {n_slots}; "
                 "were the arrays initialized with this device?"
             )
-        full = (n_slots, 1, *self.grid_shape)
-        c1 = jnp.zeros(full, dtype=dtype)
-        c2 = jnp.zeros(full, dtype=dtype)
-        c3 = jnp.zeros(full, dtype=dtype)
+        c1 = jnp.zeros((n_slots, n_comp, *self.grid_shape), dtype=dtype)
+        c2 = jnp.zeros((n_slots, n_comp, *self.grid_shape), dtype=dtype)
+        c3 = jnp.zeros((n_slots, n_coupling, *self.grid_shape), dtype=dtype)
         if n:
             a1, a2, _ = compute_pole_coefficients(slots, dt)
-            _, _, a3 = compute_allowed_dispersive_coefficients(self.materials, dt, max_num_poles=n)
-            shape = (n, 1, *self.grid_shape)
+            # (M, n, n_coupling): the slots' K, diagonal entries only (isotropic)
+            _, _, a3 = compute_allowed_dispersive_coefficients(
+                self.materials, dt, max_num_poles=n, num_components=n_comp, coupling_components=n_coupling
+            )
+            shape = (n, n_comp, *self.grid_shape)
 
             def per_slot(a: np.ndarray) -> Array:
                 """Broadcasts one coefficient per slot to the box."""
@@ -5719,19 +5724,16 @@ class StackDevice(StaticMultiMaterialObject):
             c1 = c1.at[:n].set(per_slot(a1))
             c2 = c2.at[:n].set(per_slot(a2))
             mixed = jnp.einsum(  # full precision: GPUs default to TF32 for matmuls
-                "ms,mxyz->sxyz",
+                "msc,mxyz->scxyz",
                 jnp.asarray(a3, dtype),
                 w.astype(dtype),
                 precision=jax.lax.Precision.HIGHEST,
             )
-            c3 = c3.at[:n, 0].set(mixed)
-        # exact reciprocal of the stored c2 (fdtdx's reverse-time step relies on it)
-        inv_c2 = jnp.where(c2 == 0, 0.0, 1.0 / jnp.where(c2 == 0, 1.0, c2)).astype(dtype)
+            c3 = c3.at[:n].set(mixed)
         for name, value in (
             ("dispersive_c1", c1),
             ("dispersive_c2", c2),
             ("dispersive_c3", c3),
-            ("dispersive_inv_c2", inv_c2),
         ):
             current = getattr(arrays, name)
             arrays = arrays.at[name].set(current.at[:, :, *self.grid_slice].set(value))

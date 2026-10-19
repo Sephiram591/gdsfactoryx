@@ -113,7 +113,10 @@ def test_model_parity(name: str) -> None:
 def _place(device: StackDevice, resolution: float) -> tuple[dict, dict]:
     """Places a device in its own volume and returns fdtdx's objects and params."""
     config = fdtdx.SimulationConfig(
-        time=10e-15, resolution=resolution * 1e-6, backend=jax.default_backend(), dtype=jnp.float32
+        time=10e-15,
+        grid=fdtdx.core.grid.UniformGrid(spacing=resolution * 1e-6),
+        backend=jax.default_backend(),
+        dtype=jnp.float32,
     )
     volume, constraints = device.get_simulation_volume()
     objects, _, params, _, _ = fdtdx.place_objects(

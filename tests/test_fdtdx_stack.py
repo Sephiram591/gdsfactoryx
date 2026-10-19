@@ -100,7 +100,10 @@ def stack(**core) -> LayerStack:
 
 def place(device: StackDevice, extra=()):
     config = fdtdx.SimulationConfig(
-        time=10e-15, resolution=RES * 1e-6, backend=jax.default_backend(), dtype=jnp.float32
+        time=10e-15,
+        grid=fdtdx.core.grid.UniformGrid(spacing=RES * 1e-6),
+        backend=jax.default_backend(),
+        dtype=jnp.float32,
     )
     volume = fdtdx.SimulationVolume(partial_real_shape=(3.0e-6, 2.0e-6, 1.0e-6))
     objects, arrays, params, config, _ = fdtdx.place_objects(
@@ -435,14 +438,13 @@ def test_dispersive_stack_mixes_susceptibilities(averaging: str) -> None:
 
     dt = d._config.time_step_duration
     c1, c2, c3 = (_box(arrays2, d, f"dispersive_c{i}")[:, 0] for i in (1, 2, 3))
-    # slot constants everywhere in the box, exact reciprocal for the reverse step
+    # slot constants everywhere in the box
     for slot, mat in enumerate((SI_DISP, AU_DISP)):
         a1, a2, a3 = fdtdx.compute_pole_coefficients(mat.dispersion.poles, dt)
         np.testing.assert_allclose(c1[slot], a1[0], rtol=1e-6)
         np.testing.assert_allclose(c2[slot], a2[0], rtol=1e-6)
         expected = w["si"] if slot == 0 else w["metal"]
         np.testing.assert_allclose(c3[slot], expected * a3[0], rtol=1e-5, atol=1e-7 * a3[0])
-    np.testing.assert_allclose(_box(arrays2, d, "dispersive_inv_c2")[:, 0], 1.0 / c2, rtol=1e-6)
 
     # reconstructed susceptibility = sum_m w_m chi_m (what sources see)
     chi = np.asarray(susceptibility_from_coefficients(c1, c2, c3, OMEGA, dt))
@@ -487,7 +489,7 @@ def test_non_dispersive_stack_clears_its_box() -> None:
     assert arrays.dispersive_c1 is not None
     assert float(jnp.abs(_box(arrays, d, "dispersive_c3")).max()) > 0  # gold painted at init
     arrays2 = _apply(objects, arrays, params)
-    for name in ("dispersive_c1", "dispersive_c2", "dispersive_c3", "dispersive_inv_c2"):
+    for name in ("dispersive_c1", "dispersive_c2", "dispersive_c3"):
         assert float(jnp.abs(_box(arrays2, d, name)).max()) == 0.0
 
 
@@ -545,7 +547,10 @@ def test_subpixel_in_a_2d_simulation() -> None:
         boundary_offset=(0.3, -0.3, RES / 2 - 0.7, -RES / 2 + 0.5, 0.1, 0.0),
     )
     config = fdtdx.SimulationConfig(
-        time=10e-15, resolution=RES * 1e-6, backend=jax.default_backend(), dtype=jnp.float32
+        time=10e-15,
+        grid=fdtdx.core.grid.UniformGrid(spacing=RES * 1e-6),
+        backend=jax.default_backend(),
+        dtype=jnp.float32,
     )
     volume = fdtdx.SimulationVolume(partial_real_shape=(3.0e-6, RES * 1e-6, 1.0e-6))
     objects, arrays, params, _, _ = fdtdx.place_objects(
@@ -627,7 +632,9 @@ def _placed(component, ls, materials, size, center, z_center=0.14, **kwargs):
                          z_center + sz / 2 - hi, z_center - sz / 2 - lo),
         **kwargs,
     )
-    config = fdtdx.SimulationConfig(time=1e-15, resolution=RES * 1e-6, dtype=jnp.float32)
+    config = fdtdx.SimulationConfig(
+        time=1e-15, grid=fdtdx.core.grid.UniformGrid(spacing=RES * 1e-6), dtype=jnp.float32
+    )
     volume = fdtdx.SimulationVolume(partial_real_shape=shape)
     objects, arrays, params, _, _ = fdtdx.place_objects(
         object_list=[volume, device], config=config,
@@ -2083,7 +2090,10 @@ def _straight(rotation: float, width: float = 0.5) -> gf.Component:
 def _place_own_volume(device, extra=()):
     """Places a device in its own volume (get_simulation_volume) with extra (object, constraints) pairs."""
     config = fdtdx.SimulationConfig(
-        time=10e-15, resolution=RES * 1e-6, backend=jax.default_backend(), dtype=jnp.float32
+        time=10e-15,
+        grid=fdtdx.core.grid.UniformGrid(spacing=RES * 1e-6),
+        backend=jax.default_backend(),
+        dtype=jnp.float32,
     )
     volume, constraints = device.get_simulation_volume()
     objs = [volume, device]
@@ -2311,11 +2321,14 @@ def test_sources_and_detectors_on_ports(rotation: float) -> None:
         boundary_offset=((0, 0, 0.6, -0.6) if along else (0.6, -0.6, 0, 0)) + (0.4, -0.3),
     )
     wave = fdtdx.WaveCharacter(wavelength=1.55e-6)
+    pol = {"fixed_E_polarization_vector": (0.0, 0.0, 1.0)}  # transverse to both port axes
     made = [
         d.create_mode_plane_source_at("o1", (2, 3), wave_character=wave),
-        d.create_gaussian_plane_source_at("o1", (2, 3), wave_character=wave, port_offset=0.1),
-        d.create_uniform_plane_source_at("o1", (2, 3), wave_character=wave, port_offset=0.2),
-        d.create_hard_constant_amplitude_plane_source_at("o1", (2, 3), wave_character=wave, port_offset=0.3),
+        d.create_gaussian_plane_source_at("o1", (2, 3), wave_character=wave, port_offset=0.1, **pol),
+        d.create_uniform_plane_source_at("o1", (2, 3), wave_character=wave, port_offset=0.2, **pol),
+        d.create_hard_constant_amplitude_plane_source_at(
+            "o1", (2, 3), wave_character=wave, port_offset=0.3, **pol
+        ),
         d.create_point_dipole_source_at("o1", wave_character=wave, polarization="y", port_offset=0.4),
         d.create_mode_overlap_detector_at("o2", (2, 3), wave_characters=(wave,)),
         d.create_poynting_flux_detector_at("o2", (2, 3), port_offset=0.1),
@@ -2361,7 +2374,9 @@ def test_sources_and_detectors_on_ports(rotation: float) -> None:
     assert out.direction == "-"  # leaving through o1: towards -axis
     # port_offset > 0 moves along the injection direction (into the component), < 0 into the extension
     for port_offset in (0.2, -0.2):
-        src, cons = d.create_uniform_plane_source_at("o1", (2, 3), wave_character=wave, port_offset=port_offset, name="s")
+        src, cons = d.create_uniform_plane_source_at(
+            "o1", (2, 3), wave_character=wave, port_offset=port_offset, name="s", **pol
+        )
         placed, _, _ = _place_own_volume(d, [(src, cons)])
         p = ports["o1"]
         inward = -np.array([np.cos(np.radians(p.orientation)), np.sin(np.radians(p.orientation))])

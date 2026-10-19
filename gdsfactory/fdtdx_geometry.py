@@ -1308,17 +1308,18 @@ class SlotPole(Pole):
     #: coupling K (rad^2/s^2): delta_epsilon * omega_0^2 (Lorentz), omega_p^2 (Drude)
     strength: float = frozen_field()
 
+    # isotropic: the scalar omega_0 / gamma / coupling_sq come from Pole
     @property
-    def omega_0(self) -> float:
-        return float(self.resonance)
+    def omega_0_axes(self) -> tuple[float, float, float]:
+        return (float(self.resonance),) * 3
 
     @property
-    def gamma(self) -> float:
-        return float(self.damping_rate)
+    def gamma_axes(self) -> tuple[float, float, float]:
+        return (float(self.damping_rate),) * 3
 
     @property
-    def coupling_sq(self) -> float:
-        return float(self.strength)
+    def coupling_sq_axes(self) -> tuple[float, float, float]:
+        return (float(self.strength),) * 3
 
 
 def align_material_poles(materials: dict[str, fdtdx.Material]) -> dict[str, fdtdx.Material]:
