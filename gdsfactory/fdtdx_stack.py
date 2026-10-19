@@ -2180,6 +2180,9 @@ def _round_tips(
     tip in the square, the mitred painting gave all of it to one level, and
     the literal negated gives it to another: the tip's area moves between the
     two. Literals of the same layer with the same offset share their tip.
+    Tips of other literals at the same vertex (derived shapes of several
+    levels sharing a crossing) all move when their kites lie in disjoint cones
+    of their outward normals, and no other plane cuts them.
 
     All literals are processed together, along a slot axis T.
 
@@ -2194,8 +2197,8 @@ def _round_tips(
     Returns:
         exact: the fractions with the tips moved.
         gate: (N, S) False where the correction does not apply: tips of two
-            vertices, a tip cut by another plane, or a mitre sharper than
-            ``_MITRE_MIN``.
+            vertices, tips of one vertex whose cones overlap, a tip cut by
+            another plane, or a mitre sharper than ``_MITRE_MIN``.
     """
     sg = jax.lax.stop_gradient
     n, s = exact.shape[:2]
@@ -2236,7 +2239,34 @@ def _round_tips(
     member = (layer[:, None] == layer[None, :]) & (jnp.abs(sg(off)[..., :, None] - sg(off)[..., None, :]) < _PLANE_TOL)
     earlier = np.tril(np.ones((num, num), dtype=bool), -1)  # [t, u]: u before t
     first = tip & ~jnp.any(tip[..., None, :] & member & earlier, axis=-1)
-    gate = gate & (jnp.sum(first, axis=-1) <= 1)
+    # several tips may move if they round one vertex (two derived shapes sharing a crossing) and lie in
+    # disjoint cones of their outward normals (each kite lies in its own cone, so they never overlap)
+    def cross(x: Array, y: Array) -> Array:
+        return x[..., 0] * y[..., 1] - x[..., 1] * y[..., 0]
+
+    ga, gb = sg(step * na), sg(step * nb)  # (N, S, T, 2) the generators of each tip's cone
+    turn = cross(ga, gb) >= 0
+    lo, hi = jnp.where(turn[..., None], ga, gb), jnp.where(turn[..., None], gb, ga)  # counterclockwise
+
+    def strictly_in(v: Array, a: Array, b: Array) -> Array:
+        """Whether the directions v [..., u, :] are strictly inside the cones (a, b) [..., t, :]."""
+        v, a, b = v[..., None, :, :], a[..., :, None, :], b[..., :, None, :]
+        eps = 1e-6 * jnp.sum(v * v, axis=-1)
+        return (cross(a, v) > eps) & (cross(v, b) > eps)
+
+    def unit(x: Array) -> Array:
+        return x / jnp.maximum(jnp.linalg.norm(x, axis=-1, keepdims=True), 1e-30)
+
+    same_cone = (jnp.sum(unit(lo)[..., :, None, :] * unit(lo)[..., None, :, :], axis=-1) > 1 - 1e-6) & (
+        jnp.sum(unit(hi)[..., :, None, :] * unit(hi)[..., None, :, :], axis=-1) > 1 - 1e-6
+    )
+    overlap = strictly_in(lo, lo, hi) | strictly_in(hi, lo, hi) | same_cone
+    overlap = overlap | jnp.swapaxes(overlap, -1, -2)
+    vertex = sg(m.vertex)
+    one_vertex = jnp.max(jnp.abs(vertex[..., :, None, :] - vertex[..., None, :, :]), axis=-1) < _PLANE_TOL
+    others = ~np.eye(num, dtype=bool)
+    clash = first[..., :, None] & first[..., None, :] & others & (~one_vertex | overlap)
+    gate = gate & ~jnp.any(clash, axis=(-2, -1))
 
     # every other live plane must leave the tip whole
     valid = jnp.arange(poly.shape[-2]) < count[..., None]  # (N, S, T, 8)
@@ -5567,12 +5597,15 @@ class StackDevice(StaticMultiMaterialObject):
         """fdtdx hook: the nominal geometry rounded to the dominant material.
 
         Only used by fdtdx to paint the initial arrays; :func:`apply_stack`
-        overwrites them with the mixed materials.
+        overwrites them with the mixed materials. It is computed without the
+        corner model (``corner_lines=0``), which only refines the fractions of
+        corner voxels: compiling the corner pass for this one rounding cost the
+        first placement of a device 42 s of GPU autotuning at 260x180x90 voxels.
 
         Returns:
             (nx, ny, nz) material indices in fdtdx's order.
         """
-        _, w = self.material_weights(apply_roughness=False)
+        _, w = self.aset("corner_lines", 0).material_weights(apply_roughness=False)
         return jnp.argmax(w, axis=0).astype(jnp.int32)
 
     @timed("write")

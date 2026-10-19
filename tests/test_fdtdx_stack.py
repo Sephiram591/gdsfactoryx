@@ -3662,6 +3662,53 @@ def test_exact_mode_at_zero_bias_is_close_to_composite() -> None:
     assert float((errors["exact"] - errors["composite"]).max()) < 0.3
 
 
+@pytest.mark.parametrize("bias_b", [0.005, 0.0])
+def test_levels_sharing_a_crossing_round_their_own_tips(bias_b: float) -> None:
+    """WG - ETCH (si, bias 5 nm) and WG & ETCH (sio2) cross at voxel centres: with equal offsets each derived
+    shape rounds its own tip at the shared crossing, in its own cone (R3-accuracy-3: the voxel fell back to the
+    half-plane, 0.20 off); the si fill matches the round-join offset of WG - ETCH."""
+    shapely = pytest.importorskip("shapely")
+
+    def cells(pts):
+        return [(RES * x, RES * y) for x, y in pts]
+
+    wg = cells([(-45.5, -13.5), (-29.5, -13.5), (-29.5, -1.5), (-45.5, -1.5)])
+    et = cells([(-35.5, -9.5), (-24.5, -9.5), (-24.5, 3.5), (-35.5, 3.5)])
+    c = _two_layers([wg], [et])
+    derived = {"derived_layer": LogicalLayer(layer=WG), "zmin": 0.0, "thickness": 0.22}
+    ls = LayerStack(layers={
+        "a": LayerLevel(layer=LogicalLayer(layer=WG) - LogicalLayer(layer=ETCH), material="si", mesh_order=1,
+                        bias=0.005, **derived),
+        "b": LayerLevel(layer=LogicalLayer(layer=WG) & LogicalLayer(layer=ETCH), material="sio2", mesh_order=2,
+                        bias=bias_b, **derived),
+    })
+    mats = {"air": MATERIALS["air"], "si": MATERIALS["si"], "sio2": MATERIALS["sio2"]}
+    region = shapely.Polygon(wg).difference(shapely.Polygon(et)).buffer(0.005, quad_segs=256)
+    errors = {}
+    for mode in ("exact", "composite"):
+        d, w = _weights_of(c, ls, mats, (0.8, 0.8, 0.3), center=(-0.62, -0.1), z_center=0.11, derived_shapes=mode)
+        k = cell(d, 0, 0, 0.11)[2]
+        errors[mode] = np.abs(w["si"][:, :, k] - _area_fractions(d, region))
+    assert float(errors["exact"].max()) < 1e-3, float(errors["exact"].max())
+    assert float((errors["exact"] - errors["composite"]).max()) < 1e-4
+
+
+def test_placement_paints_its_mapping_without_the_corner_model() -> None:
+    """fdtdx's material mapping (the initial painting, overwritten by apply_stack) skips the corner pass, which
+    otherwise compiled and autotuned on its own at the first placement (R3-accuracy-2: 42 s at 260x180x90)."""
+    from gdsfactory.fdtdx_stack import record_timings
+
+    with record_timings() as timings:
+        objects, arrays, params = place(build())
+    assert "corner_pass" not in timings.by_leaf()
+    assert "weights" in timings.by_leaf()
+    d = objects["stack"]
+    assert d.corner_lines == 2  # the device itself keeps its corner model
+    names, w = d.material_weights(params["stack"], apply_roughness=False)
+    agree = np.asarray(jnp.argmax(w, axis=0) == d.get_material_mapping())
+    assert agree.mean() > 0.99  # only corner voxels may round differently
+
+
 # ---------------------------------------------------------------- the FDTD solve (timed by the timing plugin)
 
 

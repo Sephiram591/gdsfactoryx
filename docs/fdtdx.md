@@ -298,7 +298,7 @@ third of the test time in that run), and no suite was run with a feature off.
 |---|---|---|
 | `corner_lines=2` (0: off) | exact fill at polygon corners and edge crossings: corner voxels off by up to 0.25 (convex) and 0.31 (rotated polygons) without, 1e-6 with | 5.7 min (`corner_pass` 176 s, `corner_inputs` 123 s, `corner_budget` 38 s, `corner_plan` 6 s) |
 | `averaging="subpixel"` (`"inverse"`) | Kottke averaging: second-order accurate interfaces | part of `composite` painting, at most 4.2 min with everything else painted there |
-| `subpixel_normal="voxel"` (`"gradient"`) | the normal of each voxel's own model: exact at slanted walls (0.01 deg), where finite differences of the mean eps are 8-33 deg off | part of the same painting; per call about 1.7x write forward and 2.3x gradient over `"gradient"` |
+| `subpixel_normal="voxel"` (`"gradient"`) | the normal of each voxel's own model: exact at slanted walls (0.01 deg), where finite differences of the mean eps are 8-33 deg off | part of the same painting; per call about 1.7x write forward and 3.0x gradient over `"gradient"` (0.095 s / 0.59 s against 0.056 s / 0.20 s on the 130 x 90 x 45 test device) |
 | `yee_staggered=True` | each E component's own Yee position (first-order error without) | 1.1 min (`write.Ey`, `write.Ez`) plus the corner budget's extra grids |
 | `xy_subsamples=1` | (s > 1 refines tips and dense curves; cost ~ s^2) | 1.4 min for the tests that use 2 |
 | `derived_shapes="exact"` (`"composite"`) | no slivers where edges of a derived level's layers coincide (0.88 of a voxel before) | < 0.3 min (`derived_shapes` 0.3 s; evaluated within `layer_geometry`, 15 s for all layers) |
@@ -309,7 +309,19 @@ per-sub-interval sidewall offsets (inside the painting), the topology check of
 `pack` (0.2 s; `pack(check=False)` skips it) and `retopologize` (1 s).
 The largest single cost is not a feature: `fdtdx.place_objects` evaluates
 `material_weights` eagerly once per placement (for its material mapping),
-which compiles the geometry op by op: 8.4 of the suite's 34 min.
+which compiles the geometry op by op: 8.4 of the suite's 34 min. That mapping
+skips the corner model (it only rounds to the dominant material, and
+`apply_stack` overwrites it): with it, the first placement of a 260 x 180 x 90
+device spent 42 s autotuning the corner pass (49 s in all; now 7.3 s, as
+before the corner model). The first jitted `write` still compiles and
+autotunes the corner pass, once per device shape.
+
+Against the code before these accuracy changes, on the 130 x 90 x 45 test
+device (L40S, jitted, all options at their defaults), `write` takes 0.095 s
+forward (2.3x the old 0.041 s) and 0.59 s for its gradient (4.4x the old
+0.13 s); at 260 x 180 x 90 the gradient takes 7.0 s (3.8x the old 1.9 s).
+`StackOptions.fast()` brings `material_weights` back to the old cost (12.5 ms
+forward, 32.6 ms gradient, against 13.2 ms and 32.2 ms).
 
 ## Gradients through the simulation
 
@@ -480,6 +492,10 @@ when it detects that combination.
     summed fill error of 0.62 against 0.35 (worst voxel 0.26 against 0); with
     nonzero biases it is far better overall (0.9 against 6.5) with single
     voxels up to 0.12 worse. It is never worse than its own half-plane.
+    Levels sharing a crossing with equal offsets (`WG - ETCH` and
+    `WG & ETCH` with one sidewall or bias) are exact there: each rounds its
+    own tip, in the cone of its own edge normals (before: 0.20-0.25 of a voxel
+    at the crossing).
   - Building the shapes costs seconds for tens of thousands of edges (52.8k
     edges: 3 s; the first version took 85 s and 7.7 GB).
 - **Sidewalls.** A level at height `z` offsets its distance by
@@ -497,7 +513,13 @@ when it detects that combination.
     edge crosses a corner of the voxel's square within the voxel's height (the
     area is quadratic in the offset there). Audits measured up to 5e-3 of a
     voxel at 20° for axis-aligned edges and 2e-2 for edges at 17°; these errors
-    cancel along the edge, so the row volume stays exact.
+    cancel along the edge, so the row volume stays exact. This bound does not
+    hold where a steep `z_to_bias` ramp has a knot inside the voxel (the offset
+    then sweeps over a cell or more within one voxel height): a 30 nm bias
+    change over the top 6 nm of a 15° sidewall (`z_to_bias=((0, 0.97, 1),
+    (0, 0, -0.03))`, 20 nm voxels) gave up to 0.055 of a voxel axis-aligned
+    and 0.14 at 17° (the old code: 0.27), while the layer's volume stays within
+    4e-3 of a cell.
   - Near polygon corners, the corner model (below) paints each level with its
     offsets at the two Gauss-Legendre heights of its part of the voxel and
     takes the mean (again independent of other levels' surfaces). A sloped
@@ -626,10 +648,10 @@ when it detects that combination.
   silicon) at corner slivers. With `yee_staggered=True` (default), each E
   component is sampled at its own Yee position, with its own normal. On a
   130 x 90 x 45 test device, this normal makes the subpixel `apply_stack`
-  about 1.7x slower, and its gradient about 2.3x slower, than finite
-  differences of the mean ε would.
-  With `xy_subsamples=2` it takes about 4x (forward) and 6x (gradient) as
-  long as with 1: 0.41 s and 2.8 s instead of 0.10 s and 0.47 s on an L40S
+  about 1.7x slower, and its gradient about 3.0x slower, than finite
+  differences of the mean ε would (`subpixel_normal="gradient"`).
+  With `xy_subsamples=2` it takes about 4x (forward) and 5x (gradient) as
+  long as with 1: 0.41 s and 2.8 s instead of 0.095 s and 0.59 s on an L40S
   GPU, after compiling for about 40 s and 80 s.
   `averaging="inverse"` is fdtdx's inverse-permittivity average; it and
   `material_weights` cost nothing extra. Conductivity is averaged linearly.
