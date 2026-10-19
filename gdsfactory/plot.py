@@ -35,6 +35,10 @@ def plot_component(
     from gdsfactory.pdk import get_layer_views
 
     kc = to_kfactory(component, add_ports=show_ports)
+    if show_ports:
+        # KLayout only renders shapes: draw each port on its own layer, as an arrow
+        # pointing out of the device (plus its name).
+        kc.draw_ports()
     lyp_path = GDSDIR_TEMP / f"layer_properties-{uuid4().hex}.lyp"
     GDSDIR_TEMP.mkdir(parents=True, exist_ok=True)
     layer_views = get_layer_views()

@@ -89,3 +89,14 @@ class TestComponentPlot:
         assert tuple(default_size) != tuple(high_size)
         assert tuple(default_size) != tuple(low_size)
         assert tuple(high_size) != tuple(low_size)
+
+    def test_plot_show_ports_draws_them(self, component_under_test: Component) -> None:
+        """show_ports=True must change the rendered image (ports are drawn as shapes)."""
+        import numpy as np
+
+        def image(show_ports: bool) -> np.ndarray:
+            fig = component_under_test.plot(return_fig=True, show_ports=show_ports)
+            assert fig is not None
+            return np.asarray(fig.axes[0].images[0].get_array())
+
+        assert (image(True) != image(False)).any()
