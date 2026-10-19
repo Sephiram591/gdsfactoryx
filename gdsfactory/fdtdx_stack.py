@@ -162,11 +162,13 @@ Averaging = Literal["inverse", "subpixel"]
 PortDirection = Literal["in", "out"]  # into the component through the port, or out of it
 
 __all__ = [
-    "TopRoughness",
+    "PLANE_PORTS",
+    "Z_CENTER_LEVEL",
     "StackDevice",
     "StackDiagnostic",
     "StackDiagnosticWarning",
     "StackOptions",
+    "TopRoughness",
     "apply_stack",
     "init_stack_params",
     "record_timings",
@@ -256,6 +258,22 @@ class _Port(NamedTuple):
     orientation: float | None
     width: float
     layer: int
+
+
+#: The simulation-volume planes a source or detector can sit on, as virtual
+#: ports: the plane through the box center parallel to the named faces, mapped
+#: to its normal axis (0 = x, 1 = y, 2 = z). They are not device ports.
+PLANE_PORTS: dict[str, int] = {"yz": 0, "xz": 1, "xy": 2}
+
+#: The ``level`` value naming the simulation volume's own z center, offered
+#: alongside the level names so a source or detector can be pinned to the
+#: volume's mid-height instead of a level's span (spec R12). ``None`` means the
+#: same for a plane port, and a port's own level union otherwise.
+Z_CENTER_LEVEL: str = "z_center"
+
+#: The two in-plane axes of each normal axis (0 = x, 1 = y, 2 = z), in the
+#: order a plane's ``port_size_mult`` and its two extents use: (u, v).
+_IN_PLANE: tuple[tuple[int, int], ...] = ((1, 2), (0, 2), (0, 1))
 
 
 def _topology_tol(tol: float | None, vertices: Any) -> float:
@@ -4882,7 +4900,7 @@ class StackDevice(StaticMultiMaterialObject):
 
     def _res_um(self) -> float:
         """Grid resolution in um."""
-        return self._config.resolution * 1e6
+        return self._config.uniform_spacing() * 1e6
 
     def interface_offsets(self, key: Array | None) -> list[Array]:
         """Samples every roughness entry.
@@ -5491,7 +5509,7 @@ class StackDevice(StaticMultiMaterialObject):
         Returns:
             The device with the reachable levels only.
         """
-        res_um = config.resolution * 1e6
+        res_um = config.uniform_spacing() * 1e6
         start, stop = grid_slice_tuple[2]
         half = 0.5 * (stop - start) * res_um
         bottom = self.z_center - half - 0.5 * res_um - self.level_margin
@@ -5641,7 +5659,7 @@ class StackDevice(StaticMultiMaterialObject):
                     jnp.sum(w_cell * sigma[:, k, None, None, None], axis=0)
                     for k in range(sigma.shape[1])
                 ]
-            cond = jnp.stack(cond) * self._config.resolution
+            cond = jnp.stack(cond) * self._config.uniform_spacing()
             gradient_config = self._config.gradient_config
             if gradient_config is not None and gradient_config.method == "reversible":
                 # fdtdx's reversible backward pass closes over the conductivity:
@@ -5758,6 +5776,61 @@ class StackDevice(StaticMultiMaterialObject):
                 return p
         raise KeyError(f"Unknown port {port!r}; {self.name!r} has ports {[p.name for p in self.ports]}")
 
+    def _plane_frame(
+        self, plane: str, port_offset: float, level: str | None = None
+    ) -> tuple[_Port, int, int, list[float], float]:
+        """Frame of a plane through the simulation volume.
+
+        The three :data:`PLANE_PORTS` give the plane sources and detectors a
+        frame without a component port: a plane parallel to the volume's faces,
+        centered in the volume. The volume is the device box, so its center is
+        ``(self.center[0], self.center[1], self.z_center)``.
+
+        A plane normal to z (``"xy"``) cannot come from a component port —
+        ports run along x / y — so it uses the same synthetic frame, with the
+        two in-plane extents as width and height.
+
+        ``level`` sets the plane's height: a level name puts the plane at the
+        middle of that level's z span, and :data:`Z_CENTER_LEVEL` (or ``None``)
+        at the volume's own mid-height. For the ``"xy"`` plane, whose normal is
+        z, that *is* the plane's position; for ``"xz"`` / ``"yz"`` it moves the
+        plane's in-plane vertical center.
+
+        Args:
+            plane: ``"xy"``, ``"xz"`` or ``"yz"``.
+            port_offset: shift (um) along the normal; positive moves toward the
+                outward direction (+normal).
+            level: a level name, :data:`Z_CENTER_LEVEL`, or ``None`` for the
+                volume's mid-height.
+
+        Returns:
+            A synthetic port whose ``width`` / ``height`` are the volume's
+            in-plane extents, the normal axis (0 = x, 1 = y, 2 = z), the
+            outward sign (+1), the center (x, y, z) in um and the height.
+
+        Raises:
+            ValueError: the device has no box (``partial_real_shape``), so the
+                volume's extent is unknown.
+            KeyError: ``level`` is not a level of this device.
+        """
+        axis = PLANE_PORTS[plane]
+        if self.partial_real_shape is None or None in tuple(self.partial_real_shape):
+            raise ValueError(f"StackDevice {self.name!r} has no box (partial_real_shape)")
+        size = tuple(float(s) * 1e6 for s in self.partial_real_shape)
+        u_axis, v_axis = _IN_PLANE[axis]
+        width, height = size[u_axis], size[v_axis]
+        z = float(self.z_center)
+        if level is not None and level != Z_CENTER_LEVEL:
+            match = [lv for lv in self.levels if lv.name == level]
+            if not match:
+                raise KeyError(f"Level {level!r} is not in {self.name!r}: {[lv.name for lv in self.levels]}")
+            spans = [_span(lv) for lv in match]
+            z = 0.5 * (min(a for a, _ in spans) + max(b for _, b in spans))
+        center = [float(self.center[0]), float(self.center[1]), z]
+        center[axis] += port_offset
+        port = _Port(name=plane, x=center[0], y=center[1], orientation=None, width=width, layer=-1)
+        return port, axis, 1, center, height
+
     def _port_frame(
         self, port: str, level: str | None, port_offset: float
     ) -> tuple[_Port, int, int, list[float], float]:
@@ -5766,7 +5839,9 @@ class StackDevice(StaticMultiMaterialObject):
         Args:
             port: port name.
             level: level whose z span is used (default: the union of the levels
-                that draw the port's layer).
+                that draw the port's layer). For a :data:`PLANE_PORTS` name it
+                sets the plane's height: a level's span middle, or
+                :data:`Z_CENTER_LEVEL` / ``None`` for the volume's mid-height.
             port_offset: shift (um) along the port's injection direction (into
                 the component); negative moves out of it.
 
@@ -5775,11 +5850,19 @@ class StackDevice(StaticMultiMaterialObject):
             the center (x, y, z) in um (z: middle of the span) and the height of
             the span in um.
 
+        ``port`` may also name one of :data:`PLANE_PORTS` (``"xy"``, ``"xz"``,
+        ``"yz"``): the plane through the simulation volume's center. Those are
+        not ports of the device — they are not in :attr:`ports` — they only
+        give the plane sources and detectors a frame, sized by the volume's own
+        in-plane extent rather than a port's.
+
         Raises:
             KeyError: unknown port or level.
             ValueError: a port without orientation or not along x / y, or a port
                 layer that no level draws.
         """
+        if port in PLANE_PORTS:
+            return self._plane_frame(port, port_offset, level)
         p = self._port(port)
         if p.orientation is None:
             raise ValueError(f"Port {port!r} has no orientation")
@@ -5788,7 +5871,7 @@ class StackDevice(StaticMultiMaterialObject):
             raise ValueError(f"Port {port!r} points at {p.orientation} deg; fdtdx planes need 0, 90, 180 or 270")
         quarter %= 4
         axis, sign = quarter % 2, (1 if quarter < 2 else -1)
-        if level is not None:
+        if level is not None and level != Z_CENTER_LEVEL:
             match = [lv for lv in self.levels if lv.name == level]
             if not match:
                 raise KeyError(f"Level {level!r} is not in {self.name!r}: {[lv.name for lv in self.levels]}")
@@ -5798,7 +5881,10 @@ class StackDevice(StaticMultiMaterialObject):
                 raise ValueError(f"No level of {self.name!r} draws the layer of port {port!r}; pass level=...")
         spans = [_span(lv) for lv in match]
         lo, hi = min(a for a, _ in spans), max(b for _, b in spans)
-        center = [p.x, p.y, 0.5 * (lo + hi)]
+        # Z_CENTER_LEVEL pins the plane to the volume's mid-height while keeping
+        # the port's own span height; otherwise the span's middle sets z.
+        z = float(self.z_center) if level == Z_CENTER_LEVEL else 0.5 * (lo + hi)
+        center = [p.x, p.y, z]
         center[axis] -= sign * port_offset  # sign: the port's outward orientation
         return p, axis, sign, center, hi - lo
 
@@ -5858,9 +5944,10 @@ class StackDevice(StaticMultiMaterialObject):
             raise ValueError(f"Port {port!r} has no width")
         real: list[float | None] = [None, None, None]
         grid: list[int | None] = [None, None, None]
-        grid[axis] = 1  # one cell thick, normal to the port
-        real[1 - axis] = port_size_mult[0] * p.width * 1e-6
-        real[2] = port_size_mult[1] * height * 1e-6
+        grid[axis] = 1  # one cell thick, normal to the plane
+        u_axis, v_axis = _IN_PLANE[axis]
+        real[u_axis] = port_size_mult[0] * p.width * 1e-6
+        real[v_axis] = port_size_mult[1] * height * 1e-6
         if direction is not None:
             fields["direction"] = _axis_direction(direction, sign)
         obj = cls(

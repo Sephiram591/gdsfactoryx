@@ -18,6 +18,7 @@ UV_INSTALLED := $(shell command -v uv)
 	build \
 	upload-devpi \
 	upload-twine \
+	viewer-js \
 	lint \
 	nbdocs \
 	docs \
@@ -92,6 +93,9 @@ upload-devpi: ## Upload package to devpi
 
 upload-twine: build ## Upload package to PyPI using twine
 	uv tool run twine upload dist/*
+
+viewer-js: ## Rebuild the committed viewer bundle from js/ (spec D6)
+	cd js && npm install && npm run build && npm run typecheck
 
 lint: ## Run linting and formatting checks
 	uv run pre-commit run --all-files

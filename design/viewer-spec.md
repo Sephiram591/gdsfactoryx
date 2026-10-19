@@ -1,6 +1,6 @@
 # gdsfactoryx viewer: spec
 
-**Status:** drafting · **Owner:** floresh2 · **Last updated:** 2026-10-12
+**Status:** drafting · **Owner:** floresh2 · **Last updated:** 2026-10-16
 
 How to use this file: we workshop it, then distill only the **Accepted** items
 into an implementation brief for an agent. IDs (G#, C#, R#, D#, Q#, F#, M#) are
@@ -25,10 +25,6 @@ stable: never renumber, only add. Item status is one of *Proposed*, *Accepted*,
 - Full-chip GDS viewing (KLayout / kweb already do this).
 - The solver's voxelized / subpixel-averaged view (deferred to R7).
 - Any sampled or voxelized geometry in the viewer itself (C2).
-- Monitoring a run's progress in the widget; a run started from the widget (R14
-  mode 1) is not streamed or cancellable. It runs in the background so the
-  widget stays interactive (D15), but it shows no progress and cannot be
-  cancelled.
 - _TBD_
 
 ## 3. Workflows
@@ -80,6 +76,16 @@ stable: never renumber, only add. Item status is one of *Proposed*, *Accepted*,
 - **C5. Units.** Coordinates are in µm. The wire format uses float32 measured
   from a local origin (the box center), because absolute float32 loses nm
   precision at chip scale.
+- **C7. fdtdx 0.6.3.** The viewer tracks fdtdx **0.6.3** (`betterfdtd` env).
+  Since 0.6.2: `SimulationConfig` takes `grid=UniformGrid(spacing=...)` (no
+  `resolution=`), `config.uniform_spacing()` returns the grid spacing (works on
+  uniform and rectilinear grids; a non-uniform grid raises `ValueError`),
+  `place_objects` returns a 5-tuple `(objects, arrays, params, config, info)`,
+  `run_fdtd` returns `(timestep, arrays)`, and PML coefficients are derived
+  during `place_on_grid`. Importing gdsfactory enables jax x64 globally, so
+  fdtdx derives the PMLs' CPML coefficients as float64; `sim.run` re-casts
+  them to `config.dtype` (otherwise the CPML update promotes the float32 psi
+  fields and `eqxi.while_loop` rejects the changed structure).
 
 ## 5. UI layout (sketch)
 
@@ -126,7 +132,10 @@ global settings.
   material, `zmin`, `thickness`, `sidewall_angle`, `bias`, `mesh_order` and
   whether it is a fill level.
 - **Ports:** one row per `StackDevice` port, with a visibility toggle. The
-  properties pane shows the name, center, orientation, width and layer.
+  properties pane shows the name, center, orientation, width and layer. The
+  simulation-volume plane choices (R12) are **not** listed here: they are not
+  ports of the layout, only a placement choice in a source/detector's port
+  dropdown.
 - Selecting an item highlights it in both viewports.
 - Groups have a visibility toggle that applies to all their children.
 
@@ -165,10 +174,17 @@ AC:
   - z-exaggeration, since sub-µm films on 10–100 µm devices are hard to see at 1:1
   - the current 2D slice plane drawn in 3D
   - a settings screen (a gear beside Fit) that replaces the viewport and holds
-    the rotation style, its sensitivity and the full-extent toggle (D14)
+    the rotation style, its sensitivity, the full-extent toggle and the
+    screenshot scope (D14)
   - a "show full extent (unpainted)" toggle, per layer or global, to reveal a
     level that a higher-`mesh_order` level covers everywhere (Q13)
-  - a "save image" button that writes the active viewport to a PNG (D14)
+  - a **camera** button (a screenshot icon) that writes a PNG (D14). It saves
+    the **active viewport** by default; the settings' screenshot scope makes it
+    save the **whole widget** instead, and the settings' save-to row makes it
+    write to the **browser** (download) or the **kernel** (a file beside the
+    notebook, into a folder the save-folder field sets). The scope and the save
+    target are per-viewer preferences kept in the browser (localStorage), not
+    kernel state; the folder itself is kernel state (`save_dir`).
 
 AC:
 - Hiding `oxide` reveals the `lower` and `upper` SiN levels and their vertical offset.
@@ -199,6 +215,11 @@ AC:
   - outlines of ports that cut the plane
   - a hover readout of coordinates and the level/material under the cursor
   - a "save image" button that writes the canvas to a PNG (D14)
+  - a **plane fade** setting: the gaussian 1/e distance with which ports,
+    source/detector glyphs and field overlays fade with distance from the
+    section plane, as a **fraction of the box size along the section's normal**
+    (`plane_fade_frac`, default 0.05). The same fraction serves every plane,
+    since each plane's normal size scales it.
 
 AC:
 - An xz section through the overlap region of F1 shows:
@@ -223,10 +244,28 @@ setup; it is not a run launcher (see §2).
 - **Double-click to add.** In the **3D viewport only**, double-clicking a port
   glyph adds a default detector (a `ModeOverlapDetector`) on that port. Adding
   a source is explorer-driven (a "New source" control on the Sources tab).
+- **Volume planes as port choices.** The port list also offers three virtual
+  ports — `xy`, `xz` and `yz` — for the plane through the **center of the
+  simulation volume** parallel to those faces. They are *not* ports of the
+  device (`StackDevice.ports` is untouched): a source or detector may be placed
+  on one exactly as on a port. A plane's width and height are the volume's own
+  in-plane extents, so `port_size_mult = (1, 1)` fills the whole simulation
+  plane. A plane defaults to `(1, 1)` for this reason — a port's default
+  multiplier would overflow the volume.
 - **Parameters editable in the explorer.** Each added object is a row whose
   properties are editable: the port, the object type, `port_offset`,
   `port_size_mult`, the wavelength(s), `direction`, `level` and `name`.
   Changing `port_offset` moves the object's glyph in the viewports live.
+- **`level` sets the object's height, on a plane as well as a port.** A level
+  name puts the plane at the **middle** of that level's z span (a port uses the
+  union of the levels that draw its layer; a plane uses the one level named).
+  The `level` list also offers **`z_center`**, the simulation volume's own
+  mid-height: on a plane it pins the plane to the volume's center rather than a
+  level's span, and on a port it moves the plane's z to the volume's center
+  while keeping the level's height. The empty choice is `z_center` for a plane
+  and the layer union for a port. On the `xy` plane, whose normal is z, `level`
+  is the plane's position; on `xz` / `yz` it is the plane's in-plane vertical
+  center.
 - **Declarative, not eager.** The widget stores each object as a *spec* (its
   type, port and parameters). It does **not** call `stack.create_*_at` when the
   object is added or edited. `create_*_at` is called only when the user
@@ -246,6 +285,17 @@ AC:
   `create_*_at` call.
 - Calling the retrieval method on the widget returns an object and constraints
   that `fdtdx.place_objects` accepts (checked in a test, no FDTD run).
+- The port list offers `xy`, `xz` and `yz`; `StackDevice.ports` is unchanged
+  (checked in a test). Adding a source on `xy` with the default size yields a
+  plane spanning the whole simulation volume, and `place_objects` accepts it.
+- A plane's `level` moves it: `level=lower` on F1 puts the `xy` plane at
+  z = −0.17 µm and `level=upper` at +0.10 µm; `z_center` and the empty choice
+  put it at the volume's mid-height (checked in a test).
+- In 2D, a source/detector glyph whose plane is **parallel** to the section
+  fades with the same gaussian as the ports (R4), and one whose plane **crosses**
+  the section is drawn only where the section's position lies within the glyph's
+  own extent along the section normal — a mode plane source on `o1` does not
+  appear at every z in the `xy` view.
 
 ### R13. Simulation settings: *Must*
 
@@ -258,9 +308,18 @@ editable fields:
   sources/detectors (R12, Q18).
 - **PML / boundary** — the boundary thickness (e.g. the `BoundaryConfig` the
   run would use; `fdtdx.BoundaryConfig.from_uniform_bound(thickness=...)`).
+- **`boundary_offset`** — the box's six face offsets, `(x+, x-, y+, y-, z+, z-)`
+  in µm, as three signed pairs (x, y, z). Each value moves its face of the
+  `StackDevice` box along the axis, positive towards +x, +y or +z, so
+  `(1, -1, …)` grows the box by 1 µm on each x side. The geometry does not
+  change; the viewports re-box live (see the AC below). A box that would
+  collapse (a face past its opposite) is refused.
 - **Simulation config** — the fields that affect the grid, notably resolution
   and time (`fdtdx.SimulationConfig`). These also feed Q8's slider step and
-  Q18's derived defaults.
+  Q18's derived defaults. A numeric field shows its value in display units and
+  converts only when it is sent to the kernel (the time field shows fs while
+  the kernel stores s), so the text the user typed is never rewritten by a
+  unit round-trip.
 
 Edits are local state (D10/D11); nothing is placed or run (§2).
 
@@ -269,6 +328,10 @@ AC:
   `wave_characters` of a subsequently added detector.
 - The PML thickness field, when set, is included in the prepared constraints on
   retrieval (D11).
+- Editing `boundary_offset` re-boxes the device in the kernel and re-sends the
+  `geometry`/`meta` payloads, so both viewports (3D meshes and the 2D
+  cross-section) update live, without a run; the section slider range follows
+  the new box and a slider parked outside it is clamped back in.
 
 ### R14. Run the simulation, three ways: *Must*
 
@@ -276,15 +339,14 @@ From the same prepared setup (R12, R13), the widget offers three ways to run,
 increasing in separation from the session:
 
 1. **In the widget.** A "Run" action places and runs in the kernel the widget
-   already occupies (C1: on the compute node) and returns the results. The run
-   is **started in the background** (a worker thread, D15), so the widget stays
-   interactive: the user keeps switching tabs, the viewports and the explorer
-   while it runs. The setup is **locked while a run is in flight** (D15) — the
-   controls that edit it are disabled, and the kernel rejects edits regardless
-   (a spec's "read-only while running" is enforced in Python, not just in the
-   UI). There is no progress streaming and no cancel (§2). The kernel's
-   allocation must be sized for the run — a run that needs a GPU must be in a
-   GPU allocation, which the notebook session must already be.
+   already occupies (C1: on the compute node) and returns the results. It
+   **blocks** the worker thread until done, and the same button **stops** it
+   while it is in flight (D17). It **does** report progress:
+   fdtdx's `run_fdtd` is driven with a `progress_callback`, and the widget shows
+   a progress bar (D15) beside a label naming the current phase. The kernel's
+   allocation must be sized for the run — a
+   run that needs a GPU must be in a GPU allocation, which the notebook session
+   must already be.
 2. **Export.** The widget returns the prepared `objects`, `config` and
    `constraints` as Python values, for the user to place and run themselves
    (`fdtdx.place_objects`, `apply_stack`, `fdtdx.run_fdtd`). This is D11's
@@ -301,17 +363,143 @@ need the setup to be reproducible in-process; mode 3 emits code that the user
 runs alongside their own device-building code.
 
 AC:
-- Mode 1's run does not block the kernel: with a run in flight, a viewport or
-  tab interaction still redraws (checked in a test with a stubbed runner, no
-  FDTD run).
-- While a mode-1 run is in flight, a `set_state` edit is rejected in the kernel
-  and the setup is unchanged when the run finishes (checked in a test with a
-  stubbed runner).
 - Mode 2's returned `objects`/`config`/`constraints` are accepted by
   `fdtdx.place_objects` in a test (no FDTD run).
 - Mode 3's returned code, appended to a script that defines `stack`, builds the
   same object list as mode 2 (compared in a test; the script need not run the
   FDTD in CI).
+- Mode 1's run is off-thread (`.run()` returns before the run finishes), locks
+  the setup while in flight, and mirrors fdtdx's `progress_callback` into the
+  `progress` trait, along with the run's phase into the `phase` trait (both
+  checked in a test).
+- Mode 1's run can be stopped (D17): a stop ends the run, unlocks the setup, and
+  either discards the partial result (the default) or keeps it, according to the
+  settings (checked in a test).
+
+### R15. Detector field overlays: *Must* (promoted from R8, 2026-10-14)
+
+A detector that recorded a field can shade its plane in both viewports from the
+last result. The overlay is drawn **on the detector's own plane**, in the plane's
+(u, v) frame, so it lines up with the glyph the pre-placement view already draws
+(R12). A detector with no result yet, or whose result has no field, keeps its
+plain translucent glyph; once a field is shown, the glyph's translucent fill is
+**replaced** by the field (the detector's outline still marks its extent).
+
+- **Where the field comes from.** The last run's
+  `result.arrays.detector_states[name]` (R14 mode 1), or a result the user
+  supplies (see *Supplying a result* below). Each detector's own array is shaded
+  on its own plane — no cross-detector interpolation.
+- **The payload's axis order is (v, u).** `field_payload` drops the detector
+  plane's normal axis (whichever axis has extent 1) and sends the remaining two
+  transposed so the buffer is **row-major in (v, u)** — v is the plane's own
+  second axis (the vertical screen axis: `z` for an `xz` plane) and u its first
+  (`x`). `grid` is `[rows = len(v), cols = len(u)]`, so a wide xz plane sends
+  `[75, 450]` for a 450×75 phasor. Both viewports index the buffer row-major in
+  (v, u), and the 2D blit flips the raster so v row 0 lands at the low-v screen
+  edge; a u-major payload would render the field transposed.
+- **Per-detector display settings, editable in the explorer.** Each detector row
+  on the **Detectors** tab gains a **display** group, one value each:
+  - **`field_component`** — which component of the recorded field to plot, from
+    the detector's own `components` (a `PhasorDetector` records the subset the
+    user asked for; a `ModeOverlapDetector` always records all six `Ex, Ey, Ez,
+    Hx, Hy, Hz`). Default: the first component the detector recorded. The list
+    also offers **`|E|`**, a pseudo-component: the total electric-field
+    magnitude, `sqrt(|Ex|² + |Ey|² + |Ez|²)`, computed from the recorded `E`
+    components (it is offered only when the result recorded any). It is derived
+    in the browser, not sent as a component of its own, and it composes with
+    every transform and ramp like any other component.
+  - **`field_transform`** — one of **`real`, `imag`, `abs`, `phase`, `logabs`**.
+    Default `abs`. `logabs` is `log10(abs(...))` (see *Log and the value floor*).
+  - **`field_color_low`** / **`field_color_high`** — the two endpoint colors of
+    the field's map, chosen per detector. The map depends on the transform (see
+    *The colormap*): the signed transforms (`real`, `imag`, `phase`) use a
+    **color → transparent → color** ramp (`field_color_low` at the low end,
+    transparent at the midpoint, `field_color_high` at the high end); the
+    non-negative transforms (`abs`, `logabs`) use a **transparent → color** ramp
+    (`field_color_high` fading up from the low end). Defaults: a cool blue and a
+    warm red.
+  - **`field_opacity`** — the overlay's overall opacity, 0–1. Default 1. It
+    multiplies the whole overlay's alpha, so the user can fade it without
+    touching the map's shape.
+  - **`field_visible`** — whether the overlay is drawn at all, separate from the
+    detector glyph's own visibility (R12). Default on once a result exists.
+- **Display settings are per-detector, per-session.** They live in the detector
+  spec's params alongside `port_offset` and the rest, are carried on the wire
+  like the other params, and are **never** passed to `create_*_at` (they are
+  display-only, like `visible`, R12). They survive a re-run: they belong to the
+  detector, not to the result.
+- **One view-wide field setting.** `log_range` (default 6 decades) is the bottom
+  of the `logabs` color ramp, shared by every detector's overlay (Q22). It is a
+  view setting, not a detector field, and lives with the other view-wide controls
+  rather than in a detector row. See *Log and the value floor* (D16).
+- **The colormap is the only source of transparency** (D16). Alpha comes from the
+  map's transparent middle, **not** from the field's intensity: there is no
+  separate magnitude-scaled alpha. See *The colormap* below.
+- **Two viewports.**
+  - **3D:** the detector's plane rectangle (already built, `PlaneGlyphs`) carries
+    a texture of the transformed field, with a small colorbar beside the
+    viewport naming the transform and component.
+  - **2D:** when the section plane is **parallel** to the detector's plane, the
+    field is drawn over the detector's (u, v) rectangle in the section canvas,
+    under the region outline and ticks, and it **fades with the same gaussian as
+    the ports** (R4): the overlay's alpha falls off with the section plane's
+    distance from the detector's plane, over `plane_fade_frac`, so a field fades in
+    as its plane is approached rather than popping in. A detector whose plane is
+    perpendicular to the section is not shaded in 2D (its field is a plane, and
+    there is nothing to show off that plane); the 3D viewport still shows it.
+- **Scale is per-plane** (Q21, resolved 2026-10-14). The range that maps onto the
+  colormap is the transformed value's own range over that detector's plane, so
+  two detectors with very different amplitudes are each readable. The colorbar
+  shows the plane's own range. There is no shared scale across detectors.
+
+**Supplying a result.** The widget exposes a setter — `viewer.show_result(result)`
+— that takes a result the user produced themselves (a `RunResult`, R14, or any
+object with the same shape: `.arrays.detector_states`, `.objects`, `.config`) and
+makes it the widget's current result, exactly as a mode-1 run would (R14). After
+it returns, every detector's overlay redraws from it, with no re-run and no
+re-send of the geometry.
+
+- **What it accepts.** The last result of a run the user launched outside the
+  widget (R14 mode 3, or their own script): the common case is a user who ran
+  under `srun` and wants to look at the fields in the widget.
+- **What it validates.** The result's detectors must correspond to the widget's
+  current setup — by name, grid shape, grid spacing and plane position (Q23) —
+  or the setter raises (see the AC below). It does **not** re-place or re-run
+  anything; it only adopts the arrays.
+- **What it does not do.** It does not adopt the result's geometry or its
+  `objects` as the widget's setup — the widget's own stack and specs stay
+  authoritative. A result recorded on a different device is refused rather than
+  silently mis-shaded.
+
+AC:
+- With a result present (from a mode-1 run or `show_result`), a detector's plane
+  is shaded in 3D from `result.arrays.detector_states[name]`, and the colorbar
+  names the component and transform.
+- Changing a detector's `field_component` / `field_transform` /
+  `field_color_low` / `field_color_high` / `field_opacity` re-shades its plane
+  live, with no re-run and no kernel round-trip beyond the state patch (D10).
+- Selecting `|E|` shades the plane with `sqrt(|Ex|² + |Ey|² + |Ez|²)` from the
+  detector's recorded `E` components, through the same transforms and ramps as a
+  real component (checked in a test); it is offered only when the result
+  recorded at least one `E` component.
+- The payload's buffer is row-major in (v, u) with `grid = [len(v), len(u)]`, so
+  an xz plane's `grid` is taller-than-wide only if the plane is (checked in a
+  test): a transposed payload would draw the field rotated.
+- The overlay's alpha comes from the map alone, not from the field's intensity:
+  a signed transform's value at the plane's midpoint is transparent at full
+  `field_opacity`, and an `abs`/`logabs` value at the plane's low end is
+  transparent (checked in a test).
+- Switching the 2D section to a detector's plane shades the field there, faded
+  by the same gaussian as the ports (R4); a section perpendicular to the
+  detector's plane does not shade it.
+- While a field is shown, the detector's translucent fill is gone (its outline
+  remains); turning `field_visible` off restores the plain glyph.
+- `show_result` with a result whose detectors match the setup — name, grid
+  shape, grid spacing and plane position (Q23) — makes it the current result and
+  redraws the overlays; a mismatched result raises and leaves the previous result
+  and the overlays unchanged (checked in a test).
+- A detector with no result, and a result with no field for a detector, both
+  leave that detector's plain glyph (no blank texture, no error).
 
 ### Later candidates (not v1 unless promoted; see Q9)
 
@@ -321,14 +509,161 @@ AC:
   and `dJ/dp` bars per parameter.
 - **R7.** Solver view: voxelized permittivity / material weights from the placed
   fdtdx grid, as an alternative 2D mode (D4b).
-- **R8.** Field overlays from fdtdx detectors (F1's `field` detector records the
-  xz plane through the taper axis).
+- **R8.** Field overlays from fdtdx detectors. *Promoted 2026-10-14:* built as
+  **R15**, in M4. (F1's `field` detector records the xz plane through the taper
+  axis; R15 shades any detector's plane from the field it recorded.)
 - **R9.** Optimization history playback (scrub logged parameters per iteration).
 - **R10.** Full-chip 2D via `kweb` (already the `cad` extra).
 - **R11.** Simulation volume display (PML thickness is set on the Simulation
   tab, R13):
   - translucent volume box in 3D and outline in 2D, with visibility toggles
   - open: also show the PML boundaries in the viewports?
+
+### R16. Adopting a foreign completed result: *Must* (2026-10-16)
+
+A user (or agent) with a **completed** fdtdx simulation — their own
+`StackDevice`, source and detectors created directly with fdtdx, never through
+the viewer's placeholders — can display it in the viewer via a kernel-side API,
+without re-authoring the setup:
+
+- **`Viewer.load_result(objects, arrays, config, stack=None, *, settings=None)`.**
+  The three pieces fdtdx hands out (`place_objects` returns the objects/config,
+  `run_fdtd` the arrays) pass straight through; the widget's own `RunResult`
+  passes as `load_result(*result)`. `show_result` keeps its stricter,
+  name-matched contract unchanged.
+- **Lenient validation.** Refused only what can never render: missing
+  `arrays.detector_states`, missing `objects.detectors`/`objects.volume`, a
+  non-positive `config.resolution`, a phasor detector that is not a plane, a
+  phasor whose grid shape disagrees with its placement, or a `stack` whose box
+  disagrees with the result's grid by more than one cell. Everything else is
+  accepted — the goal is to display, not to gate.
+- **Two worlds (R17).** The result never replaces the editor's setup: it
+  installs a **result world** — a separate `ViewerState` built from `stack`
+  (default: the stack it was built from) with its own adopted specs, styles and
+  cached geometry — that only the Result tab shows. The editor's stack, specs
+  and level styles stay authoritative and untouched.
+- **Phasor-family overlays only.** Detectors with a `"phasor"` state key
+  (`PhasorDetector`, `ModeOverlapDetector`) shade (R15); every other detector
+  is listed with a plain glyph and is selectable but never shaded.
+- **Run lock.** `load_result` while a run is in flight raises `RuntimeError`
+  (D15). A refused result raises `ValueError` and leaves the previous result,
+  specs and overlays untouched.
+- **After adoption a later `run()` is effectively fresh**: the adopted
+  detectors are read-only descriptions of the foreign result and are excluded
+  from `build_objects` (D18).
+
+AC:
+- A foreign result whose stack differs from the viewer's is loaded by passing
+  `stack=...`; switching to the Result tab shows the new box and the adopted
+  specs, while the editor views keep the viewer's own stack and specs
+  (checked in a test and kernel-side against a live foreign result,
+  2026-10-16).
+- A result missing `detector_states` raises and leaves the previous result and
+  overlays unchanged (checked in a test).
+- `load_result` during a run raises `RuntimeError` (checked in a test).
+- Adopted specs round-trip through the wire as valid `SpecPayload`s (checked in
+  a test).
+
+### R17. Result tab with a frequency slider: *Must* (2026-10-16)
+
+The explorer gains a fourth tab, **Result**, that holds each detector's field
+*plotting* options (the `field_*` group) for every detector in the last result
+— the widget's own runs and adopted foreign results alike — instead of the
+Sources/Detectors tab, which keeps authoring params only.
+
+- **Two worlds, one wire.** A result installs its own `ViewerState` (the
+  *result world*) beside the editor's; the active tab routes which world the
+  single `geometry`/`meta`/`section`/`state` traits carry. The Result tab
+  shows the result world (its geometry, its level styles, the adopted specs);
+  every other tab shows the editor's, unchanged. On a tab switch the whole set
+  is re-sent, `state` first so a rebuild sees the world's styles.
+- **Shading only on the Result tab.** The field payload rides along whenever a
+  result exists, but the browser shades only while the Result tab is active —
+  the editor's views never show field overlays.
+- **Frequency slider.** A multi-frequency detector (a `PhasorDetector` with
+  several `wave_characters`) gets a slider selecting which frequency frame is
+  shaded, with a readout of the frequency in THz. The kernel sends **all**
+  frames in the payload (`freqs` in Hz plus the full `(num_freqs, v, u)`
+  buffers); the browser slices locally, so a slider move re-shades with no
+  kernel round-trip. Single-frequency detectors get no slider.
+- The controls write the same `field_*` params (plus the new `field_freq` and
+  `field_outline`), so shading, the colorbar and persistence work unchanged; a
+  single detector yields the same UI with one section, and no result shows a
+  short note.
+- **Collapsible sections (2026-10-16).** Each detector's section is a
+  `gfx-spec` card like the Sources/Detectors rows: a twisty collapses the
+  controls (view-only state, kept across re-renders), and the section header
+  carries the visibility checkbox **unlabeled before the name** — it writes the
+  spec's `visible` param, so unchecking hides the whole detector (glyph, 2D
+  shading and colorbar entry), not just the overlay. A `field_outline`
+  checkbox (default on) toggles the outline drawn around the plane while it is
+  shaded.
+- **Sources section.** The result world's adopted sources are listed under a
+  Sources heading — one read-only row each, an unlabeled visibility checkbox
+  writing `visible` on the adopted source's spec, then its name. Adoption now
+  covers `objects.sources` as well as detectors (the same "None"-port spec,
+  glyph from the placed `grid_slice`, no field params).
+- **Layers section.** The Result tab opens with its own **Layers** section —
+  one compact row per shaded detector, styled like the editor's Layers tab:
+  show checkbox, color swatch (the ramp's high color) and opacity slider. It
+  styles the *result overlays* only and shares the same `field_visible` /
+  `field_color_high` / `field_opacity` params as the per-detector section
+  below it, so the two views stay in sync through the kernel round-trip. The
+  editor's level colors (the Layers tab on Layout/Ports) are untouched.
+
+AC:
+- A multi-frequency payload carries every frame, `freqs` from the detector's
+  wave characters, and `freq = 0` by default (checked in a test).
+- `field_freq` round-trips through the spec patch path like the other
+  display params (checked in a test).
+- A single-frequency payload's buffers are unchanged in layout — one frame
+  (checked in a test; the whole R15 field suite guards this).
+- A Layers-row patch (`field_visible`/`field_color_high`/`field_opacity`)
+  round-trips on an adopted spec too — display params are allowed there
+  (checked kernel-side against a live adopted result, 2026-10-16).
+- A tab switch re-sends the active world's `geometry`/`meta`/`section`/`state`:
+  Result carries the result world's box and adopted specs, the editor tabs the
+  viewer's own (checked kernel-side against a live foreign result with a
+  different box, 2026-10-16).
+- Field shading appears only while the Result tab is active (checked kernel-side:
+  the payload is published on any tab, the browser's `applyFields` gates on
+  `state.active_tab === "result"`).
+- A Result-tab display edit (field params on a detector, `visible` on a source)
+  is routed to the result world while its tab is active, and to the editor's
+  setup otherwise — the same update_spec event serves both tabs (checked in a
+  test: `test_result_tab_routes_source_visibility_to_the_result_world`).
+- Adoption covers sources: one adopted spec per placed source with a
+  grid-derived glyph and no field params (checked in
+  `test_adopt_result_adopts_sources_with_visibility`).
+
+### R18. "None" port: absolute placement: *Must* (2026-10-16)
+
+A source/detector's port select gains a **"None"** choice that replaces the
+port-dependent controls with absolute placement params: `axis` (the plane's
+normal, 0/1/2 = x/y/z), `center` (x, y, z in µm, stack coordinates) and `size`
+(in-plane extents in µm; plane types only). Point types (dipole) take `center`
+only.
+
+- The placement constraint mirrors `StackDevice._place_at`: margins from the
+  stack box center to `center`, so absolute and port-frame placement land in
+  the same frame and resolve through the same `place_objects`.
+- **Mode sources/detectors work on any plane** — the mode solve runs on the
+  permittivity cross-section the placed plane cuts (`mode.py` →
+  `compute_mode`), not on a port. Caveat: a plane cutting nothing guided yields
+  radiation modes (`mode_index`/`filter_pol` index those) — a user-facing note,
+  not a restriction.
+- Adopted foreign detectors use the same representation, read-only (D18), so
+  the two features share one path.
+
+AC:
+- A "None"-port detector's glyph sits where the params say (in the meshes'
+  local frame) and moves when `center` is edited (checked in a test).
+- The constraint resolves through a real `place_objects` to the requested
+  center, within grid snapping (checked in a test).
+- A port-placed detector and an absolute one at the same center land on the
+  same grid cells within one cell (checked in a test).
+- Switching back to a real port restores the port-frame path (checked in a
+  test).
 
 ---
 
@@ -579,9 +914,9 @@ by returning launch code. All three come from one prepared setup, so the design
 question is only how the setup travels to the run.
 
 - **Mode 1 (in the widget).** Run in the kernel the widget occupies (D10), on the
-  compute node (C1). The run goes to a background worker thread so the widget
-  stays interactive, and the setup is locked while it runs (D15). No streaming,
-  no cancel (§2).
+  compute node (C1). Blocks the worker thread; the Run button toggles to Stop
+  while it is in flight (D17). Progress is streamed from fdtdx's
+  `progress_callback` (D15), along with the run's phase.
 - **Mode 2 (export).** Return the prepared `objects`, `config` and `constraints`
   as Python values.
 - **Mode 3 (launch code).** Return a self-contained snippet of Python the user
@@ -663,73 +998,317 @@ Three related viewport additions made while implementing M3.
   plane was left. The z multiplier is **shared** between the two viewports — one
   menubar slider drives both — and it does **not** affect the xy plane, whose
   vertical axis is y, not z.
-- **Save image.** A save button (floppy-disk glyph) writes the active viewport
-  to a PNG: the 3D renderer's canvas or the 2D canvas.
+- **Save image.** A save button (a camera glyph, the screenshot icon) writes a
+  PNG of the active viewport: the 3D renderer's canvas or the 2D canvas. The
+  settings screen's **screenshot scope** switches it to capture the **whole
+  widget** instead — the menubar, explorer and viewport together — via
+  `html2canvas`, with the viewport canvas as a fallback if that capture fails.
+  The widget root lives in a shadow root in marimo, which html2canvas cannot
+  clone, so the capture first copies the shell into the light DOM with three
+  fixes: the widget's own `gfx-` rules are re-inserted inside the clone (they
+  are `adoptedStyleSheets` the clone does not inherit); each `<canvas>` is
+  replaced by an `<img>` of its current pixels (the 3D renderer keeps its
+  drawing buffer via `preserveDrawingBuffer`, so `toDataURL` is not blank); and
+  the clone is laid out on screen at the origin behind the page
+  (`z-index: -1`), since `foreignObjectRendering` only paints elements the
+  browser actually lays out. The capture uses html2canvas's
+  `foreignObjectRendering` mode because the host notebook's own stylesheets
+  share the document and html2canvas 1.4.1's color parser throws on the modern
+  color functions they use (`color()`, `oklch()`, `color-mix()`,
+  `light-dark()`), aborting the capture — the browser-native path sidesteps that
+  parser, and an `onclone` hook clears the document's `html`/`body` backgrounds,
+  which `parseBackgroundColor` reads before that path. The scope defaults to the
+  viewport alone and is a per-viewer preference in the browser (localStorage),
+  not kernel state.
+
+  A second settings row, **save to**, chooses where the image lands. The default
+  is **browser**: the PNG downloads as before. **Server** hands the image to the
+  kernel instead — the browser sends the data URL in a `save_image` message, and
+  the kernel writes the file under the `save_dir` trait (the process working
+  directory, or whatever `view(stack, save_dir=…)` was given), appending a
+  `-1`, `-2`, … suffix rather than overwriting an existing file. The written
+  path is synced back in the `save_result` trait and shown as a brief message
+  over the widget, so a server write is not silent. Like the scope, this is a
+  per-viewer preference in localStorage, not kernel state.
+
+  In server mode a **save folder** field sets that directory. A browser cannot
+  browse the kernel's filesystem, so the field is a path string: the kernel
+  resolves it (a relative path nests under the current folder), creates it, and
+  syncs the resolved absolute path back into the `save_dir` trait, which the
+  field reflects — so a bad or unwritable path is reported at once, not on the
+  next save. `save_dir` is the source of truth, so a kernel-side change to it is
+  picked up too.
 - **Implemented in M3** (`js/viewer/scene.ts`, `section.ts`, `index.ts`;
   `gdsfactory/viewer/state.py`).
 - **Relates to R3, R4, D9, D10, Q8.**
 
-### D15. Mode 1 runs in the background, and the setup locks while it runs: *Proposed* (2026-10-13)
+---
 
-A mode-1 run (R14) must not freeze the widget, and the user must not be able to
-change the setup while it runs. Both are possible because the widget already
-keeps the kernel out of the render loop:
+### D15. The run streams progress on a background thread: *Accepted* (2026-10-13)
 
-- **Rendering is client-side (D10).** The browser holds the meshes and draws the
-  viewports with WebGL; the kernel sends mesh buffers once and only small JSON
-  afterwards (`state`, `section`). Orbiting, switching tabs and scrubbing a
-  section need no kernel call, so they keep working while the kernel is busy.
-- **The only thing that blocks is `.run()` on the kernel's main thread.** A
-  long FDTD call there stalls the kernel, and a stalled kernel also blocks
-  notebook-cell input. The fix is to start the run on a **background worker
-  thread** and return immediately.
+Mode 1 (R14) runs the simulation in the widget's own kernel. Two things follow
+from that, both settled here.
 
-**Two parts:**
+- **Off the kernel's main thread.** `.run()` returns immediately and the
+  simulation runs on a daemon thread, so the widget stays interactive while it
+  works. The setup is **locked** for the duration — `state['running']` is true
+  and the kernel rejects setup edits (`sources`, `detectors`, `simulation`),
+  since the run has already captured its `objects`/`config`/`constraints`. Read-
+  only edits (viewport, styling, tab switches, plane position) stay live, and so
+  does **collapsing and expanding a source/detector row** — the twisty is view
+  state, not a setup edit.
+- **Progress is streamed.** fdtdx's `run_fdtd` takes a `progress_callback(step,
+  total)`, so the widget passes one and mirrors it into a synced `progress`
+  trait (`{"step", "total"}`, `{}` when idle). The browser draws it as a
+  **progress bar** in the menubar, beside Run: determinate once `total` is
+  known, an indeterminate sweep before that. Passing a callback also turns
+  fdtdx's own tqdm bar **off** (`show_progress=False`), so the two do not
+  compete for the same output.
+- **The phase is named.** A fraction alone is misleading here: placement and JAX
+  compilation dominate a run's wall time and fdtdx reports no progress for
+  either, so the bar sits in its indeterminate sweep for most of it. `run`
+  therefore also takes a `phase` callback and calls it with `"placing"` (build
+  and place the objects), `"compiling"` (inside `run_fdtd` before the first time
+  step), then `"stepping"` (time-stepping, where `progress` fires — flipped from
+  inside the same callback on its first call). The widget mirrors it into a
+  synced `phase` trait (`""` when idle) and the browser shows it as a short
+  label **to the left of the bar**.
+- **The run can be stopped.** Run **becomes** Stop while a run is in flight (the
+  icon and title swap in place). Pressing it sets a cancel flag the worker
+  watches; the button disables and the phase label reads **"stopping…"** until
+  the worker unwinds and clears `running`. The stop lands at the next time step
+  or, if the run is still placing or compiling, at the next phase boundary — see
+  D17 for the mechanism and the partial-result setting.
+- **Implemented in M4** (`gdsfactory/viewer/widget.py`, `sim.py`;
+  `js/viewer/index.ts`, `style.css`).
+- **Relates to R14, D10, D12, D17, Q20.**
 
-1. **Non-blocking run.** `.run()` starts the placement/run on a `threading.Thread`
-   and returns at once. The widget stays interactive: the user can orbit, switch
-   viewports and switch explorer tabs while the run proceeds. There is still no
-   progress and no cancel (§2) — the run is a black box that ends.
-2. **Read-only setup while running.** A synced `running` flag is set when the
-   run starts and cleared when it finishes (the worker's `finally`). While it is
-   set:
-   - the frontend **disables the controls that edit the setup** — the Sources
-     and Detectors tabs (R12) and the Simulation tab (R13) — so an edit cannot
-     be started; and
-   - the kernel **rejects any state edit**, independent of the UI. The widget
-     already funnels every browser edit through one method (`Viewer._on_msg`,
-     `widget.py`), which applies a patch to `ViewerState` and re-syncs the
-     canonical state back (D10). A `running` guard at the top of that method —
-     alongside the existing "a bad patch leaves the state unchanged" path —
-     re-syncs the state unchanged and never calls `apply_patch`.
+---
 
-**Why the kernel is the authority.** The UI disable is convenience; the
-`_on_msg` guard is the guarantee. A browser that ignored the disabled controls
-still cannot mutate the setup, so a run's inputs are frozen for its whole
-duration and its result stays consistent with the setup the user saw at launch.
-The run reads the same `ViewerState` and the same specs (D11) that retrieval
-uses, so there is no second copy to fall out of sync.
+### D16. The field overlay is a two-color map with a transparent end: *Accepted* (2026-10-14)
 
-**What stays live while running:** tab switches, both viewports (orbit, pan,
-fit, section scrubbing, layer-color/opacity edits and visibility toggles — none
-touch the setup) and the settings screen. What is frozen: adding/editing a
-source or detector, and editing the Simulation settings.
+R15 draws a detector's field on its plane. Two questions were open: what the
+**color** ramp is, and what the second channel, **alpha**, should encode.
 
-**Implementation surface:** a `running` trait on `Viewer` (`widget.py`), a
-guard in `_on_msg`, and a `.run()` that spawns the worker and toggles `running`;
-frontend disabled-state on the two authoring tabs (`js/viewer/explorer.ts`).
-The kernel reports the run's outcome (and, once Q20 is settled, its results)
-back to the browser the same way the other traits sync (D10) — a trait update
-from the worker, not a new channel.
+- **Decision — color and alpha both come from one map.** The overlay maps the
+  transformed component onto a ramp between two user-chosen colors,
+  `field_color_low` and `field_color_high`, with a **transparent** region. The
+  ramp's shape depends on whether the transform is signed:
 
-**Open:** how the result reaches the user — the mode-1 result's type and where
-it lives is Q20; whether the run writes results to a file is Q20/Q19; how a
-worker thread interacts with JAX/`fdtdx` device state on the compute node (a
-threading concern, not a widget one) is Q21. Also open: whether `.run()` is
-callable only from the widget's Run action, or also from a notebook cell while
-the widget shows the lock.
+  - **Signed transforms** (`real`, `imag`, `phase`) get a **color → transparent →
+    color** ramp: `field_color_low` at the low end of the plane's range,
+    transparent at its midpoint, `field_color_high` at the high end. The midpoint
+    is the natural zero of a signed quantity, so a near-zero region reads as
+    "nothing here" and the two signs take the two colors.
 
-- **Relates to R14, D10, D11, D12, §2, Q18, Q19.**
+    ```
+    t(u, v)  = (value(u, v) - min) / (max - min)      # the plane's own range
+    color    = mix(low, high, t)                      # low at t=0, high at t=1
+    alpha    = |2t - 1|                               # 0 at the middle, 1 at each end
+    ```
+
+  - **Non-negative transforms** (`abs`, `logabs`) get a **transparent → color**
+    ramp: transparent at the low end of the plane's range and `field_color_high`
+    at the high end (a single hue fading up from nothing), since there is no
+    signed midpoint to punch out.
+
+    ```
+    t(u, v)  = (value(u, v) - min) / (max - min)
+    color    = mix(transparent, high, t)
+    alpha    = t                                      # 0 at the low end, 1 at the high end
+    ```
+
+  The `field_opacity` setting multiplies the whole map's alpha, so the user can
+  fade the overlay without changing its shape.
+- **Alpha is the map, not the intensity.** This is the load-bearing change: the
+  overlay's transparency is **not** a separate function of `|field|`. An earlier
+  draft scaled alpha by the local magnitude (bright field opaque, weak field
+  faint); that is dropped. The only thing that decides a cell's alpha is where
+  its *transformed value* sits on the plane's range — a cell at the midpoint is
+  transparent no matter how large the field is there, and a cell at either end is
+  fully opaque no matter how small. Color and alpha read from the same number, so
+  the picture never disagrees with itself.
+- **Why this beats a magnitude alpha.** A magnitude-scaled alpha encodes a second
+  quantity (how much field) on top of the color (the value), and the two fight:
+  a strong field at the range's midpoint would be drawn faint, and a weak field
+  at an end would be drawn solid, which reads as a rendering bug. With one map,
+  the colorbar tells the whole story — position on the ramp is color *and*
+  opacity at once.
+- **Per-plane normalization** (Q21, resolved). `min` and `max` are over that
+  detector's plane only (R15), so the ramp always spans the plane's own range and
+  two detectors with very different amplitudes are each readable. Comparing
+  amplitudes *between* detectors is the colorbar's job. There is no shared scale.
+- **`logabs` and the ramp.** `logabs` is a transform on the *value* the ramp is
+  applied to: `log10(|field|)`, over the plane's own `log10(|field|)` range. Its
+  values are non-negative, so the low end of the ramp is the field's smallest
+  magnitude and the high end its largest; the transparent middle is the geometric
+  midpoint of the plane's log range. Because `log10(0)` is `−∞`, `logabs` floors
+  at a **global** dynamic range (Q22, resolved; default 6 decades) below the
+  plane's maximum, so a true zero maps to the floor rather than to `−∞`.
+- **The fill is replaced, not overlaid.** Once a detector shows a field, its
+  plain translucent plane fill (R12) is dropped — the field is what fills the
+  rectangle. The detector's outline still marks its extent, and turning
+  `field_visible` off restores the plain translucent glyph.
+- **Which ramp a transform gets.** `real`, `imag` and `phase` are signed, so
+  they take the color→transparent→color ramp and their zero reads as the
+  transparent middle. `abs` and `logabs` are non-negative, so they take the
+  transparent→color ramp: a single hue (`field_color_high`) fading up from the
+  low end of the plane's range. `field_color_low` is unused by the
+  non-negative transforms (the transparent end stands in for it).
+- **2D fades like the ports.** In the section canvas the overlay's alpha is
+  multiplied by the same gaussian the ports use (R4): `exp(-½ (d / fade)²)` with
+  `d` the section plane's distance from the detector's plane and `fade` the
+  1/e distance derived from the state's `plane_fade_frac`. A field therefore
+  fades in as its plane is approached,
+  matching how a port outline fades — one fade rule for the 2D viewport.
+- **What alpha does not do.** It is not depth cueing and not a selection
+  highlight; those are separate. The detector glyph's own opacity (R12) is
+  superseded for a detector showing a field (above) and unchanged otherwise.
+
+**Implemented in M4** (`js/viewer/section.ts`, `glyphs.ts`, `index.ts`;
+`gdsfactory/viewer/fields.py`, `payload.py`). **Relates to R15, R12, R4, Q21, Q22.**
+
+---
+
+### D17. Stopping is a cooperative loop-condition exit: *Accepted* (2026-10-15)
+
+D15 streams progress from inside the run; the natural place to *abort* one is the
+same callback, by raising from it. That works — the raise propagates out of the
+traced JAX loop — but it **cannot produce a partial result**: the raise unwinds
+the loop *before* `run_fdtd` returns, so no arrays come back. Since the user
+wants a setting to *keep* a stopped run's partial fields (below), the stop goes
+through fdtdx's own loop condition instead.
+
+- **Decision — stop via `stopping_condition`, not `progress_callback`.** fdtdx's
+  `run_fdtd(..., stopping_condition=...)` takes a `StoppingCondition` whose
+  `__call__(state, config, objects)` returns whether to keep looping. That is the
+  `eqxi.while_loop`'s own condition, so ending it is a **normal loop exit**:
+  `run_fdtd` returns the arrays, and the detectors' readings survive up to the
+  stopping step. This is what makes `keep_partial` meaningful.
+- **Exact, at one host read per step.** `CancelCondition` ANDs in
+  `jax.experimental.io_callback(lambda step: flag.is_set(), ...)` with
+  `ordered=True`. fdtdx only ever uses `io_callback` in the loop's *body*; using
+  it in the *condition* is legal and makes the stop land on the exact requested
+  step, with no coarse polling latency. **Verified by probe** on CPU (a flag set
+  mid-run at step 5 stopped the loop at step 12; pre-set flags at 0 and 7 stopped
+  at those exact steps). **Benchmarked** on F1 on an L40S (10 490 steps, best of
+  3): the subclass itself costs nothing (−0.0%), and the per-step host read costs
+  **+0.6%** (271.5 s → 272.1 s), so no coarse-modulus gating is needed.
+- **A custom condition replaces the default, so it reproduces the time limit.**
+  `setup()` fills `max_steps` from `config.time_steps_total` (as fdtdx's own
+  `EnergyThresholdCondition` does) and `__call__` returns
+  `max_steps > curr and not stop`. Without this the run would never end.
+  `run_fdtd` raises `NotImplementedError` if a custom condition is combined with
+  `config.gradient_config`; the viewer's config leaves it unset, so this is safe.
+- **Stops between phases too.** The condition covers `stepping`. For `placing`
+  and `compiling`, `sim.run` checks the flag at each boundary inside placement
+  (top of the run, after `build_objects`, after `apply_stack`) and just before
+  `run_fdtd`, raising `RunStopped`. So a stop lands promptly in any phase.
+- **The flag is a `threading.Event`, read on the host.** It is a frozen field on
+  the condition and is never traced, so it may be any Python object with
+  `is_set()`. `_cancel_condition_class()` builds and caches the class once, so
+  JAX sees the same traced computation across runs and does not recompile.
+- **`RunStopped` is the discard contract.** `sim.run(..., cancel=flag,
+  keep_partial=False)` raises `RunStopped` after `run_fdtd` returns; the widget
+  restores the *previous* `last_result` (snapshotted before the run cleared it),
+  so its field overlays stay on screen, and reports `{"status": "stopped"}`.
+  With `keep_partial=True` the run returns its `RunResult` normally and the
+  widget adopts the partial fields as a `"done"` result.
+- **The stop is a trait, and the button is a toggle.** A synced `stopping` bool
+  drives the button: disabled and reading "stopping…" while true. `stop()` is
+  idempotent, a no-op when no run is in flight, and never clears `running` — the
+  worker's `finally` owns that, so the widget never claims a run has ended before
+  it has. A new run gets a fresh `Event`.
+- **The partial-result setting** is `SimSettings.keep_partial` (default `False`),
+  exposed in the Simulation tab as "keep partial run".
+- **Implemented in M4** (`gdsfactory/viewer/sim.py`, `widget.py`;
+  `js/viewer/index.ts`, `explorer.ts`, `wire.ts`).
+- **Relates to R14, D12, D15, R13.**
+
+---
+
+### D18. Adoption rebuilds the ViewerState from the result: *Accepted* (2026-10-16)
+
+How `load_result` (R16) turns a foreign result into display state.
+
+- **A result world per load, never a swap.** The viewer never merges foreign
+  detectors into its live specs, and never replaces its editor state either:
+  the result gets a separate `ViewerState` built from the result's `stack`
+  (default: its own), with fresh default `SimSettings` unless the caller passes
+  `settings=`. The result world carries its own cached geometry/section
+  payloads; the editor's setup, geometry and level styles are untouched and
+  come back untouched when the user leaves the Result tab (R17). The editor's
+  `_prepare` cache is keyed per world, so a stale cache cannot survive the
+  swap either way.
+- **One read-only "None"-port spec per detector.** Every detector in
+  `objects.detectors` (names read from the placed objects — fdtdx may
+  auto-generate) gets a spec with `port == "None"` (R18) whose `axis`/`center`/
+  `size` params describe the placement, in stack µm. The ids live in
+  `state.adopted`:
+  - display edits (`field_*`, `visible`) pass and patch the display settings;
+  - type/port/position edits and removal are refused with `ValueError`, and
+    the refused patch re-syncs unchanged (the D10 contract).
+- **The glyph is the rendered truth.** An adopted spec's glyph is derived from
+  its placed `grid_slice` and the result's resolution (`adopt.glyph_from_grid`),
+  not re-derived from the params — so a detector whose real extent differs from
+  an axis-aligned reading still draws right. The conversion relies on the fdtdx
+  invariant that the volume's grid slices start at 0; if that does not hold the
+  spec falls back to a point glyph at the grid centroid.
+- **Sub-cell accuracy.** Fields live at Yee half-cell offsets per component;
+  the adopted rectangle can be half a cell off the true support. Accepted —
+  below the resolution the grid draws at.
+- **All frames travel.** A multi-frequency phasor's payload carries the full
+  `(num_freqs, v, u)` float32 stacks (R17); a handful of frames is fine, a
+  100-frame detector is ~30 MB per 450×75 plane. Accepted for this cut.
+- **Implemented in M4** (`gdsfactory/viewer/adopt.py`, `fields.py`,
+  `state.py`, `sim.py`, `widget.py`; `js/viewer/explorer.ts`, `wire.ts`,
+  `glyphs.ts`, `section.ts`, `index.ts`).
+- **Relates to R15, R16, R17, R18.**
+
+---
+
+### D19. The Result tab routes worlds by the active tab: *Accepted* (2026-10-16)
+
+How the Result tab (R17) actually operates: one widget, two `ViewerState`s,
+one wire — and every routing decision keyed on the active tab.
+
+- **Two worlds, one wire.** The widget keeps the editor's state
+  (`_viewer_state`) and, once a result exists, a separate result world
+  (`_result_state`, built by adoption, D18). There are still only four
+  routed traits — `geometry`/`meta`/`section`/`state` — and only one value of
+  each on the wire at a time: `active_tab` (carried on the editor state) picks
+  which world each trait is *sent from*. The kernel re-sends the whole set on
+  a tab switch, `state` first, so a browser rebuild sees the incoming world's
+  styles before the geometry it must style.
+- **Which world answers.** While the Result tab is active, a *display* edit
+  arriving as `update_spec` routes to `_result_state`; any other tab routes
+  the same event to the editor's setup. Routing is **by tab, not by id**:
+  editor and result worlds number their spec ids independently (each via its
+  own `_new_id` sequence), so `detector-1` legitimately exists in both, and
+  id-matching could silently patch the wrong world. Setup events
+  (`add_spec`/`remove_spec`/type/port/position edits) always go to the editor:
+  adopted specs refuse them kernel-side anyway (D18). Styles patched from the
+  Result tab's Layers section follow the same rule — they reach the result
+  world's `styles`, never the editor's level colors.
+- **The echo back is the tab's world.** `_wire_state(active)` publishes the
+  active world and — when the result world is published — also echoes the
+  editor's `active_tab` onto the wire, so the browser's
+  `state.active_tab === "result"` gate stays true on a rebuild triggered by
+  the result world's own payload. Without this echo a result-world update
+  would arrive with a stale/non-result `active_tab` and the field shading
+  would silently drop (the bug that motivated the rule).
+- **Browser-side gating only.** The kernel sends the `fields` payload on any
+  tab; the browser decides where shading appears: `applyFields` shades 3D
+  planes and 2D sections and shows the colorbar only while
+  `state.active_tab === "result"` (and per-glyph, only where the glyph is
+  `visible` and `field_visible`). No kernel-side suppression, no extra trait.
+- **Per-world caches.** `_prepare`'s geometry cache is keyed per world
+  (`_prepared` resets on a world swap), so a re-boxed editor device and an
+  adopted result cannot cross-contaminate payloads.
+- **Implemented in M4** (`gdsfactory/viewer/widget.py` `_wire_state` and the
+  `_on_msg` routing; `state.py` `active_tab`; `js/viewer/index.ts`
+  `applyFields`).
+- **Relates to R17, D18.**
 
 ---
 
@@ -796,17 +1375,32 @@ the widget shows the lock.
   whether it writes results to a file (and in what format). *Resolved
   2026-10-12:* the widget emits only the script's tail and assumes `stack` is in
   scope; no device rebuild or serialization.
-- **Q20.** The mode-1 result (R14, D15): what `.run()` returns, and where the
-  results live. Open — candidates: a return value from `.run()` (in the
-  notebook, since the run is now a background thread), a trait synced back to
-  the widget for display, a Python attribute on the `Viewer` read after the run
-  finishes, or a written file (shared with Q19's format question). Not yet
-  specified; M4's mode-1 AC does not depend on it.
-- **Q21.** Mode 1 on a worker thread (D15): whether running `fdtdx`/JAX on a
-  non-main thread on the compute node is safe, and what it needs (a thread
-  affinity, a JAX context, or a process instead of a thread). Open; if a thread
-  is unsafe, the "does not freeze" goal still holds, but the mechanism is a
-  subprocess rather than a thread.
+- **Q20.** *Resolved 2026-10-14:* the widget's result surface (R14, R15). A
+  run's outcome is the `RunResult` on `viewer.last_result` (the fdtdx
+  `objects`/`arrays`/`config`), and `viewer.last_error` holds its exception;
+  detector fields are read from `arrays.detector_states[name]`. R15 adds
+  `viewer.show_result(result)`, which adopts a result the user produced
+  elsewhere under the same surface. The `run_result`/`progress`/`phase` traits
+  are the browser's summary of a mode-1 run, not the data.
+- **Q21.** *Resolved 2026-10-14:* **per-plane.** Each detector's plane is
+  normalized to its own maximum (R15, D16), so two planes with very different
+  amplitudes are each readable and a newly added detector needs no rescaling of
+  the others. The colorbar carries each plane's own range; comparing amplitudes
+  *between* detectors is the user's read of the two colorbars, not a shared
+  scale. There is no cross-detector shared-scale mode.
+- **Q22.** *Resolved 2026-10-14:* **one global setting.** The `logabs` value
+  floor (D16) is a single number for the whole widget, not a per-detector field.
+  It is a color-ramp floor — the bottom of the `logabs` scale, `log10(max) −
+  range` — so one value reads consistently across every detector's plane and the
+  user sets it once. The control lives with the other view-wide settings, not in
+  a detector row. v1 default: 6 decades.
+- **Q23.** *Resolved 2026-10-14:* **strict.** `show_result` (R15) checks the
+  result's detectors against the widget's current setup by **name, per-component
+  grid shape, grid spacing, and the plane's position** — not just name and
+  shape. A result recorded on a re-boxed device (R13) has the same detector
+  names and array shapes but a shifted grid, so a shape-only check would silently
+  mis-place the field; the position check refuses it instead. The setter raises
+  on any mismatch and leaves the previous result and overlays untouched.
 
 ---
 
@@ -823,22 +1417,23 @@ the widget shows the lock.
 - **M2. Explorer and 3D viewport.** R1, R2, R3. Exit: their AC.
 - **M3. Cross-section.** R4 (D4), plus D14's region ticks, settings screen,
   per-plane section state and save-image button. Exit: R4's AC.
-- **M4. Sources and detectors and running.** R12, R13, D11; R14 modes 1 and 2;
-  D15 (background run and the running lock).
-  Exit: R12 and R13 AC, R14's mode-1 ACs (non-blocking, and edits rejected while
-  running) and mode-2 AC.
+- **M4. Sources and detectors, running, and field overlays.** R12, R13, D11;
+  R14 modes 1 and 2; R15 (promoted from R8, D16); R16–R18 (adoption, the
+  Result tab, absolute placement — D18).
+  Exit: R12 and R13 AC, R14's mode-2 AC, and R15's AC.
 - **M5. Launch code and polish.** R14 mode 3 (the tail emitter), then *Should*
   items from R1–R4 and R12.
 
 ## 10. Test fixtures
 
 - **F1.** Elevator coupler: `examples/fdtdx_elevator_coupler.py`,
-  `build_stack(overlap=1.0)`. No simulation objects are needed in v1.
+  `build_stack(overlap=5.0)`. No simulation objects are needed in v1.
   - levels `oxide` (WAFER fill, `mesh_order` 9), `lower` and `upper` (SiN,
     `mesh_order` 1), with `background="air"`
   - ports `o1` and `o2`, each with a 1 µm extension
-  - box: y ∈ [−2, 2] µm and z ∈ [−1.6, 1.4] µm (the example's `domain()`); x is
-    the polygons' extent, extensions included
+  - box: y ∈ [−2, 2] µm and z ∈ [−1.6, 1.4] µm (the example's `domain()`); the x
+    span is `2 * LENGTH - overlap + 2 * (LEAD + EXTENSION)`, so 18 µm at the
+    5 µm overlap (22 µm at 1 µm), centered at x = 7.5 µm (9.5 µm at 1 µm)
 - **F2.** Straight waveguide, 10° sidewalls, with a fill level. Builder `f2_stack()`.
   - component: `gf.components.straight(length=2.0, width=0.5)` on layer `(1,0)`;
     ports `o1`/`o2` at the ends, no extensions
@@ -971,14 +1566,193 @@ the widget shows the lock.
     with the 3D viewport and does not affect the xy plane.
   - Save-image button for the active viewport; added to R3 and R4 *Should*s.
   - Updated R3/R4, D14 and the M3 milestone.
-- 2026-10-13: mode 1 made non-blocking and read-only-locked; added D15, Q20, Q21.
-  - Proposed D15: mode 1 (R14) starts the run on a background worker thread so
-    the widget stays interactive, and locks the setup while the run is in flight
-    — the frontend disables the Sources/Detectors and Simulation tabs, and the
-    kernel rejects state edits in `Viewer._on_msg` regardless of the UI. The
-    kernel is the authority, so a run's inputs are frozen for its duration.
-  - Updated R14 mode 1 and its AC (non-blocking; edits rejected while running),
-    §2, D12's mode-1 bullet and the M4 milestone; the widget "blocks" wording is
-    superseded.
-  - Added Q20 (what `.run()` returns and where mode-1 results live) and Q21
-    (whether `fdtdx`/JAX is safe on a worker thread).
+- 2026-10-13 (later): added D15, streaming the mode-1 run's progress.
+  - Mode 1 runs on a background thread with the setup locked (D15), and mirrors
+    fdtdx's `progress_callback(step, total)` into a synced `progress` trait.
+  - The menubar shows a **progress bar** in place of the old "running…" text:
+    determinate once the total is known, an indeterminate sweep before that.
+  - Narrowed §2's non-goal: mode 1 is still not cancellable, but it now reports
+    progress. Updated R14 (prose and AC) and D12.
+  - Added a **phase label** to the left of the bar: `run` calls a `phase`
+    callback with `placing` → `compiling` → `stepping`, mirrored into a synced
+    `phase` trait. Placement and JAX compilation dominate the wall time and
+    report no fraction, so the label says which phase the indeterminate bar is
+    covering. Updated D15 and R14.
+- 2026-10-13 (later still): menubar polish and screenshot scope.
+  - The save button's glyph is a **camera** (the screenshot icon), and a new
+    settings row, **screenshot scope**, saves the **whole widget** instead of the
+    active viewport. It defaults to the viewport and lives in the browser
+    (localStorage). Updated R3 and D14.
+  - The redundant "gdsfactory viewer" title text is gone from the menubar.
+  - Menubar order is now: 3D, 2D, Fit, the shared **z multiplier**, then a
+    spacer, then the run's phase label and progress bar, Run, Save and Settings.
+  - Fixed the whole-widget capture, which had been saving the viewport: the
+    shell lives in a shadow root html2canvas cannot clone, so it is copied into
+    the light DOM with its `gfx-` rules, its canvases frozen to images, and laid
+    out on screen behind the page. Verified end-to-end in marimo. Updated D14.
+  - Added a **save to** setting: the camera button can write its PNG in the
+    browser (download, the default) or hand it to the kernel, which writes it
+    under `Viewer.save_dir` (`view(stack, save_dir=…)`) and syncs the path back
+    in a new `save_result` trait, shown as a brief message over the widget.
+    Updated R3 and D14.
+  - Added a **save folder** field for server-side saves: the kernel resolves and
+    creates the path, and syncs it back through the now-synced `save_dir` trait.
+    Updated D14.
+- 2026-10-14: `boundary_offset` as a live Simulation setting (R13).
+  - The Simulation tab gains a **boundary offset** row: three signed pairs (x, y, z),
+    each a `+`/`−` number, editing `boundary_offset` `(x+, x-, y+, y-, z+, z-)`.
+    A value moves its face of the `StackDevice` box along the axis, positive
+    towards +x/+y/+z, without changing the geometry.
+  - Editing it re-boxes the device in the kernel: the `StackDevice` is
+    reconstructed with the moved faces (`partial_real_shape`/`center`/
+    `z_center`), and the solids, levels, ports and plane ports are rebuilt from
+    it. The widget then re-sends the `geometry` and `meta` traits (D5), which
+    the browser watches (`change:geometry`/`change:meta`) to rebuild the 3D
+    meshes, the port glyphs, the scene bounds and the 2D section live. This is
+    the first setting that re-sends the mesh payloads rather than only the small
+    state (D10).
+  - The section slider range follows the new box; a slider parked outside a
+    shrunk box is clamped back in. A box that would collapse is refused.
+  - Updated R13 (the field and its AC).
+- 2026-10-14: F1's fixture overlap raised from 1 µm to 5 µm (§10). The shorter
+  overlap shortens the box (x 22 µm → 18 µm), so the spec's F1 box note and the
+  yz slider-range test now derive from the stack rather than a fixed value.
+- 2026-10-14: field overlays promoted into M4 (R8 → R15, D16).
+  - **R15** shades a detector's plane from the field it recorded, in both
+    viewports. Per-detector display settings on the Detectors tab: the field
+    component (from the detector's own `components`), the transform (`real`,
+    `imag`, `abs`, `phase`, `logabs`), the two endpoint colors, the overlay
+    opacity and a visibility toggle. Display settings are display-only spec
+    params (D11), so they never reach `create_*_at` and survive a re-run.
+  - **`viewer.show_result(result)`** adopts a result the user produced
+    elsewhere (their own `srun` run) as the widget's current result, redrawing
+    the overlays with no re-run. It validates the result's detectors against the
+    setup and raises on a mismatch (Q23).
+  - **D16** fixes the overlay's color and transparency: a **color → transparent
+    → color** ramp between two per-detector endpoint colors (`field_color_low`,
+    `field_color_high`), transparent at the plane's range midpoint. Alpha is the
+    map alone — **not** a separate magnitude-scaled alpha. `logabs` is a
+    transform on the ramp's input, not an alpha mode; it floors at the global
+    `log_range` (Q22). The detector's translucent fill is replaced by the field
+    while it is shown, and in 2D the overlay fades with the same gaussian as the
+    ports (R4).
+  - **Q20** (referenced since D15 but never written) now defines the widget's
+    result surface: `last_result`, `last_error`, and `show_result`.
+  - M4's exit criterion gains R15's AC. R8 is superseded; Q9's promotion of R8
+    is answered.
+- 2026-10-14: Q21 and Q23 resolved.
+  - **Q21 — per-plane scale.** R15 normalizes each detector's plane to its own
+    maximum; no cross-detector shared scale. A new detector needs no rescaling
+    of the others, and the colorbar carries each plane's own range.
+  - **Q23 — strict `show_result` validation.** It checks detector names, grid
+    shape, grid spacing and the plane's position, not name and shape alone, so a
+    result recorded on a re-boxed device (R13) is refused rather than mis-placed.
+  - **Q22 — the `logabs` floor is a global setting.** One widget-wide number for
+    the bottom of the `logabs` color ramp (default 6 decades), not a per-detector
+    field, so the scale reads consistently across every detector's plane. It
+    lives with the other view-wide settings, not in a detector row.
+- 2026-10-14: D16 revised — the field overlay is a two-color map, and 2D fades
+  like the ports.
+  - The per-detector colormap is a ramp between two user-chosen colors
+    (`field_color_low`, `field_color_high`) with a transparent region: the signed
+    transforms (`real`, `imag`, `phase`) get color → transparent → color
+    (transparent at the plane's range midpoint), the non-negative transforms
+    (`abs`, `logabs`) get transparent → color (a single hue fading up from the
+    low end). This replaces the named-colormap setting.
+  - **Alpha is the map alone.** The earlier magnitude-scaled alpha
+    (`|field| / max|field|`) is dropped: transparency no longer tracks intensity,
+    only where the transformed value sits on the plane's range.
+  - A detector showing a field **loses its translucent fill** — the field fills
+    the rectangle, the outline remains.
+  - The 2D overlay **fades with the same gaussian as the ports** (R4), so a
+    field fades in as its plane is approached.
+- 2026-10-14: R15 gains `|E|` and pins the payload's axis order.
+  - **`|E|`** joins `field_component` as a pseudo-component —
+    `sqrt(|Ex|² + |Ey|² + |Ez|²)` over the detector's recorded `E` components,
+    derived in the browser. It is offered only when the result recorded any `E`
+    component, and composes with every transform and ramp like a real component.
+  - The field payload's buffer is **row-major in (v, u)** with
+    `grid = [len(v), len(u)]`; `field_payload` drops the plane's normal axis and
+    transposes the rest. Both viewports read it that way and the 2D blit flips
+    the raster, so an xz plane's field no longer renders transposed.
+- 2026-10-15: plane `level`, `z_center`, and two 2D glyph fixes.
+  - **A plane honors its `level`** (it was ignored): the level's span middle
+    sets the plane's height — the plane's position for `xy`, its in-plane
+    vertical center for `xz` / `yz`. R12's earlier "a plane has no meaningful
+    `level`" is reversed.
+  - **`z_center` joins the `level` list**: it pins an object to the simulation
+    volume's mid-height, on a plane or a port. On a port it keeps the level's
+    height and only moves z.
+  - **A crossing glyph is culled outside its own extent** along the section
+    normal, so a mode plane source on `o1` no longer appears at every z in the
+    `xy` view.
+  - **A parallel glyph fades** with the same gaussian as the ports (R4) rather
+    than popping in at a fixed coincidence tolerance.
+- 2026-10-15: the plane fade and 2D draw-order fixes.
+  - **"Port fade" is now "plane fade"** and is a **fraction, not a distance**:
+    `plane_fade_frac` (default 0.05) scales the box size along the section's
+    normal to give the gaussian 1/e distance, so the same setting suits every
+    simulation size and plane. It governs ports, source/detector glyphs and
+    field overlays alike (R4).
+  - **A crossing glyph fades too**: a plane seen edge-on (a mode-plane source
+    on `o1` in the `xy` view) fades with the same gaussian instead of popping
+    in solid.
+  - **The region outline is drawn under the glyphs**, so a full-volume `xy`
+    detector is no longer hidden by the simulation boundary in the `xy` view.
+- 2026-10-15: the source/detector collapse arrow stays live during a run.
+  - `setLocked` disabled the **first** button in a spec row, which is the
+    collapse twisty rather than the remove button, so collapsing and expanding
+    a source/detector row froze while a run was in flight. The lock now targets
+    the remove button directly (D15, R12).
+- 2026-10-15: the 2D field blit's vertical mirror, and the stop button.
+  - The 2D detector field was drawn with a **negative** `drawImage` height, which
+    Chromium does not treat as a flip: it normalises the rect and draws the raster
+    unflipped, so row 0 (the low-`v` row) landed at the high-`v` screen edge and
+    every field in the 2D panels was mirrored vertically. The blit now translates
+    to the rect's low-`v` corner and flips `y` in the transform, drawing with a
+    positive height. 3D was unaffected (`DataTexture.flipY = false` with
+    `PlaneGeometry`'s `uv.y = 0` at the low-`v` edge). Guarded by
+    `js/viewer/sectionblit.test.mjs` (R15, D16).
+  - Added **D17**: a mode-1 run can be stopped, via fdtdx's `stopping_condition`
+    rather than by raising from `progress_callback` — only a normal loop exit
+    returns the arrays, which is what lets a stopped run keep its partial fields.
+    The Run button toggles to Stop in place, greys out and reads "stopping…" until
+    the worker unwinds, and the stop lands at the next time step or phase
+    boundary. Added the `keep_partial` simulation setting (default: discard, and
+    the previous result's overlays stay on screen) and the `stopping` trait.
+    Dropped §2's "Cancelling a run from the widget" non-goal, and updated R14
+    mode 1, its AC, D12 and D15 (R13, R14, D15).
+
+- 2026-10-16: adopting a foreign completed result. `Viewer.load_result(
+  objects, arrays, config, stack=None)` accepts the three pieces fdtdx hands
+  out from arbitrary user code and displays them (R16): a **result world** —
+  a separate state built from the result's stack — is installed beside the
+  editor's, every detector becomes a read-only "None"-port spec with a
+  `grid_slice`-derived glyph, phasor-family detectors shade, and lenient
+  validation refuses only what could never render (D18). The explorer's new
+  **Result** tab holds each result detector's plotting options, and
+  multi-frequency detectors get a frequency slider that re-shades client-side —
+  the kernel sends all `(num_freqs, v, u)` frames in the payload (R17). A
+  source/detector's port select gains a **"None"** choice for absolute
+  placement (`axis`/`center`/`size` in stack µm), placed through the same
+  margin frame as `_place_at`; mode sources/detectors work on any plane, not
+  only ports (R18). The Result tab also opens with a **Layers** section — one
+  row per shaded detector with show/color/opacity for the result overlays,
+  independent of the editor's level Layers (R17). Later the same day: the
+  two-world split — the Result tab shows the result world's geometry and
+  styles while every other tab keeps the editor's (loading a result leaves the
+  editor untouched), and field shading applies only while the Result tab is
+  active (R17, D18). fdtdx 0.6.3 compatibility: `SimulationConfig(grid=...)`,
+  `uniform_spacing()`, the 5-tuple `place_objects`, and the PML CPML
+  coefficient dtype re-cast (C7). Later still: adoption covers the result's
+  **sources** too — one read-only "None"-port spec each, listed in the Result
+  tab's new Sources section with an unlabeled visibility checkbox (R17); the
+  detector sections became collapsible `gfx-spec` cards with the show checkbox
+  unlabeled in the header beside the name, and a `field_outline` display param
+  (default on) toggles the plane's outline while shaded (R17). A Result-tab
+  display edit routes to the result world by the active tab rather than by
+  id-matching, so same-named editor specs cannot be misrouted. The header
+  checkbox writes the spec's `visible` param — unchecking hides the whole
+  detector (glyph, 2D shading, colorbar), not just the overlay. The Result
+  tab's operation — the two-world split, tab-keyed routing and browser-side
+  shading gate — is written up as D19.

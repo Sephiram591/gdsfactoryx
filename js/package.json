@@ -1,0 +1,20 @@
+{
+  "name": "gdsfactory-viewer",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Frontend for the gdsfactory viewer widget (spec D6).",
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "three": "0.186.1"
+  },
+  "devDependencies": {
+    "@types/three": "^0.186.0",
+    "esbuild": "0.28.2",
+    "typescript": "5.9.3"
+  }
+}
