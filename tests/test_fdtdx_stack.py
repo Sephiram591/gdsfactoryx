@@ -3463,3 +3463,139 @@ def test_subpixel_normal_gradient() -> None:
     objects, arrays, params = place(build(subpixel_normal="none"))
     with pytest.raises(ValueError, match="subpixel_normal"):
         objects["stack"].write(arrays, params["stack"])
+
+
+# ---------------------------------------------------------------- derived shapes: model fixes (round 3, 2.5-fix-model)
+
+
+def _exact_device(component, expr, **level) -> StackDevice:
+    """A StackDevice drawing a layer expression (exact derived shapes), the box 0.3 um around the polygons."""
+    return StackDevice.from_layer_stack(
+        component, _core_of(expr, **level), CORE_ONLY, background="air", name="s", included_layers=["core"],
+        boundary_offset=(0.3, -0.3, 0.3, -0.3, 0.0, 0.0),
+    )
+
+
+def test_a_far_collinear_edge_is_not_a_crossing_partner() -> None:
+    """A joint of abutting layers is built from the edges that touch it: a polygon listed first with an edge on
+    the same line far away does not take its place, and the device passes its own check."""
+    wg = [_rect(0.0, 2.0, 1.02, 2.5), _rect(0.0, 0.0, 1.02, 0.5)]
+    c = _two_layers(wg, [_rect(1.0, 0.0, 2.0, 0.5)], etch_layer=SLAB)
+    d = _exact_device(c, LogicalLayer(layer=WG) | LogicalLayer(layer=SLAB), bias=-0.02)
+    assert len(d.derived_layers) == 1
+    d.pack(c, check=True)
+    d.check_topology(d._pack(c))
+    d.retopologize(c).pack(c, check=True)
+
+
+def test_a_joint_that_opens_into_a_step_is_reported() -> None:
+    """WG | SLAB with collinear tops: moving WG's top off SLAB's makes the joint a step, which the distance
+    leaves out; check_topology and pack(check=True) report it (a device built on the moved polygons is fine)."""
+    c = _two_layers([_rect(0.0, 0.0, 1.0, 0.5)], [_rect(1.0, 0.0, 2.0, 0.5)], etch_layer=SLAB)
+    d = _exact_device(c, LogicalLayer(layer=WG) | LogicalLayer(layer=SLAB), bias=-0.02)
+    d.check_topology(d._pack(c))
+    for top in (0.54, 0.6):
+        moved = _two_layers([_rect(0.0, 0.0, 1.0, top)], [_rect(1.0, 0.0, 2.0, 0.5)], etch_layer=SLAB)
+        with pytest.raises(ValueError, match="joint of two layers' collinear edges opened into a step"):
+            d.check_topology(d._pack(moved))
+        with pytest.raises(ValueError, match="opened into a step"):
+            d.pack(moved, check=True)
+        new = d.retopologize(moved)
+        new.check_topology(new._pack(moved))
+    # a small move (below the tolerance) is not a step
+    nudged = _two_layers([_rect(0.0, 0.0, 1.0, 0.5 + 1e-4)], [_rect(1.0, 0.0, 2.0, 0.5)], etch_layer=SLAB)
+    d.check_topology(d._pack(nudged))
+
+
+@pytest.mark.parametrize("folded_first", [True, False])
+def test_folded_subtrees_do_not_change_the_overlap_test(folded_first: bool) -> None:
+    """(ETCH & M1) | WG with no M1 polygons: the folded ETCH subtree leaves its literal before WG's; the
+    overlapping WG polygons still get their union as exact shape (no slit between them at a bias)."""
+    folded = LogicalLayer(layer=ETCH) & LogicalLayer(layer=METAL)
+    wg = LogicalLayer(layer=WG)
+    expr = folded | wg if folded_first else wg | folded
+    c = _two_layers(OVERLAP, [_rect(0.2, 0.1, 0.3, 0.2)])
+    d, w = _weights_of(c, _core_of(expr, bias=-0.01), CORE_ONLY, (2.4, 0.9, 0.3), center=(1.0, 0.25), z_center=0.11)
+    assert len(d.derived_layers) == 1
+    row = w["si"][cell(d, 0.1, 0, 0)[0] : cell(d, 1.9, 0, 0)[0], cell(d, 0, 0.25, 0)[1], cell(d, 0, 0, 0.11)[2]]
+    assert float(row.min()) > 0.999
+
+
+def test_the_build_and_the_check_share_one_error_width() -> None:
+    """A strip 3.8 nm wide that node clustering drops: the build accepts it (below twice the tolerance in
+    width) and the check on the unchanged component accepts it too."""
+    for gap in (0.0019, 0.0025, 0.0038):
+        c = _two_layers([_rect(0.0, 0.0, 2.0, 0.5)], [_rect(1.4, -0.5, 2.0 - gap, 1.0)])
+        for tri in ([(2.0 - gap / 2, 0.5), (2.5, 1.2), (1.5, 1.2)], [(2.0 - gap / 2, 0.0), (1.5, -0.7), (2.5, -0.7)]):
+            c.add_polygon(tri, layer=SLAB)
+        expr = LogicalLayer(layer=WG) - LogicalLayer(layer=ETCH) - LogicalLayer(layer=SLAB)
+        d = _exact_device(c, expr)
+        d.pack(c, check=True)
+
+
+def test_winding_numbers_match_the_dense_count_and_scale() -> None:
+    """The y-chunked winding numbers equal the dense count, and 27k edges take seconds (the dense count took 20 s)."""
+    import time
+
+    from gdsfactory.fdtdx_geometry import _winding_numbers
+
+    rng = np.random.default_rng(0)
+    a, b = rng.uniform(-1, 1, (300, 2)), rng.uniform(-1, 1, (300, 2))
+    pts = rng.uniform(-1.2, 1.2, (3000, 2))
+    px, py = pts[:, None, 0], pts[:, None, 1]
+    x1, y1, x2, y2 = a[None, :, 0], a[None, :, 1], b[None, :, 0], b[None, :, 1]
+    left = (x2 - x1) * (py - y1) - (px - x1) * (y2 - y1)
+    dense = ((y1 <= py) & (y2 > py) & (left > 0)).sum(1) - ((y2 <= py) & (y1 > py) & (left < 0)).sum(1)
+    assert np.array_equal(_winding_numbers(pts, a, b, chunk=256), dense)
+
+    n = 27200
+    t = np.linspace(0, 2 * np.pi, n, endpoint=False)
+    ring = np.stack([np.cos(t), np.sin(t)], axis=1)
+    probes = rng.uniform(-1.1, 1.1, (n, 2))
+    start = time.perf_counter()
+    inside = _winding_numbers(probes, ring, np.roll(ring, -1, axis=0))
+    assert time.perf_counter() - start < 10.0
+    assert np.mean((inside != 0) != (np.linalg.norm(probes, axis=1) < 1.0)) < 1e-3  # polygon vs circle: edge cases only
+
+
+def test_exact_mode_at_zero_bias_is_close_to_composite() -> None:
+    """Known limit (R3-model-4): where two corners of one derived level share a voxel (here the tip of the
+    etch lies on the waveguide's edge) the exact shape's corner model keeps the half-plane, while the composite
+    model, with one literal per layer, is exact. At bias 0 both draw the same shape; the excess is bounded here
+    so a regression shows (measured: totals 0.62 vs 0.35, worst voxel 0.256 vs 0.000)."""
+    shapely = pytest.importorskip("shapely")
+    rng = np.random.default_rng(1)
+
+    def star(cx, cy, n, r0, r1):
+        phi = np.sort(rng.uniform(0, 2 * np.pi, n))
+        r = rng.uniform(r0, r1, n)
+        return [(cx + ri * math.cos(p), cy + ri * math.sin(p)) for ri, p in zip(r, phi)]
+
+    mats = {"air": MATERIALS["air"], "si": MATERIALS["si"], "sio2": MATERIALS["sio2"]}
+    for _ in range(2):
+        a, b = star(0.5, 0.5, 7, 0.25, 0.5), star(0.7, 0.6, 6, 0.2, 0.4)
+        rng.uniform(-0.02, 0.02, 2)
+    c = gf.Component()
+    c.add_polygon(a, layer=WG)
+    c.add_polygon(b, layer=ETCH)
+    derived = {"derived_layer": LogicalLayer(layer=WG), "zmin": 0.0, "thickness": 0.22}
+    ls = LayerStack(layers={
+        "one": LayerLevel(layer=LogicalLayer(layer=WG) - LogicalLayer(layer=ETCH), material="si", mesh_order=1,
+                          **derived),
+        "two": LayerLevel(layer=LogicalLayer(layer=WG) | LogicalLayer(layer=ETCH), material="sio2", mesh_order=2,
+                          **derived),
+    })
+    pa, pb = shapely.Polygon(a), shapely.Polygon(b)
+    one = pa.difference(pb)
+    two = pa.union(pb).difference(one)
+    errors = {}
+    for mode in ("composite", "exact"):
+        d, w = _weights_of(c, ls, mats, (1.4, 1.4, 0.3), center=(0.6, 0.55), z_center=0.11, derived_shapes=mode)
+        f_one, f_two = _area_fractions(d, one), _area_fractions(d, two)
+        k = cell(d, 0, 0, 0.11)[2]
+        errors[mode] = sum(
+            np.abs(w[name][:, :, k] - f) for name, f in (("si", f_one), ("sio2", f_two), ("air", 1 - f_one - f_two))
+        )
+    assert errors["composite"].sum() < 0.5
+    assert errors["exact"].sum() < 2.0 * errors["composite"].sum()
+    assert float((errors["exact"] - errors["composite"]).max()) < 0.3

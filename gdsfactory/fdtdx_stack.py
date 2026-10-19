@@ -147,6 +147,7 @@ from gdsfactory.fdtdx_geometry import (
     crossing_changes,
     derive_polygons,
     gaussian_random_field,
+    joint_changes,
     nearest_edges,
     pack_polygons,
     recipe_rings,
@@ -3445,6 +3446,11 @@ def _union_overlaps(v: np.ndarray, sizes: Sequence[int], tol: float) -> bool:
     return False
 
 
+#: a derived shape may differ from the boolean by parts narrower than twice this many tolerances (one
+#: bound for the build's validation and for check_topology, so a device that builds also passes its check)
+_DERIVED_ERROR_WIDTH = 2.0
+
+
 def _part_index(shape: int, part: int) -> int:
     """Layer slot index of a part of a derived shape (negative, unlike gds layer indices)."""
     return -1 - 1024 * shape - part
@@ -3539,7 +3545,7 @@ def _derived_shapes(
             continue
         single = tree[0] == "lit" or (tree[0] == "neg" and tree[1][0] == "lit")
         if single:
-            index = literals[0][0]
+            index = literals[tree[1] if tree[0] == "lit" else tree[1][1]][0]  # not literals[0]: folded subtrees leave literals
             if index not in overlapping:
                 i = by_index[index]
                 overlapping[index] = _union_overlaps(vertices[i], sizes[i], tol(vertices[i]))
@@ -3571,7 +3577,7 @@ def _derived_shapes(
                 if recipes[0].negate:
                     drawn = universe.difference(drawn)
                 error = drawn.symmetric_difference(_expr_region(key, regions, universe))
-                if not error.buffer(-2 * eps).is_empty:
+                if not error.buffer(-_DERIVED_ERROR_WIDTH * eps).is_empty:
                     reason = f"its polygons differ from the boolean by {error.area:.3g} um^2"
         if reason:
             warnings.warn(
@@ -4552,6 +4558,11 @@ class StackDevice(StaticMultiMaterialObject):
                     f"{prefix}: the crossing of edge {a - starts[layer]}->{b - starts[layer]} of "
                     f"{keys[d.layers[layer]]} with another edge left that edge, now at ({x[0]:.6g}, {x[1]:.6g})"
                 )
+            for _, _, p, q in [c for r in d.recipes for c in joint_changes(r, flat, tol)][:3]:
+                problems.append(
+                    f"{prefix}: a joint of two layers' collinear edges opened into a step from "
+                    f"({p[0]:.6g}, {p[1]:.6g}) to ({q[0]:.6g}, {q[1]:.6g})"
+                )
             lo, hi = flat.min(axis=0) - 1.0, flat.max(axis=0) + 1.0
             universe = shapely.box(*lo, *hi)
             drawn = _shape_region(d.recipes, flat)
@@ -4559,8 +4570,10 @@ class StackDevice(StaticMultiMaterialObject):
                 drawn = universe.difference(drawn)
             regions = {i: _shapely_polygons(v, sizes[i]) for i, v in zip(d.layers, pool, strict=True)}
             error = drawn.symmetric_difference(_expr_region(d.expr, regions, universe))
-            if not error.buffer(-0.5 * tol).is_empty:
-                circle = shapely.maximum_inscribed_circle(error.buffer(-0.5 * tol).buffer(0.5 * tol))
+            if not error.buffer(-_DERIVED_ERROR_WIDTH * tol).is_empty:
+                circle = shapely.maximum_inscribed_circle(
+                    error.buffer(-_DERIVED_ERROR_WIDTH * tol).buffer(_DERIVED_ERROR_WIDTH * tol)
+                )
                 c = np.asarray(circle.coords[0])
                 width = 2 * float(circle.length)
                 problems.append(

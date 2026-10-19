@@ -396,17 +396,29 @@ def _boolean(expr: tuple, member: dict[int, np.ndarray], size: int) -> np.ndarra
     raise ValueError(f"Unknown layer operation {kind!r}")
 
 
-def _winding_numbers(points: np.ndarray, a: np.ndarray, b: np.ndarray, chunk: int = 4096) -> np.ndarray:
-    """(M,) winding number of the counterclockwise edges a -> b around each point."""
+def _winding_numbers(points: np.ndarray, a: np.ndarray, b: np.ndarray, chunk: int = 1024) -> np.ndarray:
+    """(M,) winding number of the counterclockwise edges a -> b around each point.
+
+    The points go in chunks of neighbouring y, and each chunk only meets the
+    edges that span its y range (the rest never cross a ray of the chunk), so
+    the cost grows with the edges near a point, not with all of them.
+    """
+    points = np.asarray(points)
     out = np.zeros(len(points), dtype=np.int64)
+    order = np.argsort(points[:, 1], kind="stable")
+    emin, emax = np.minimum(a[:, 1], b[:, 1]), np.maximum(a[:, 1], b[:, 1])
     for k in range(0, len(points), chunk):
-        p = points[k : k + chunk]
+        idx = order[k : k + chunk]
+        p = points[idx]
+        near = np.flatnonzero((emin <= p[-1, 1]) & (emax >= p[0, 1]))
+        if not near.size:
+            continue
         px, py = p[:, None, 0], p[:, None, 1]
-        x1, y1, x2, y2 = a[None, :, 0], a[None, :, 1], b[None, :, 0], b[None, :, 1]
+        x1, y1, x2, y2 = a[None, near, 0], a[None, near, 1], b[None, near, 0], b[None, near, 1]
         left = (x2 - x1) * (py - y1) - (px - x1) * (y2 - y1)
         up = (y1 <= py) & (y2 > py) & (left > 0)
         down = (y2 <= py) & (y1 > py) & (left < 0)
-        out[k : k + chunk] = up.sum(axis=1) - down.sum(axis=1)
+        out[idx] = up.sum(axis=1) - down.sum(axis=1)
     return out
 
 
@@ -614,10 +626,18 @@ def derive_polygons(
         own = int(dst[c] if at_end else src[c])
         if np.linalg.norm(pool[own] - pos[node]) <= tol:
             return copy(own)
-        dist = np.abs(cross(U, pos[node] - P))
-        near = np.flatnonzero((dist <= tol) & (np.arange(S) != c))
+        # edges whose segment (not just its line) passes within tol of the node
+        w = pos[node] - P
+        along = np.einsum("ij,ij->i", w, U)
+        dist = np.abs(cross(U, w))
+        on_segment = (along >= -tol) & (along <= length + tol)
+        near = np.flatnonzero((dist <= tol) & on_segment & (np.arange(S) != c))
         if not near.size:
             raise ValueError(f"no edge crosses the derived boundary's corner at {_xy(pos[node])}")
+        # prefer edges with an end vertex at the node
+        ends = [g for g in near if min(np.linalg.norm(P[g] - pos[node]), np.linalg.norm(Q[g] - pos[node])) <= tol]
+        if ends:
+            near = np.asarray(ends)
         g = int(near[np.argmax(np.abs(cross(U[c], U[near])))])
         if abs(cross(U[c], U[g])) <= 1e-6:
             raise ValueError(f"no edge crosses the derived boundary's corner at {_xy(pos[node])}")
@@ -765,6 +785,33 @@ def crossing_changes(
             margin = tol / math.sqrt(l2)
             if t < -margin or t > 1 + margin:
                 out.append((int(k), int(a), int(b), points[k]))
+    return out
+
+
+def joint_changes(recipe: DerivedRecipe, pool: np.ndarray, tol: float) -> list[tuple[int, int, np.ndarray, np.ndarray]]:
+    """Joints of a recipe that opened (a collinear change of edges that became a step).
+
+    A joint is a pair of consecutive vertices of a ring that coincide when
+    built (a zero-length boundary piece, where the boundary passes from one
+    layer's edge to a collinear edge of another). The distance leaves it out,
+    so it must stay shorter than ``tol`` (plus its build length).
+
+    Returns:
+        (first vertex, second vertex, its two evaluated points) per opened joint.
+    """
+    pool = np.asarray(pool, dtype=float)
+    points = run_recipe(recipe.kind, recipe.index, recipe.positions, pool, np)
+    out = []
+    starts = sorted({int(s) for s in recipe.ring_of if s >= 0})
+    for s, n in zip(starts, recipe.rings, strict=True):
+        for k in range(s, s + n):
+            m = s + (k - s + 1) % n
+            if m == k:
+                continue
+            built = float(np.linalg.norm(recipe.positions[m] - recipe.positions[k]))
+            now = float(np.linalg.norm(points[m] - points[k]))
+            if built <= tol and now > tol + built:
+                out.append((k, m, points[k], points[m]))
     return out
 
 

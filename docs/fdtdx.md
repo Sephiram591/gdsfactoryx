@@ -443,8 +443,11 @@ when it detects that combination.
   - The recipe is frozen topology, like the polygons' seams:
     `check_topology` (and `pack`) report a shape the new vertices no longer
     draw (a part that appeared or vanished, a seam that opened: e.g. the
-    waveguide now reaching past the etch's end) and a crossing that left one
-    of its edges; `retopologize` builds the shapes again. Between those
+    waveguide now reaching past the etch's end), a crossing that left one
+    of its edges, and a joint of collinear edges that opened into a step
+    (`WG | SLAB` with equal tops, one top moved); `retopologize` builds the
+    shapes again. The build and the check accept the same differences from
+    the boolean: parts narrower than twice the topology tolerance. Between those
     concrete checks, gradients follow the frozen recipe; at exact
     coincidences they are one-sided. Crossings of nearly parallel edges are
     ill-conditioned (about 1/sin of their angle).
@@ -459,6 +462,15 @@ when it detects that combination.
     only where one layer's edge is nearest; where layers' edges coincide it
     draws slivers, and where a level shrinks a layer, overlapping polygons are
     shrunk one by one (see [Geometry diagnostics](#geometry-diagnostics)).
+  - Known limit: where two corners of one derived level share a voxel (an
+    etch tip on the waveguide's edge), its corner model keeps the half-plane,
+    while the composite model, with one literal per layer, is exact there. At
+    bias 0 both draw the same shape, and on random stars the exact mode has a
+    summed fill error of 0.62 against 0.35 (worst voxel 0.26 against 0); with
+    nonzero biases it is far better overall (0.9 against 6.5) with single
+    voxels up to 0.12 worse. It is never worse than its own half-plane.
+  - Building the shapes costs seconds for tens of thousands of edges (52.8k
+    edges: 3 s; the first version took 85 s and 7.7 GB).
 - **Sidewalls.** A level at height `z` offsets its distance by
   `(z - z_ref)·tan(sidewall_angle) - bias - z_to_bias(z)`, with
   `z_ref = zmin + width_to_z·thickness`. In each voxel a level takes the mean
