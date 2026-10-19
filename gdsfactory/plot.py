@@ -13,33 +13,6 @@ if TYPE_CHECKING:
     from gdsfactory.component import Component
 
 
-def _draw_ports(kc: Any) -> None:
-    """Draws each port of ``kc`` as an arrow-head on the PDK's SHOW_PORTS layer.
-
-    KLayout only renders shapes, and the ports are exported as plain port objects,
-    so without this they are invisible. They go on their own layer rather than the
-    port's, where they would merge into the waveguide polygon.
-    """
-    import klayout.db as kdb
-
-    from gdsfactory.pdk import get_layer_info
-
-    try:
-        layer = kc.kcl.layout.layer(get_layer_info("SHOW_PORTS"))
-    except (KeyError, ValueError):
-        kc.draw_ports()  # the PDK has no SHOW_PORTS layer: the port's own layer
-        return
-    for port in kc.ports:
-        w = port.dwidth
-        marker = kdb.DPolygon(
-            [kdb.DPoint(0, -w / 2), kdb.DPoint(0, w / 2), kdb.DPoint(w / 2, 0)]
-        )
-        kc.shapes(layer).insert(marker.transformed(port.dcplx_trans))
-        kc.shapes(layer).insert(
-            kdb.DText(port.name or "", 0, 0).transformed(port.dcplx_trans)
-        )
-
-
 def plot_component(
     component: Component,
     ax: Axes | None = None,
@@ -63,7 +36,9 @@ def plot_component(
 
     kc = to_kfactory(component, add_ports=show_ports)
     if show_ports:
-        _draw_ports(kc)
+        # KLayout only renders shapes: draw each port on its own layer, as an arrow
+        # pointing out of the device (plus its name).
+        kc.draw_ports()
     lyp_path = GDSDIR_TEMP / f"layer_properties-{uuid4().hex}.lyp"
     GDSDIR_TEMP.mkdir(parents=True, exist_ok=True)
     layer_views = get_layer_views()
