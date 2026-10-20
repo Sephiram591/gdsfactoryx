@@ -342,3 +342,6 @@ gdsfactory/plugins/pso/wrk_dir/
 
 # fdtdx / MEEP example outputs
 examples/output/
+
+# generated elevator-coupler comparison data (files up to 400 MB)
+examples/output_old_voxelization_2026-10-05/

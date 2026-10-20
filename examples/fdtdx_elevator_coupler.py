@@ -81,7 +81,9 @@ def build_stack(overlap: float) -> StackDevice:
 
 def simulate(overlap: float, resolution: float = 0.02, time: float = 400e-15) -> dict:
     (x0, _), _, (z0, _) = domain(overlap)
-    config = fdtdx.SimulationConfig(time=time, resolution=resolution * 1e-6, dtype=jnp.float32)
+    config = fdtdx.SimulationConfig(
+        time=time, grid=fdtdx.core.grid.UniformGrid(spacing=resolution * 1e-6), dtype=jnp.float32
+    )
     wave = fdtdx.WaveCharacter(wavelength=WAVELENGTH * 1e-6)
     pulse = fdtdx.GaussianPulseProfile(
         center_wave=wave, spectral_width=fdtdx.WaveCharacter(frequency=0.05 * wave.get_frequency())
@@ -116,7 +118,9 @@ def simulate(overlap: float, resolution: float = 0.02, time: float = 400e-15) ->
     key = jax.random.PRNGKey(0)
     objects, arrays, params, config, _ = fdtdx.place_objects(objects, config, constraints, key)
     arrays, objects, _ = apply_stack(arrays, objects, {**params, **init_stack_params(objects)}, key)
-    _, arrays = fdtdx.run_fdtd(arrays=arrays, objects=objects, config=config, key=key)
+    # gdsfactory turns on x64; fdtdx 0.6.3's PML would then promote its float32 state inside the solve loop
+    with jax.enable_x64(False):
+        _, arrays = fdtdx.run_fdtd(arrays=arrays, objects=objects, config=config, key=key)
 
     states = arrays.detector_states
     a_in = objects["in"].compute_overlap(states["in"])
@@ -125,7 +129,7 @@ def simulate(overlap: float, resolution: float = 0.02, time: float = 400e-15) ->
     E = np.asarray(states["field"]["phasor"][0, 0, :, :, 0, :])  # (3, nx, nz) at the wavelength
     nx, nz = E.shape[1:]
     return {
-        "T": float(abs(a_out / a_in) ** 2),
+        "T": float(np.ravel(abs(a_out / a_in) ** 2)[0]),  # one overlap per wave character
         "x": x0 + resolution * (np.arange(nx) + 0.5),
         "z": z0 + resolution * (np.arange(nz) + 0.5),
         "E2": np.sum(np.abs(E) ** 2, axis=0),  # |E|^2 on the xz plane through the taper axis
