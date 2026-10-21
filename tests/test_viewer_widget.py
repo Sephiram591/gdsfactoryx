@@ -645,3 +645,22 @@ def test_import_gdsfactory_does_not_pull_the_gui_deps() -> None:
         [sys.executable, "-c", code], capture_output=True, text=True, check=True
     )
     assert result.stdout.strip() == "False False"
+
+
+def test_a_plane_move_on_the_result_tab_reslices_the_result_section() -> None:
+    """R17: the Result tab's plane and position drive its own section payload."""
+    viewer = widget.view(f1_stack())
+    viewer._result_state = state.ViewerState(viewer.stack)
+    viewer._result_section = payload.build_section_payload(viewer._result_state)
+    viewer._on_msg(None, {"event": "set_state", "patch": {"active_tab": "result"}}, [])
+    before = viewer.section
+
+    viewer._on_msg(None, {"event": "set_state", "patch": {"plane": "xz"}}, [])
+    assert viewer.section["plane"] == "xz"
+    assert viewer.section["axis_v"] != before["axis_v"], "the axes follow the plane"
+    assert viewer.section is viewer._result_section
+
+    position = viewer._result_state.plane_bounds()[1]
+    viewer._on_msg(None, {"event": "set_state", "patch": {"plane_position": position}}, [])
+    assert viewer.section["position"] == pytest.approx(position)
+    assert viewer._viewer_state.plane == "xy", "the editor's plane is untouched"

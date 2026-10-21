@@ -573,6 +573,10 @@ class Viewer(anywidget.AnyWidget):
             self._set_save_dir(content.get("dir"))
             return
         before = (self._viewer_state.plane, self._viewer_state.plane_position)
+        result_before = (
+            (self._result_state.plane, self._result_state.plane_position)
+            if self._result_state is not None else None
+        )
         tab_before = self._viewer_state.active_tab
         revision_before = self._viewer_state.revision
         patch = dict(content.get("patch") or {}) if event == "set_state" else None
@@ -620,7 +624,13 @@ class Viewer(anywidget.AnyWidget):
             self.launch_code = _launch_code_text(self.stack, self._viewer_state)
         self.state = self._wire_state(active)
         if active is self._result_state:
-            return  # the result world tracks no editor edits; styles ride `state`
+            # the result world tracks no editor edits; styles ride `state`. Its
+            # own plane and position still drive the Result tab's 2D view, so a
+            # move re-slices the result's section (the axes follow the plane)
+            if (active.plane, active.plane_position) != result_before:
+                self._result_section = build_section_payload(active)
+                self.section = self._result_section
+            return
         if self._viewer_state.geometry_changed:
             # a boundary_offset edit re-boxed the device (spec R13): re-send the
             # mesh buffers and metadata so the browser rebuilds its viewports
