@@ -164,6 +164,7 @@ PortDirection = Literal["in", "out"]  # into the component through the port, or 
 
 __all__ = [
     "PLANE_PORTS",
+    "detector_plane_own_positions",
     "Z_CENTER_LEVEL",
     "StackDevice",
     "StackDiagnostic",
@@ -265,6 +266,31 @@ class _Port(NamedTuple):
 #: ports: the plane through the box center parallel to the named faces, mapped
 #: to its normal axis (0 = x, 1 = y, 2 = z). They are not device ports.
 PLANE_PORTS: dict[str, int] = {"yz": 0, "xz": 1, "xy": 2}
+
+
+def detector_plane_own_positions(axis: int) -> tuple[float, float, float]:
+    """The ``own_positions`` that put a detector plane's samples on its target.
+
+    fdtdx records every detector field at ``(i·Δx, j·Δy, (k+½)·Δz)`` (see
+    ``fdtdx.core.physics.curl.interpolate_fields``): x and y samples lie on a
+    cell's lower edge, z samples at its centre. A one-cell-thick plane is placed
+    by anchoring a point of the object on the target, and fdtdx picks the cell
+    whose anchor is nearest, so the anchor must be the sampled one: ``-1`` (the
+    lower edge) along a normal that is x or y, ``0`` (the centre) along z. The
+    in-plane axes keep the centre, which centres the many-cell plane on the
+    target.
+
+    Args:
+        axis: the plane's normal axis (0 = x, 1 = y, 2 = z).
+
+    Returns:
+        ``own_positions`` for ``place_relative_to``, in fdtdx's ``-1 .. 1``
+        convention (``-1`` lower side, ``0`` centre).
+    """
+    positions = [0.0, 0.0, 0.0]
+    if axis in (0, 1):
+        positions[axis] = -1.0
+    return positions[0], positions[1], positions[2]
 
 #: The ``level`` value naming the simulation volume's own z center, offered
 #: alongside the level names so a source or detector can be pinned to the
@@ -5936,12 +5962,17 @@ class StackDevice(StaticMultiMaterialObject):
         center[axis] -= sign * port_offset  # sign: the port's outward orientation
         return p, axis, sign, center, hi - lo
 
-    def _place_at(self, obj: Any, center: Sequence[float]) -> list[PositionConstraint]:
+    def _place_at(
+        self, obj: Any, center: Sequence[float], own_positions: Sequence[float] = (0, 0, 0)
+    ) -> list[PositionConstraint]:
         """Constraint that puts the center of ``obj`` at a stack point.
 
         Args:
             obj: fdtdx object.
             center: (x, y, z) in um (gds xy, stack z).
+            own_positions: the point of ``obj`` that sits on ``center`` along each
+                axis, ``-1`` (lower side) to ``1`` (upper side); the default is
+                its center.
 
         Returns:
             One position constraint relative to this device.
@@ -5950,7 +5981,8 @@ class StackDevice(StaticMultiMaterialObject):
         margins = tuple((c - r) * 1e-6 for c, r in zip(center, reference, strict=True))
         return [
             obj.place_relative_to(
-                self, axes=(0, 1, 2), own_positions=(0, 0, 0), other_positions=(0, 0, 0), margins=margins
+                self, axes=(0, 1, 2), own_positions=tuple(own_positions), other_positions=(0, 0, 0),
+                margins=margins,
             )
         ]
 
@@ -6004,7 +6036,8 @@ class StackDevice(StaticMultiMaterialObject):
             partial_grid_shape=tuple(grid),
             **fields,
         )
-        return obj, self._place_at(obj, center)
+        own = detector_plane_own_positions(axis) if isinstance(obj, fdtdx.Detector) else (0, 0, 0)
+        return obj, self._place_at(obj, center, own)
 
     # ------------------------------------------------------------ sources on ports
 
