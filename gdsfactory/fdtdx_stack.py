@@ -132,13 +132,13 @@ from fdtdx.materials import (
     compute_ordered_names,
 )
 from fdtdx.objects.detectors.diffractive import DiffractiveDetector
-from fdtdx.objects.object import PositionConstraint
+from fdtdx.objects.object import PositionConstraint, SimulationObject
 from fdtdx.objects.sources.source import HardConstantAmplitudePlanceSource
 from fdtdx.objects.static_material.static import StaticMultiMaterialObject
 from fdtdx.typing import INVALID_SLICE_TUPLE_3D
 
 from gdsfactory._jax import has_tracers, to_numpy
-from gdsfactory.fdtdx_timing import StepTimings, lap, record_timings, timed
+from gdsfactory.fdtdx_timing import StepTimings, lap, record_timings, timed, timed_step
 from gdsfactory.fdtdx_geometry import (
     DerivedRecipe,
     _boundary_links,
@@ -159,7 +159,7 @@ from gdsfactory.fdtdx_geometry import (
 )
 
 Array = jax.Array
-Averaging = Literal["inverse", "subpixel"]
+Averaging = Literal["inverse", "subpixel", "subpixel_full"]
 PortDirection = Literal["in", "out"]  # into the component through the port, or out of it
 
 __all__ = [
@@ -186,6 +186,7 @@ _ANISOTROPY_SENTINEL = "__diagonal_anisotropy__"
 # offsets (cells) from a voxel center to fdtdx's Ex, Ey, Ez Yee positions:
 # Ex at (i + 1/2, j, k), Ey at (i, j + 1/2, k), Ez at (i, j, k + 1/2)
 _YEE_E_SHIFTS = ((0.0, -0.5, -0.5), (-0.5, 0.0, -0.5), (-0.5, -0.5, 0.0))
+_OFFDIAG_PAIRS = ((0, 1), (0, 2), (1, 2))  # the xy, xz, yz entries of a symmetric 3 x 3 tensor
 # corner model (see _corner_fill), lengths in sides of the lateral square:
 _CORNER_TOL = 1e-3  # slack of the certification radii and of the corner columns
 _PLANE_TOL = 1e-4  # half-planes closer than this are the same line
@@ -1122,6 +1123,7 @@ def _normal_tensor(
     cell: float,
     kmass: float,
     slopes: Array | None = None,
+    offdiag: bool = False,
 ) -> Array:
     """Squared-normal tensor of the voxels of one layer from their own model.
 
@@ -1163,10 +1165,14 @@ def _normal_tensor(
             which ``flux / kmass`` is per side of the kernel's square.
         slopes: (..., S - 1, 2) lateral gradient (cells per cell) of the surface
             at each inner end, or None (flat surfaces).
+        offdiag: also the off-diagonal entries (signed products of normal
+            components) of the variance-weighted normal tensor.
 
     Returns:
         (..., C, 4): the variance along x, y, z (variance times squared normal
-        components, summed), then the unexplained variance.
+        components, summed), then the unexplained variance; with ``offdiag``
+        (..., C, 7), followed by the xy, xz and yz entries (variance times the
+        products of normal components, summed).
     """
     v_lat = jnp.maximum(square - mean**2, 0.0)
     f = flux / kmass
@@ -1183,6 +1189,10 @@ def _normal_tensor(
     weight = length[..., None] * v_lat
     lateral = jnp.sum((weight * (1 - beta))[..., None] * direction, axis=-3)
     unexplained = jnp.sum(weight * beta, axis=-2)
+    if offdiag:  # the signed products of the flux's components, normalized like the squares
+        products = jnp.stack([f[..., a] * f[..., b] for a, b in _OFFDIAG_PAIRS], axis=-1)
+        cross = jnp.where(ok[..., None], products / jnp.where(ok, f2, 1.0)[..., None], 0.0)
+        lateral_off = jnp.sum((weight * (1 - beta))[..., None] * cross, axis=-3)
 
     # the means without the drift of tapered lines between the middles of
     # neighbouring sub-intervals: only the surfaces' jumps are left
@@ -1194,6 +1204,7 @@ def _normal_tensor(
     flat = mean + rate[..., 1] / cell - drift
     centered = flat - jnp.sum(length[..., None] * flat, axis=-2, keepdims=True)
     v_z = jnp.sum(length[..., None] * centered**2, axis=-2)
+    vertical_off = jnp.zeros((*v_z.shape, 3), dtype=v_z.dtype)
     if slopes is None:
         vertical = v_z[..., None] * jnp.asarray([0.0, 0.0, 1.0], dtype=v_z.dtype)
     else:
@@ -1208,7 +1219,15 @@ def _normal_tensor(
         tilt = jnp.sum(wj[..., None] * dirs[..., None, :], axis=-3) / jnp.where(some, total, 1.0)[..., None]
         tilt = jnp.where(some[..., None], tilt, jnp.asarray([0.0, 0.0, 1.0], dtype=tilt.dtype))
         vertical = v_z[..., None] * tilt
-    return jnp.concatenate([lateral + vertical, unexplained[..., None]], axis=-1)
+        if offdiag:  # the normal (-g, 1) / |(-g, 1)|: products g_x g_y, -g_x, -g_y over 1 + |g|^2
+            gx, gy = slopes[..., 0], slopes[..., 1]
+            pair_dirs = jnp.stack([gx * gy, -gx, -gy], axis=-1) / (1 + jnp.sum(g2, axis=-1))[..., None]
+            tilt_off = jnp.sum(wj[..., None] * pair_dirs[..., None, :], axis=-3) / jnp.where(some, total, 1.0)[..., None]
+            vertical_off = v_z[..., None] * jnp.where(some[..., None], tilt_off, 0.0)
+    out = [lateral + vertical, unexplained[..., None]]
+    if offdiag:
+        out.append(lateral_off + vertical_off)
+    return jnp.concatenate(out, axis=-1)
 
 
 def _kernel_mass(kernel: tuple[float, float, float]) -> float:
@@ -1462,6 +1481,7 @@ def _composite(
     cell: float = 1.0,
     surface_slopes: Array | None = None,
     knots: Array | None = None,
+    offdiag: bool = False,
 ) -> Array | tuple[Array, Array]:
     """Volume fraction of each level (and the background) per voxel.
 
@@ -1527,11 +1547,13 @@ def _composite(
             each level's bottom then top surface, or None (flat).
         knots: (K, M) heights (cells) where the levels' offsets bend (their
             z_to_bias knots), or None: every offset is linear in z.
+        offdiag: the tensor also has the off-diagonal entries (C, 7; see
+            :func:`_normal_tensor`).
 
     Returns:
         (nx, ny, nz, K + 1): K levels then the background, summing to one;
         with ``level_eps`` also the (nx, ny, nz, C, 4) tensor of
-        :func:`_normal_tensor`.
+        :func:`_normal_tensor` ((nx, ny, nz, C, 7) with ``offdiag``).
     """
     num_levels = lows.shape[-1]
     with_n = level_eps is not None
@@ -1560,6 +1582,7 @@ def _composite(
                 cell,
                 kmass,
                 parts[8] if len(parts) > 8 else None,
+                offdiag=offdiag,
             )
             out = (out, tensor)  # (nx, ny, K + 1), (nx, ny, C, 4)
         if corner is None:
@@ -1597,6 +1620,7 @@ def _composite(
         level_eps=None if level_eps is None else tuple(tuple(float(e) for e in row) for row in level_eps),
         kernel=tuple(float(x) for x in kernel),
         cell=float(cell),
+        offdiag=offdiag,
     )  # (nz, N, K + 1)
     if with_n:
         fill, corner_tensor = fill
@@ -1651,6 +1675,7 @@ def _composite_samples(
     surface_slopes: Array | None = None,
     half: float = 0.5,
     knots: Array | None = None,
+    offdiag: bool = False,
 ) -> tuple[Array, Array | None]:
     """Fractions and normal tensor of voxels painted on several lateral sub-squares.
 
@@ -1708,6 +1733,7 @@ def _composite_samples(
         surface_slopes: see :func:`_composite`.
         half: half side of a sample's square.
         knots: see :func:`_composite`.
+        offdiag: see :func:`_composite`.
 
     Returns:
         (nx, ny, nz, K + 1) the samples' fractions, summed (not averaged), and
@@ -1867,6 +1893,7 @@ def _composite_samples(
             cell,
             kmass,
             slopes,
+            offdiag=offdiag,
         )
         return fractions, tensor
 
@@ -2291,7 +2318,8 @@ def _round_tips(
 @partial(
     jax.jit,
     static_argnames=(
-        "trees", "literals", "is_fill", "lines", "sc", "half", "level_eps", "kernel", "cell", "per_interval"
+        "trees", "literals", "is_fill", "lines", "sc", "half", "level_eps", "kernel", "cell", "per_interval",
+        "offdiag",
     ),
 )
 def _corner_pass(
@@ -2315,6 +2343,7 @@ def _corner_pass(
     kernel: tuple[float, float, float] = (0.0, 0.0, 1.0),
     cell: float = 1.0,
     per_interval: bool = False,
+    offdiag: bool = False,
 ) -> Array | tuple[Array, ...]:
     """The corner columns of every voxel layer, painted with :func:`_corner_fill`.
 
@@ -2359,6 +2388,8 @@ def _corner_pass(
         per_interval: return the corner model per sub-interval, unblended,
             with each sample's certificate for its voxel (see
             :func:`_composite_samples`).
+        offdiag: the tensor also has the off-diagonal entries (see
+            :func:`_normal_tensor`).
 
     Returns:
         (nz, N, K + 1) volume fractions of the levels, then the background;
@@ -2406,7 +2437,7 @@ def _corner_pass(
         mean = _weigh_levels(visible[..., :-1], level_eps)
         square = _weigh_levels(visible[..., :-1], level_eps, power=2)
         slopes = inputs[8] if len(inputs) > 8 else None
-        return fill, _normal_tensor(inputs[1], inputs[7], flux, mean, square, rate, cell, kmass, slopes)
+        return fill, _normal_tensor(inputs[1], inputs[7], flux, mean, square, rate, cell, kmass, slopes, offdiag)
 
     return jax.lax.map(one_slice, (dense, length, present, shift, *(moments or ())))
 
@@ -3636,8 +3667,11 @@ class StackOptions:
     for a quick look at a device.
     """
 
-    #: "subpixel": Kottke averaging along the normal of each voxel's own model
-    #: (needs 3-component arrays); "inverse": the mean of 1 / eps (fdtdx's convention)
+    #: "subpixel": Kottke averaging along the normal of each voxel's own model, the
+    #: diagonal of the averaged tensor (needs 3-component arrays); "subpixel_full": the
+    #: same with its off-diagonal entries (9-component arrays: fdtdx then runs its fully
+    #: anisotropic update in the whole simulation, ~5x per step); "inverse": the mean of
+    #: 1 / eps (fdtdx's convention)
     averaging: Averaging = "subpixel"
     #: normal of "subpixel" averaging: "voxel" (each voxel's own model) or "gradient"
     #: (finite differences of the mean eps; cheaper, up to 15-33 degrees off at slanted walls)
@@ -3753,7 +3787,11 @@ class StackDevice(StaticMultiMaterialObject):
         roughness: top-surface roughness per level.
         noise_seed: roughness seed when no ``noise_key`` is passed.
         averaging: "subpixel" (Kottke, along the normal of each voxel's own
-            model) or "inverse".
+            model; the diagonal of the averaged tensor), "subpixel_full" (with
+            its off-diagonal entries: exact first-order interface correction
+            also at walls oblique to the grid; 9-component arrays, and fdtdx's
+            fully anisotropic update in the whole simulation, ~5x slower per
+            step and ~1.8x the memory) or "inverse".
         subpixel_normal: "voxel" (the normal of each voxel's own model) or
             "gradient" (finite differences of the mean eps; cheaper, less exact).
         yee_staggered: sample each E component at its own Yee position.
@@ -3826,7 +3864,10 @@ class StackDevice(StaticMultiMaterialObject):
     #: seed used for the roughness when no ``noise_key`` is passed
     noise_seed: int = frozen_field(default=0)
     #: "subpixel" (Kottke, along the interface normal of each voxel's own model:
-    #: the flux of its interfaces and its vertical profile) or "inverse" (fdtdx convention)
+    #: the flux of its interfaces and its vertical profile; the diagonal of the
+    #: averaged tensor), "subpixel_full" (the same tensor with its off-diagonal
+    #: entries, which oblique walls need; 9-component arrays) or "inverse" (fdtdx
+    #: convention)
     averaging: Averaging = frozen_field(default="subpixel")
     #: normal of "subpixel" averaging: "voxel" (from each voxel's own sub-cell model:
     #: exact for straight interfaces, also slanted, thin and sloped ones) or
@@ -5338,6 +5379,7 @@ class StackDevice(StaticMultiMaterialObject):
         apply_roughness: bool,
         shift: tuple[float, float, float],
         eps_cols: np.ndarray | None = None,
+        offdiag: bool = False,
     ) -> tuple[list[str], Array, Array | None]:
         """Volume fractions of the materials and, with ``eps_cols``, the voxels' normal tensors.
 
@@ -5356,12 +5398,15 @@ class StackDevice(StaticMultiMaterialObject):
             shift: offset (cells) of the sampled voxels from the grid's voxels.
             eps_cols: (num_materials, C) static permittivity of every material
                 (fdtdx order) for C E components, or None: fractions only.
+            offdiag: the tensor also has its off-diagonal entries.
 
         Returns:
             names: material names in fdtdx order.
             weights: (num_materials, nx, ny, nz), summing to one over materials.
             tensor: (C, 4, nx, ny, nz) variance along x, y, z and unexplained
-                variance (see :func:`_normal_tensor`), or None without ``eps_cols``.
+                variance (see :func:`_normal_tensor`), with ``offdiag``
+                (C, 7, nx, ny, nz) followed by the xy, xz, yz entries, or None
+                without ``eps_cols``.
         """
         p = {**self.init_params(), **(params or {})}
         nx, ny, nz = self.grid_shape
@@ -5371,7 +5416,8 @@ class StackDevice(StaticMultiMaterialObject):
         active, lows, highs = self._level_surfaces(p, noise_key, apply_roughness, shift[2])
         if not active:
             w = jnp.zeros((len(names), nx, ny, nz), dtype=dtype)
-            tensor = None if eps_cols is None else jnp.zeros((eps_cols.shape[1], 4, nx, ny, nz), dtype=dtype)
+            channels = 7 if offdiag else 4
+            tensor = None if eps_cols is None else jnp.zeros((eps_cols.shape[1], channels, nx, ny, nz), dtype=dtype)
             return names, w.at[names.index(self.background)].set(1.0), tensor
         is_fill = tuple(self._drawn_expr(lv)[0] == "fill" for lv, *_ in active)
         level_materials = [lv.material for lv, *_ in active]
@@ -5412,6 +5458,7 @@ class StackDevice(StaticMultiMaterialObject):
             spread = np.where(spread > 0, spread, 1.0)
             normal_args["level_eps"] = ((eps_levels - eps_background) / spread).T  # (C, K)
             normal_args["cell"] = cell
+            normal_args["offdiag"] = offdiag
             if apply_roughness and self.roughness:  # the surfaces' lateral slopes (cells per cell)
 
                 def slopes(z: Array) -> Array:
@@ -5475,6 +5522,7 @@ class StackDevice(StaticMultiMaterialObject):
                 corners if capacity else None,
                 normal_args.get("surface_slopes"),
                 knots=knots,
+                offdiag=offdiag,
             )
         weights = weights / n_sub**2
         out = []
@@ -5484,7 +5532,7 @@ class StackDevice(StaticMultiMaterialObject):
                 cols.append(len(level_materials))
             out.append(weights[..., cols].sum(axis=-1) if cols else jnp.zeros((nx, ny, nz), dtype))
         if tensor is not None:
-            tensor = jnp.moveaxis(tensor, (3, 4), (0, 1))  # (C, 4, nx, ny, nz)
+            tensor = jnp.moveaxis(tensor, (3, 4), (0, 1))  # (C, 4 or 7, nx, ny, nz)
         return names, jnp.stack(out), tensor
 
     # ------------------------------------------------------------ fdtdx hooks
@@ -5517,6 +5565,9 @@ class StackDevice(StaticMultiMaterialObject):
         if self.averaging == "subpixel":
             # makes fdtdx allocate diagonally anisotropic arrays (never painted)
             mats[_ANISOTROPY_SENTINEL] = fdtdx.Material(permittivity=(1.0, 1.0, 2.0))
+        elif self.averaging == "subpixel_full":
+            # an off-diagonal entry makes fdtdx allocate fully anisotropic arrays (never painted)
+            mats[_ANISOTROPY_SENTINEL] = fdtdx.Material(permittivity=((2.0, 0.5, 0.0), (0.5, 2.0, 0.0), (0.0, 0.0, 2.0)))
         self = self.aset("materials", mats)
         warn_reversible_losses(mats, config, self.name, conductivity=True)
         placed = super().place_on_grid(grid_slice_tuple=grid_slice_tuple, config=config, key=key)
@@ -5618,6 +5669,16 @@ class StackDevice(StaticMultiMaterialObject):
     ) -> Any:
         """Writes the mixed inverse permittivity, conductivity and pole coefficients.
 
+        With ``averaging="subpixel_full"`` (9-component arrays) row c of the
+        averaged inverse permittivity is written at E_c's Yee position, all
+        three entries: the off-diagonal ones are ``a P_cd / <eps>`` with the
+        voxel's normal tensor P (see :func:`_normal_tensor`; signed
+        finite-difference products of the mean eps for its unexplained
+        variance), ``a = <eps><1/eps> - 1``. Other averagings write the
+        diagonal and zero off-diagonal entries into 9-component arrays (made
+        by another object). The materials' own off-diagonal anisotropy is not
+        used: each E component takes the material's diagonal entry.
+
         Args:
             arrays: fdtdx ArrayContainer.
             params: device parameters (default: :meth:`init_params`).
@@ -5628,24 +5689,33 @@ class StackDevice(StaticMultiMaterialObject):
             The arrays with the device box overwritten.
 
         Raises:
-            NotImplementedError: fully anisotropic (9-component) arrays.
-            ValueError: unknown averaging, or "subpixel" with isotropic arrays.
+            ValueError: unknown averaging, "subpixel" with isotropic arrays, or
+                "subpixel_full" without 9-component arrays.
         """
         n_comp = arrays.inv_permittivities.shape[0]
-        if n_comp not in (1, 3):
-            raise NotImplementedError("Fully anisotropic permittivity arrays are not supported")
-        if self.averaging not in ("inverse", "subpixel"):
+        if n_comp not in (1, 3, 9):
+            raise ValueError(f"Unexpected number of permittivity components {n_comp}")
+        if self.averaging not in ("inverse", "subpixel", "subpixel_full"):
             raise ValueError(f"Unknown averaging {self.averaging!r}")
         if self.subpixel_normal not in ("voxel", "gradient"):
             raise ValueError(f"subpixel_normal must be 'voxel' or 'gradient', got {self.subpixel_normal!r}")
-        if self.averaging == "subpixel" and n_comp != 3:
+        if self.averaging == "subpixel" and n_comp == 1:
             raise ValueError(
                 "averaging='subpixel' needs diagonally anisotropic arrays; build the "
                 "device with from_layer_stack(..., averaging='subpixel')"
             )
+        if self.averaging == "subpixel_full" and n_comp != 9:
+            raise ValueError(
+                "averaging='subpixel_full' needs fully anisotropic (9-component) arrays; build the "
+                "device with from_layer_stack(..., averaging='subpixel_full')"
+            )
+        full = n_comp == 9
+        rows = 3 if full else n_comp  # the E components
         dtype = arrays.inv_permittivities.dtype
         iso = {"isotropic": n_comp == 1, "diagonally_anisotropic": n_comp == 3}
         eps_np = np.asarray(compute_allowed_permittivities(self.materials, **iso), dtype=float)  # (M, n_comp)
+        if full:
+            eps_np = eps_np[:, [0, 4, 8]]  # each E component's diagonal entry
         eps = jnp.asarray(eps_np, dtype=dtype)
         sigma = None
         if arrays.electric_conductivity is not None:
@@ -5658,19 +5728,22 @@ class StackDevice(StaticMultiMaterialObject):
             )  # (M, n_c)
         # each E component sees the materials around its own Yee position;
         # components are processed one at a time to bound the memory
-        shifts = _YEE_E_SHIFTS if n_comp == 3 and self.yee_staggered else ((0.0, 0.0, 0.0),)
-        subpixel = self.averaging == "subpixel"
+        shifts = _YEE_E_SHIFTS if rows == 3 and self.yee_staggered else ((0.0, 0.0, 0.0),)
+        subpixel = self.averaging in ("subpixel", "subpixel_full")
+        offdiag = self.averaging == "subpixel_full"
         voxel_normal = subpixel and self.subpixel_normal == "voxel"
         if subpixel:
             # the axes of one cell (2D simulations) get no normal component
             keep = jnp.asarray([float(n > 1) for n in self.grid_shape], dtype=dtype)[:, None, None, None]
             sentinel = np.asarray([m == _ANISOTROPY_SENTINEL for m in compute_ordered_names(self.materials)])
-        inv, cond, w_cell = [], [], 0.0
-        for c in range(n_comp):
+        inv, cond, w_cell = {}, [], 0.0
+        for c in range(rows):
             if c < len(shifts):
                 if voxel_normal:  # the normals of the component's own voxels (all three if they share them)
-                    cols = eps_np[:, [c]] if len(shifts) == n_comp else eps_np
-                    _, w, tensors = self._weights_and_normals(params, noise_key, apply_roughness, shifts[c], cols)
+                    cols = eps_np[:, [c]] if len(shifts) == rows else eps_np
+                    _, w, tensors = self._weights_and_normals(
+                        params, noise_key, apply_roughness, shifts[c], cols, offdiag=offdiag
+                    )
                     tensors = tensors.astype(dtype)
                 else:
                     w = self.material_weights(params, noise_key, apply_roughness, shifts[c])[1]
@@ -5685,18 +5758,31 @@ class StackDevice(StaticMultiMaterialObject):
                 # one-sided differences of the mean eps), or only the latter
                 # with subpixel_normal="gradient"
                 mean_eps = jnp.sum(w * e, axis=0)
+                a = _anisotropy(w, eps_np[:, c], sentinel)
                 fd = _normal_squared(mean_eps)[c]
                 n2 = fd
                 if voxel_normal:
-                    tensor = tensors[0 if len(shifts) == n_comp else c]  # (4, nx, ny, nz)
+                    tensor = tensors[0 if len(shifts) == rows else c]  # (4 or 7, nx, ny, nz)
                     along = tensor[:3] * keep
-                    n2 = (along[c] + (tensor[3] + 1e-12) * fd) / (jnp.sum(along, axis=0) + tensor[3] + 1e-12)
-                mean_inv = (1 + n2 * _anisotropy(w, eps_np[:, c], sentinel)) / mean_eps
+                    total = jnp.sum(along, axis=0) + tensor[3] + 1e-12
+                    n2 = (along[c] + (tensor[3] + 1e-12) * fd) / total
+                inv[c, c] = (1 + n2 * a) / mean_eps
+                if offdiag:  # (B - 1/A) P_cd = a P_cd / A for the two other components d
+                    fd_off = _normal_dyad(mean_eps)
+                    for k, (i, j) in enumerate(_OFFDIAG_PAIRS):
+                        if c not in (i, j):
+                            continue
+                        p_cd = fd_off[k]
+                        if voxel_normal:
+                            p_cd = (tensor[4 + k] * keep[i] * keep[j] + (tensor[3] + 1e-12) * fd_off[k]) / total
+                        inv[c, j if c == i else i] = a * p_cd / mean_eps
             else:
-                mean_inv = jnp.sum(w / e, axis=0)
-            inv.append(lap(f"E{'xyz'[c]}" if n_comp == 3 else "E", mean_inv))
+                inv[c, c] = jnp.sum(w / e, axis=0)
+            lap(f"E{'xyz'[c]}" if rows == 3 else "E", inv[c, c])
+        zero = jnp.zeros_like(inv[0, 0])
+        entries = [inv.get((c, d), zero) for c in range(3) for d in range(3)] if full else [inv[c, c] for c in range(rows)]
         arrays = arrays.at["inv_permittivities"].set(
-            arrays.inv_permittivities.at[:, *self.grid_slice].set(jnp.stack(inv).astype(dtype))
+            arrays.inv_permittivities.at[:, *self.grid_slice].set(jnp.stack(entries).astype(dtype))
         )
         lap("set_permittivity", arrays)
         if sigma is not None:
@@ -6553,6 +6639,27 @@ def _normal_squared(q: Array) -> Array:
     return g2 / (jnp.sum(g2, axis=0, keepdims=True) + 1e-12)
 
 
+def _normal_dyad(q: Array) -> Array:
+    """Off-diagonal entries (xy, xz, yz; (3, nx, ny, nz)) of the finite-difference normal tensor of ``q``.
+
+    Products of the central differences (the mean of the forward and backward
+    ones), normalized like :func:`_normal_squared`, so that with its diagonal
+    they form a positive semidefinite tensor of unit trace (zero where ``q`` is
+    uniform, and along axes of a single cell).
+    """
+    g, g2 = [], []
+    for axis in range(3):
+        pad = [(1, 1) if a == axis else (0, 0) for a in range(3)]
+        d = jnp.diff(jnp.pad(q, pad, mode="edge"), axis=axis)  # n + 1 differences
+        n = q.shape[axis]
+        forward = jax.lax.slice_in_dim(d, 1, n + 1, axis=axis)
+        backward = jax.lax.slice_in_dim(d, 0, n, axis=axis)
+        g.append(0.5 * (forward + backward))
+        g2.append(0.5 * (forward**2 + backward**2))
+    total = jnp.sum(jnp.stack(g2), axis=0) + 1e-12
+    return jnp.stack([g[i] * g[j] for i, j in _OFFDIAG_PAIRS]) / total
+
+
 def _drop_empty_pole_slots(materials: dict[str, fdtdx.Material]) -> dict[str, fdtdx.Material]:
     """Removes the pole slots that no material uses (zero strength everywhere).
 
@@ -6657,8 +6764,20 @@ def apply_stack(
     """``fdtdx.apply_params`` that also applies every :class:`StackDevice`.
 
     Stacks are written first, then ``fdtdx.apply_params`` applies the regular
-    devices and updates the sources with the final permittivity and pole
-    coefficients. ``transform_kwargs`` are forwarded to ``fdtdx.apply_params``.
+    devices. ``transform_kwargs`` are forwarded to ``fdtdx.apply_params``.
+    Last, the objects whose ``apply`` reads the materials (sources and mode
+    detectors: their modes, impedances and time offsets) and that overlap a
+    stack are applied again with the final permittivity and pole coefficients.
+    fdtdx applies objects that overlap none of its own ``Device`` objects once,
+    in ``place_objects``, on the initial painting (each voxel's dominant
+    material, see :meth:`StackDevice.get_material_mapping`), and
+    ``fdtdx.apply_params`` (0.6.3) re-applies only those overlapping a
+    ``Device``; without this step a mode source would launch the mode of that
+    painting, not of the stack, and scatter where it is injected. An object
+    is skipped while its materials are those it was last applied with here
+    (same values, compared concretely; under ``jax.grad`` by the primal
+    values), so repeated calls with unchanged parameters solve no modes.
+    ``info["stack_reapplied"]`` and ``info["stack_reused"]`` name the objects.
 
     In dispersive simulations with mode or plane-wave sources, fdtdx 0.6.2
     builds the sources' dispersive filter with numpy, so this call (like
@@ -6676,10 +6795,116 @@ def apply_stack(
     Returns:
         (arrays, objects, info) as ``fdtdx.apply_params`` returns them.
     """
-    for o in stack_devices(objects):
+    stacks = stack_devices(objects)
+    for o in stacks:
         arrays = o.write(arrays, params.get(o.name), noise_key, apply_roughness)
     lap("write_stacks", arrays)
     device_params = {d.name: params[d.name] for d in objects.devices}
-    out = fdtdx.apply_params(arrays, objects, device_params, key, **transform_kwargs)
-    lap("apply_params", out[0])
-    return out
+    arrays, objects, info = fdtdx.apply_params(arrays, objects, device_params, key, **transform_kwargs)
+    lap("apply_params", arrays)
+    objects, reapplied, reused = _reapply_stack_objects(arrays, objects, stacks, key)
+    lap("reapply_objects", objects)
+    return arrays, objects, {**info, "stack_reapplied": reapplied, "stack_reused": reused}
+
+
+def _material_slices(arrays: Any, obj: Any) -> tuple[Any, ...]:
+    """The material arrays an object's ``apply`` reads, sliced to its grid region."""
+    gs = obj.grid_slice
+    mu = arrays.inv_permeabilities
+    out = [arrays.inv_permittivities[:, *gs], mu[:, *gs] if isinstance(mu, jax.Array) and mu.ndim > 0 else mu]
+    for name in ("dispersive_c1", "dispersive_c2", "dispersive_c3"):
+        a = getattr(arrays, name, None)
+        out.append(None if a is None else a[:, :, *gs])
+    sigma = getattr(arrays, "electric_conductivity", None)
+    out.append(None if sigma is None else sigma[:, *gs])
+    return tuple(out)
+
+
+def _primal(x: Any) -> Any:
+    """The concrete value under eager-autodiff tracers (x itself otherwise)."""
+    while isinstance(x, jax.core.Tracer) and hasattr(x, "primal"):
+        x = x.primal
+    return x
+
+
+def _same_materials(record: Any, slices: tuple[Any, ...]) -> bool:
+    """Whether the materials recorded at the last re-apply equal the current ones (False when unknown)."""
+    if record is None or len(record) != len(slices):
+        return False
+    for old, new in zip(record, slices, strict=True):
+        if old is None or new is None:
+            if old is not new:
+                return False
+            continue
+        new = _primal(new)
+        if isinstance(new, jax.core.Tracer) or isinstance(old, jax.core.Tracer):
+            return False  # traced (jit): cannot tell, apply again
+        if jnp.shape(old) != jnp.shape(new) or not bool(jnp.array_equal(old, new)):
+            return False
+    return True
+
+
+def _boxes_overlap(a: Any, b: Any) -> bool:
+    """Whether two placed objects' grid regions share a voxel (half-open slices on all three axes).
+
+    Not ``SimulationObject.check_overlap``: that tests whether an end of one
+    region lies in the other on some axis, so a large box containing a plane
+    (a stack containing a port's source) counts as no overlap.
+    """
+    return all(
+        sa < ob and oa < sb
+        for (sa, sb), (oa, ob) in zip(a.grid_slice_tuple, b.grid_slice_tuple, strict=True)
+    )
+
+
+def _reapply_stack_objects(
+    arrays: Any, objects: Any, stacks: Sequence[StackDevice], key: Array
+) -> tuple[Any, list[str], list[str]]:
+    """Applies the material-reading objects that overlap a stack again, with the final arrays (see :func:`apply_stack`).
+
+    Returns:
+        The objects, and the names of those applied again and of those whose
+        materials had not changed since their last re-apply.
+    """
+    if not stacks:
+        return objects, [], []
+    devices = objects.devices
+    reapplied, reused, new_objects = [], [], []
+    for i, obj in enumerate(objects.object_list):
+        if (
+            isinstance(obj, StackDevice)
+            or type(obj).apply is SimulationObject.apply  # ignores the materials
+            or not any(_boxes_overlap(s, obj) for s in stacks)
+            # fdtdx.apply_params applied it already (its own overlap test, so exactly those objects)
+            or any(d.check_overlap(obj) for d in devices)
+        ):
+            new_objects.append(obj)
+            continue
+        slices = _material_slices(arrays, obj)
+        if _same_materials(getattr(obj, "_stack_materials", None), slices):
+            reused.append(obj.name)
+            new_objects.append(obj)
+            continue
+
+        def frozen(name: str) -> Any:
+            a = getattr(arrays, name, None)
+            return a if a is None or not isinstance(a, jax.Array) else jax.lax.stop_gradient(a)
+
+        with timed_step("reapply_object") as step:
+            obj = step.done(
+                obj.apply(
+                    key=jax.random.fold_in(key, i),
+                    inv_permittivities=frozen("inv_permittivities"),
+                    inv_permeabilities=frozen("inv_permeabilities"),
+                    dispersive_c1=frozen("dispersive_c1"),
+                    dispersive_c2=frozen("dispersive_c2"),
+                    dispersive_c3=frozen("dispersive_c3"),
+                    electric_conductivity=frozen("electric_conductivity"),
+                )
+            )
+        record = tuple(None if x is None else _primal(x) for x in slices)
+        if not any(isinstance(x, jax.core.Tracer) for x in record):
+            obj = obj.aset("_stack_materials", record, create_new_ok=True)
+        reapplied.append(obj.name)
+        new_objects.append(obj)
+    return type(objects)(object_list=new_objects, volume_idx=objects.volume_idx), reapplied, reused

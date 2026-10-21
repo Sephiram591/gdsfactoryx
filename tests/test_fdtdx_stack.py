@@ -3752,3 +3752,152 @@ def test_fdtd_solve_forward_and_gradient() -> None:
     with timed_step("fdtd_solve_gradient") as step:
         value, grad = step.done(jax.value_and_grad(energy)(0.22))
     assert np.isfinite(float(grad)) and float(grad) != 0.0
+
+
+def test_mode_objects_on_a_stack_see_the_stack_permittivity() -> None:
+    """A mode source and a mode detector on a stack's port solve their modes on the permittivity apply_stack
+    wrote: fdtdx (0.6.3) applies objects that overlap none of its own Devices only in place_objects, on the
+    dominant-material painting. A second call with the same parameters reuses them; a thicker core solves again."""
+    ls = LayerStack(layers={k: stack().layers[k] for k in ("box", "core", "clad")})
+    d = StackDevice.from_layer_stack(
+        _straight(0.0), ls, MATERIALS, background="air", name="stack", included_layers=["core"],
+        extend_ports=(("o1", 0.4),), boundary_offset=(0, 0, 0.6, -0.6, 0.4, -0.3),
+    )
+    wave = fdtdx.WaveCharacter(wavelength=1.55e-6)
+    made = [
+        d.create_mode_plane_source_at("o1", (2, 3), wave_character=wave, port_offset=-0.2),
+        d.create_mode_overlap_detector_at("o1", (2, 3), wave_characters=(wave,), port_offset=0.2),
+    ]
+    source, detector = (obj.name for obj, _ in made)
+    objects, arrays, params = _place_own_volume(d, made)
+    key = jax.random.PRNGKey(0)
+    placed = np.asarray(objects[source]._inv_permittivity)  # what place_objects solved the mode on
+
+    arrays, objects2, info = apply_stack(arrays, objects, params, key)
+    src = objects2[source]
+    np.testing.assert_array_equal(np.asarray(src._inv_permittivity), np.asarray(arrays.inv_permittivities[:, *src.grid_slice]))
+    assert not np.array_equal(placed, np.asarray(src._inv_permittivity))  # the painting is not the stack
+    assert sorted(info["stack_reapplied"]) == sorted([source, detector]) and info["stack_reused"] == []
+
+    _, objects3, info = apply_stack(arrays, objects2, params, key)
+    assert info["stack_reapplied"] == [] and sorted(info["stack_reused"]) == sorted([source, detector])
+
+    thicker = {**params, "stack": {**params["stack"], "thickness/core": 0.24}}
+    arrays4, objects4, info = apply_stack(arrays, objects3, thicker, key)
+    assert sorted(info["stack_reapplied"]) == sorted([source, detector])
+    src = objects4[source]
+    np.testing.assert_array_equal(np.asarray(src._inv_permittivity), np.asarray(arrays4.inv_permittivities[:, *src.grid_slice]))
+
+
+# ---------------------------------------------------------------- averaging="subpixel_full" (9-component tensor)
+
+
+def _full_and_diagonal(polygon, degrees=0.0, **level):
+    """inverse permittivity of a rectangle-like polygon in the box, written with "subpixel" and "subpixel_full"."""
+    out = {}
+    for averaging in ("subpixel", "subpixel_full"):
+        objects, arrays, params = _placed(
+            _polygons(polygon), _core(**level), CORE_ONLY, (2.2, 1.6, 0.3), (0.0, 0.0), z_center=0.11,
+            averaging=averaging,
+        )
+        out[averaging] = np.asarray(_box(_apply(objects, arrays, params), objects["s"], "inv_permittivities"))
+    return objects["s"], out["subpixel"], out["subpixel_full"]
+
+
+@pytest.mark.parametrize("degrees", [0.0, 30.0])
+def test_subpixel_full_keeps_the_diagonal(degrees: float) -> None:
+    """averaging="subpixel_full" writes 9 components whose diagonal is exactly the "subpixel" result. At vertical
+    walls the entries coupling z vanish; the xy entry vanishes along walls on the grid (away from corners, where a
+    voxel holding both edges gets the mixed normal tensor of both) and not at oblique ones."""
+    rect = _rotated(_rect(-0.8, -0.3, 0.8, 0.3), degrees, np.zeros(2))
+    d, diag, full = _full_and_diagonal(rect)
+    assert full.shape[0] == 9 and diag.shape[0] == 3
+    np.testing.assert_array_equal(full[[0, 4, 8]], diag)
+    assert float(np.abs(full[[2, 5, 6, 7]]).max()) < 1e-5
+    xy = np.abs(full[[1, 3]])
+    if degrees == 0.0:
+        i0, i1 = cell(d, -0.6, 0, 0)[0], cell(d, 0.6, 0, 0)[0]
+        j0, j1 = cell(d, 0, -0.15, 0)[1], cell(d, 0, 0.15, 0)[1]
+        assert float(xy[:, i0:i1].max()) < 1e-5 and float(xy[:, :, j0:j1].max()) < 1e-5
+    else:
+        assert float(xy.max()) > 0.1
+
+
+PLANAR_FRACTIONS = (0.02, 0.98)  # voxels checked against the planar formula
+PLANAR_TOL = 1e-4  # measured: 2.8e-5 (float32)
+
+
+def test_subpixel_full_matches_the_planar_interface_tensor() -> None:
+    """At an Ex position on a straight wall at 30 degrees, K_xy = (<1/eps> - 1/<eps>) n_x n_y with the exact fill
+    fraction of the voxel square and the wall's normal (Kottke averaging of a planar interface); the diagonal entry
+    K_xx = 1/<eps> + (<1/eps> - 1/<eps>) n_x^2 too."""
+    shapely = pytest.importorskip("shapely")
+    from gdsfactory.fdtdx_stack import _YEE_E_SHIFTS
+
+    th = math.radians(30.0)
+    c, s = math.cos(th), math.sin(th)
+    rect = _rotated(_rect(-0.8, -0.3, 0.8, 0.3), 30.0, np.zeros(2))
+    d, _, full = _full_and_diagonal(rect)
+    # the polygon as drawn (gdsfactory snaps the vertices to its 1 nm grid)
+    poly = shapely.Polygon(next(iter(_polygons(rect).get_polygons_points().values()))[0])
+    eps = float(np.asarray(CORE_ONLY["si"].permittivity).ravel()[0])
+    nx, ny, _ = d.grid_shape
+    k = cell(d, 0, 0, 0.11)[2]
+    errors = []
+    for i in range(nx):
+        for j in range(ny):
+            x = d.center[0] + (i + 0.5 - nx / 2 + _YEE_E_SHIFTS[0][0]) * RES
+            y = d.center[1] + (j + 0.5 - ny / 2 + _YEE_E_SHIFTS[0][1]) * RES
+            f = poly.intersection(shapely.box(x - RES / 2, y - RES / 2, x + RES / 2, y + RES / 2)).area / RES**2
+            if not PLANAR_FRACTIONS[0] < f < PLANAR_FRACTIONS[1] or abs(x * c + y * s) > 0.65:
+                continue
+            n = (-s, c) if -x * s + y * c > 0 else (s, -c)
+            mean, inv_mean = f * eps + 1 - f, f / eps + 1 - f
+            errors.append(abs(full[1, i, j, k] - (inv_mean - 1 / mean) * n[0] * n[1]))
+            errors.append(abs(full[0, i, j, k] - 1 / mean - (inv_mean - 1 / mean) * n[0] ** 2))
+    assert len(errors) > 80
+    assert max(errors) < PLANAR_TOL, max(errors)
+
+
+def test_subpixel_full_couples_z_at_sloped_sidewalls() -> None:
+    """A 10 degree sidewall tilts the wall's normal out of the plane: the xz entries are nonzero along walls normal to
+    x (and the yz entries along walls normal to y), with the sign of n_x n_z."""
+    d, diag, full = _full_and_diagonal(_rect(-0.8, -0.3, 0.8, 0.3), sidewall_angle=10.0)
+    np.testing.assert_array_equal(full[[0, 4, 8]], diag)
+    k = cell(d, 0, 0, 0.11)[2]
+    j = cell(d, 0, 0, 0)[1]
+    i_left, i_right = cell(d, -0.8, 0, 0)[0], cell(d, 0.8, 0, 0)[0]
+    left = full[2, i_left - 1 : i_left + 2, j, k]
+    right = full[2, i_right - 1 : i_right + 2, j, k]
+    assert float(np.abs(left).max()) > 1e-3 and float(np.abs(right).max()) > 1e-3
+    assert np.sign(left[np.argmax(np.abs(left))]) == -np.sign(right[np.argmax(np.abs(right))])
+
+
+def test_subpixel_full_needs_nine_components() -> None:
+    """Writing "subpixel_full" into 3-component arrays (a device built for "subpixel") is an error that says how to
+    build it."""
+    objects, arrays, params = _placed(
+        _polygons(_rect(-0.8, -0.3, 0.8, 0.3)), _core(), CORE_ONLY, (2.2, 1.6, 0.3), (0.0, 0.0), z_center=0.11
+    )
+    d = objects["s"].aset("averaging", "subpixel_full")
+    with pytest.raises(ValueError, match="9-component"):
+        d.write(arrays, params["s"])
+
+
+def test_subpixel_full_gradients_are_finite() -> None:
+    """The off-diagonal entries are differentiable in the vertices and the thickness."""
+    rect = _rotated(_rect(-0.8, -0.3, 0.8, 0.3), 30.0, np.zeros(2))
+    objects, arrays, params = _placed(
+        _polygons(rect), _core(sidewall_angle=10.0), CORE_ONLY, (2.2, 1.6, 0.3), (0.0, 0.0), z_center=0.11,
+        averaging="subpixel_full",
+    )
+    d = objects["s"]
+
+    def offdiag(p):
+        a = d.write(arrays, p)
+        return jnp.sum(a.inv_permittivities[jnp.asarray([1, 2, 3, 5, 6, 7]), *d.grid_slice] ** 2)
+
+    g = jax.grad(offdiag)(params["s"])
+    for key in ("vertices/WG", "thickness/core"):
+        leaf = np.asarray(g[key])
+        assert np.all(np.isfinite(leaf)) and float(np.abs(leaf).max()) > 0, key
