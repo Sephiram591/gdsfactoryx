@@ -30,6 +30,13 @@ __all__ = ["TRANSFORMS", "field_payload", "validate_foreign_result", "validate_r
 #: The display transforms the browser applies to a component (spec R15).
 TRANSFORMS = ("real", "imag", "abs", "phase", "logabs")
 
+#: Where a recorded sample sits along each stack axis, in grid cells from the
+#: cell's centre. fdtdx co-locates all six components at the E_z Yee point
+#: ``(i·Δx, j·Δy, (k+½)·Δz)`` (``fdtdx.core.physics.curl.interpolate_fields``):
+#: x and y samples lie on the cell's lower edge, z samples at its centre. The
+#: browser draws every sample as a cell, so it shifts the raster by this much.
+_SAMPLE_SHIFT = (-0.5, -0.5, 0.0)
+
 #: The number of grid points a grid extent may differ by before a result is
 #: refused as "recorded on a different device" (spec Q23).
 _GRID_TOL = 1
@@ -131,8 +138,10 @@ def field_payload(result: Any, name: str, spec_id: str) -> dict[str, Any] | None
         spec_id: the spec id, so the browser matches the field to its glyph.
 
     Returns:
-        ``{"id", "name", "components", "grid", "freqs", "freq", "real",
-        "imag"}`` with the two buffers as ``memoryview``s, or None.
+        ``{"id", "name", "components", "grid", "shift", "freqs", "freq",
+        "real", "imag"}`` with the two buffers as ``memoryview``s, or None.
+        ``shift`` is the ``(u, v)`` offset of a sample from its cell's centre,
+        in cells (``-0.5`` on x and y, ``0`` on z).
     """
     phasor = _detector_phasor(result, name)
     if phasor is None or phasor.ndim < 4:
@@ -166,6 +175,8 @@ def field_payload(result: Any, name: str, spec_id: str) -> dict[str, Any] | None
         "name": name,
         "components": components,
         "grid": [int(ordered.shape[2]), int(ordered.shape[3])],
+        # (u, v) sample offsets in cells, in the same stack-axis order as the grid
+        "shift": [_SAMPLE_SHIFT[i - 2] for i in in_plane],
         "freqs": _detector_freqs(result, name, num_freqs),
         "freq": 0,
         "real": real.data,

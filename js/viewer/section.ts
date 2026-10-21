@@ -353,14 +353,18 @@ export class Section2D {
     // rectangle), so the flip is done with a transform instead: translate to the
     // low-v corner and negate y, then draw with a positive height.
     const [au, av] = { xy: [0, 1], xz: [0, 2], yz: [1, 2] }[this.payload!.plane];
-    const cu = glyph.center[au];
-    const cv = glyph.center[av];
+    // a sample is drawn as a cell centred on where it was recorded, which is
+    // not always the cell's centre (``field.shift``, in cells)
+    const [shiftU, shiftV] = field.shift ?? [0, 0];
+    const cu = glyph.center[au] + (shiftU * 2 * glyph.u_half) / cols;
+    const cv = glyph.center[av] + (shiftV * 2 * glyph.v_half) / rows;
     const [x0, y1] = this.project(cu - glyph.u_half, cv - glyph.v_half);
     const [x1, y0] = this.project(cu + glyph.u_half, cv + glyph.v_half);
     const blit = fieldBlit(x0, y1, x1, y0);
     ctx.save();
     ctx.globalAlpha = alpha * settings.field_opacity;
-    ctx.imageSmoothingEnabled = true;
+    // nearest-neighbour, so each recorded sample stays a visible block
+    ctx.imageSmoothingEnabled = false;
     ctx.translate(blit.translate[0], blit.translate[1]);
     ctx.scale(blit.scale[0], blit.scale[1]);
     ctx.drawImage(image, blit.dest[0], blit.dest[1], blit.dest[2], blit.dest[3]);

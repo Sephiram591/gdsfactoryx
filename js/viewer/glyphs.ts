@@ -234,12 +234,21 @@ export class PlaneGlyphs {
       item.texture = new THREE.DataTexture(
         new Uint8Array(cols * rows * 4), cols, rows, THREE.RGBAFormat,
       );
-      item.texture.minFilter = THREE.LinearFilter;
-      item.texture.magFilter = THREE.LinearFilter;
+      // nearest-neighbour, so each recorded sample stays a visible block
+      item.texture.minFilter = THREE.NearestFilter;
+      item.texture.magFilter = THREE.NearestFilter;
       item.texture.colorSpace = THREE.SRGBColorSpace;
     }
     (item.texture.image.data as Uint8Array).set(bytes);
     item.texture.needsUpdate = true;
+    // each sample is a cell centred where it was recorded, which is not always
+    // the cell's centre (``field.shift``, in cells): slide the textured plane
+    // along its own span vectors to match
+    const [shiftU, shiftV] = field.shift ?? [0, 0];
+    const [u, v] = PLANE_SPAN[item.axis] ?? PLANE_SPAN[0];
+    item.plane.position
+      .copy(u).multiplyScalar((shiftU * 2 * item.uHalf) / cols)
+      .addScaledVector(v, (shiftV * 2 * item.vHalf) / rows);
 
     if (!item.fieldMaterial) {
       item.fieldMaterial = new THREE.MeshBasicMaterial({
@@ -265,6 +274,7 @@ export class PlaneGlyphs {
     }
     item.texture?.dispose();
     item.texture = null;
+    item.plane?.position.set(0, 0, 0);
     if (item.outline) item.outline.visible = false;
     item.material.visible = true;
   }

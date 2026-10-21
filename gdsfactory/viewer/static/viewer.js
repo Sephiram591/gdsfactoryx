@@ -30949,12 +30949,15 @@ var PlaneGlyphs = class {
         rows,
         RGBAFormat
       );
-      item.texture.minFilter = LinearFilter;
-      item.texture.magFilter = LinearFilter;
+      item.texture.minFilter = NearestFilter;
+      item.texture.magFilter = NearestFilter;
       item.texture.colorSpace = SRGBColorSpace;
     }
     item.texture.image.data.set(bytes);
     item.texture.needsUpdate = true;
+    const [shiftU, shiftV] = field.shift ?? [0, 0];
+    const [u, v] = PLANE_SPAN[item.axis] ?? PLANE_SPAN[0];
+    item.plane.position.copy(u).multiplyScalar(shiftU * 2 * item.uHalf / cols).addScaledVector(v, shiftV * 2 * item.vHalf / rows);
     if (!item.fieldMaterial) {
       item.fieldMaterial = new MeshBasicMaterial({
         transparent: true,
@@ -30977,6 +30980,7 @@ var PlaneGlyphs = class {
     }
     item.texture?.dispose();
     item.texture = null;
+    item.plane?.position.set(0, 0, 0);
     if (item.outline) item.outline.visible = false;
     item.material.visible = true;
   }
@@ -35160,14 +35164,15 @@ var Section2D = class {
     }
     image.getContext("2d").putImageData(pixels, 0, 0);
     const [au, av] = { xy: [0, 1], xz: [0, 2], yz: [1, 2] }[this.payload.plane];
-    const cu = glyph.center[au];
-    const cv = glyph.center[av];
+    const [shiftU, shiftV] = field.shift ?? [0, 0];
+    const cu = glyph.center[au] + shiftU * 2 * glyph.u_half / cols;
+    const cv = glyph.center[av] + shiftV * 2 * glyph.v_half / rows;
     const [x0, y1] = this.project(cu - glyph.u_half, cv - glyph.v_half);
     const [x1, y0] = this.project(cu + glyph.u_half, cv + glyph.v_half);
     const blit = fieldBlit(x0, y1, x1, y0);
     ctx.save();
     ctx.globalAlpha = alpha * settings.field_opacity;
-    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingEnabled = false;
     ctx.translate(blit.translate[0], blit.translate[1]);
     ctx.scale(blit.scale[0], blit.scale[1]);
     ctx.drawImage(image, blit.dest[0], blit.dest[1], blit.dest[2], blit.dest[3]);

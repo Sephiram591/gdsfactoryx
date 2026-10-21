@@ -147,6 +147,9 @@ export interface FieldPayload {
   components: string[];
   //: `[rows, cols]` of one component plane
   grid: [number, number];
+  //: where a sample sits along the plane's `(u, v)` axes, in cells from the
+  //: cell's centre (-0.5 on x and y, 0 on z); absent means cell-centred
+  shift?: [number, number];
   //: the recorded frequencies in Hz (spec R17); frame `i` of the buffers is
   //: `freqs[i]`
   freqs?: number[];

@@ -115,6 +115,31 @@ def test_field_payload_drops_the_normal_axis_wherever_it_sits() -> None:
     assert real.size == rows * cols * len(entry["components"])
 
 
+@pytest.mark.parametrize(
+    ("plane", "shift"),
+    [("xy", [-0.5, -0.5]), ("xz", [-0.5, 0.0]), ("yz", [-0.5, 0.0])],
+)
+def test_field_payload_shifts_x_and_y_samples_to_the_cell_edge(
+    plane: str, shift: list[float]
+) -> None:
+    """R15: fdtdx records x and y samples on a cell's lower edge, z at its centre.
+
+    All six components are interpolated onto ``(i·Δx, j·Δy, (k+½)·Δz)``, so the
+    payload says by how many cells each in-plane axis is off the cell centre and
+    the browser draws the raster there (nearest-neighbour, one block per sample).
+    """
+    viewer = widget.view(f1_stack())
+    _coarse(viewer)
+    viewer._on_msg(None, {"event": "add_source", "port": "o1"}, [])
+    viewer._on_msg(None, {"event": "add_detector", "port": plane}, [])
+    result = _run(viewer)
+    spec = next(s for s in viewer.specs if s.category == "detector")
+
+    entry = fields.field_payload(result, spec.name, spec.id)
+    assert entry is not None
+    assert entry["shift"] == shift
+
+
 def test_field_payload_is_none_for_a_detector_without_a_field() -> None:
     """R15 AC: a detector that recorded no field keeps its plain glyph."""
     viewer = _detector_viewer()
