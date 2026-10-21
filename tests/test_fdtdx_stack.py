@@ -3752,3 +3752,38 @@ def test_fdtd_solve_forward_and_gradient() -> None:
     with timed_step("fdtd_solve_gradient") as step:
         value, grad = step.done(jax.value_and_grad(energy)(0.22))
     assert np.isfinite(float(grad)) and float(grad) != 0.0
+
+
+def test_mode_objects_on_a_stack_see_the_stack_permittivity() -> None:
+    """A mode source and a mode detector on a stack's port solve their modes on the permittivity apply_stack
+    wrote: fdtdx (0.6.3) applies objects that overlap none of its own Devices only in place_objects, on the
+    dominant-material painting. A second call with the same parameters reuses them; a thicker core solves again."""
+    ls = LayerStack(layers={k: stack().layers[k] for k in ("box", "core", "clad")})
+    d = StackDevice.from_layer_stack(
+        _straight(0.0), ls, MATERIALS, background="air", name="stack", included_layers=["core"],
+        extend_ports=(("o1", 0.4),), boundary_offset=(0, 0, 0.6, -0.6, 0.4, -0.3),
+    )
+    wave = fdtdx.WaveCharacter(wavelength=1.55e-6)
+    made = [
+        d.create_mode_plane_source_at("o1", (2, 3), wave_character=wave, port_offset=-0.2),
+        d.create_mode_overlap_detector_at("o1", (2, 3), wave_characters=(wave,), port_offset=0.2),
+    ]
+    source, detector = (obj.name for obj, _ in made)
+    objects, arrays, params = _place_own_volume(d, made)
+    key = jax.random.PRNGKey(0)
+    placed = np.asarray(objects[source]._inv_permittivity)  # what place_objects solved the mode on
+
+    arrays, objects2, info = apply_stack(arrays, objects, params, key)
+    src = objects2[source]
+    np.testing.assert_array_equal(np.asarray(src._inv_permittivity), np.asarray(arrays.inv_permittivities[:, *src.grid_slice]))
+    assert not np.array_equal(placed, np.asarray(src._inv_permittivity))  # the painting is not the stack
+    assert sorted(info["stack_reapplied"]) == sorted([source, detector]) and info["stack_reused"] == []
+
+    _, objects3, info = apply_stack(arrays, objects2, params, key)
+    assert info["stack_reapplied"] == [] and sorted(info["stack_reused"]) == sorted([source, detector])
+
+    thicker = {**params, "stack": {**params["stack"], "thickness/core": 0.24}}
+    arrays4, objects4, info = apply_stack(arrays, objects3, thicker, key)
+    assert sorted(info["stack_reapplied"]) == sorted([source, detector])
+    src = objects4[source]
+    np.testing.assert_array_equal(np.asarray(src._inv_permittivity), np.asarray(arrays4.inv_permittivities[:, *src.grid_slice]))

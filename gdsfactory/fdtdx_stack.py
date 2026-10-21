@@ -132,13 +132,13 @@ from fdtdx.materials import (
     compute_ordered_names,
 )
 from fdtdx.objects.detectors.diffractive import DiffractiveDetector
-from fdtdx.objects.object import PositionConstraint
+from fdtdx.objects.object import PositionConstraint, SimulationObject
 from fdtdx.objects.sources.source import HardConstantAmplitudePlanceSource
 from fdtdx.objects.static_material.static import StaticMultiMaterialObject
 from fdtdx.typing import INVALID_SLICE_TUPLE_3D
 
 from gdsfactory._jax import has_tracers, to_numpy
-from gdsfactory.fdtdx_timing import StepTimings, lap, record_timings, timed
+from gdsfactory.fdtdx_timing import StepTimings, lap, record_timings, timed, timed_step
 from gdsfactory.fdtdx_geometry import (
     DerivedRecipe,
     _boundary_links,
@@ -6657,8 +6657,20 @@ def apply_stack(
     """``fdtdx.apply_params`` that also applies every :class:`StackDevice`.
 
     Stacks are written first, then ``fdtdx.apply_params`` applies the regular
-    devices and updates the sources with the final permittivity and pole
-    coefficients. ``transform_kwargs`` are forwarded to ``fdtdx.apply_params``.
+    devices. ``transform_kwargs`` are forwarded to ``fdtdx.apply_params``.
+    Last, the objects whose ``apply`` reads the materials (sources and mode
+    detectors: their modes, impedances and time offsets) and that overlap a
+    stack are applied again with the final permittivity and pole coefficients.
+    fdtdx applies objects that overlap none of its own ``Device`` objects once,
+    in ``place_objects``, on the initial painting (each voxel's dominant
+    material, see :meth:`StackDevice.get_material_mapping`), and
+    ``fdtdx.apply_params`` (0.6.3) re-applies only those overlapping a
+    ``Device``; without this step a mode source would launch the mode of that
+    painting, not of the stack, and scatter where it is injected. An object
+    is skipped while its materials are those it was last applied with here
+    (same values, compared concretely; under ``jax.grad`` by the primal
+    values), so repeated calls with unchanged parameters solve no modes.
+    ``info["stack_reapplied"]`` and ``info["stack_reused"]`` name the objects.
 
     In dispersive simulations with mode or plane-wave sources, fdtdx 0.6.2
     builds the sources' dispersive filter with numpy, so this call (like
@@ -6676,10 +6688,116 @@ def apply_stack(
     Returns:
         (arrays, objects, info) as ``fdtdx.apply_params`` returns them.
     """
-    for o in stack_devices(objects):
+    stacks = stack_devices(objects)
+    for o in stacks:
         arrays = o.write(arrays, params.get(o.name), noise_key, apply_roughness)
     lap("write_stacks", arrays)
     device_params = {d.name: params[d.name] for d in objects.devices}
-    out = fdtdx.apply_params(arrays, objects, device_params, key, **transform_kwargs)
-    lap("apply_params", out[0])
-    return out
+    arrays, objects, info = fdtdx.apply_params(arrays, objects, device_params, key, **transform_kwargs)
+    lap("apply_params", arrays)
+    objects, reapplied, reused = _reapply_stack_objects(arrays, objects, stacks, key)
+    lap("reapply_objects", objects)
+    return arrays, objects, {**info, "stack_reapplied": reapplied, "stack_reused": reused}
+
+
+def _material_slices(arrays: Any, obj: Any) -> tuple[Any, ...]:
+    """The material arrays an object's ``apply`` reads, sliced to its grid region."""
+    gs = obj.grid_slice
+    mu = arrays.inv_permeabilities
+    out = [arrays.inv_permittivities[:, *gs], mu[:, *gs] if isinstance(mu, jax.Array) and mu.ndim > 0 else mu]
+    for name in ("dispersive_c1", "dispersive_c2", "dispersive_c3"):
+        a = getattr(arrays, name, None)
+        out.append(None if a is None else a[:, :, *gs])
+    sigma = getattr(arrays, "electric_conductivity", None)
+    out.append(None if sigma is None else sigma[:, *gs])
+    return tuple(out)
+
+
+def _primal(x: Any) -> Any:
+    """The concrete value under eager-autodiff tracers (x itself otherwise)."""
+    while isinstance(x, jax.core.Tracer) and hasattr(x, "primal"):
+        x = x.primal
+    return x
+
+
+def _same_materials(record: Any, slices: tuple[Any, ...]) -> bool:
+    """Whether the materials recorded at the last re-apply equal the current ones (False when unknown)."""
+    if record is None or len(record) != len(slices):
+        return False
+    for old, new in zip(record, slices, strict=True):
+        if old is None or new is None:
+            if old is not new:
+                return False
+            continue
+        new = _primal(new)
+        if isinstance(new, jax.core.Tracer) or isinstance(old, jax.core.Tracer):
+            return False  # traced (jit): cannot tell, apply again
+        if jnp.shape(old) != jnp.shape(new) or not bool(jnp.array_equal(old, new)):
+            return False
+    return True
+
+
+def _boxes_overlap(a: Any, b: Any) -> bool:
+    """Whether two placed objects' grid regions share a voxel (half-open slices on all three axes).
+
+    Not ``SimulationObject.check_overlap``: that tests whether an end of one
+    region lies in the other on some axis, so a large box containing a plane
+    (a stack containing a port's source) counts as no overlap.
+    """
+    return all(
+        sa < ob and oa < sb
+        for (sa, sb), (oa, ob) in zip(a.grid_slice_tuple, b.grid_slice_tuple, strict=True)
+    )
+
+
+def _reapply_stack_objects(
+    arrays: Any, objects: Any, stacks: Sequence[StackDevice], key: Array
+) -> tuple[Any, list[str], list[str]]:
+    """Applies the material-reading objects that overlap a stack again, with the final arrays (see :func:`apply_stack`).
+
+    Returns:
+        The objects, and the names of those applied again and of those whose
+        materials had not changed since their last re-apply.
+    """
+    if not stacks:
+        return objects, [], []
+    devices = objects.devices
+    reapplied, reused, new_objects = [], [], []
+    for i, obj in enumerate(objects.object_list):
+        if (
+            isinstance(obj, StackDevice)
+            or type(obj).apply is SimulationObject.apply  # ignores the materials
+            or not any(_boxes_overlap(s, obj) for s in stacks)
+            # fdtdx.apply_params applied it already (its own overlap test, so exactly those objects)
+            or any(d.check_overlap(obj) for d in devices)
+        ):
+            new_objects.append(obj)
+            continue
+        slices = _material_slices(arrays, obj)
+        if _same_materials(getattr(obj, "_stack_materials", None), slices):
+            reused.append(obj.name)
+            new_objects.append(obj)
+            continue
+
+        def frozen(name: str) -> Any:
+            a = getattr(arrays, name, None)
+            return a if a is None or not isinstance(a, jax.Array) else jax.lax.stop_gradient(a)
+
+        with timed_step("reapply_object") as step:
+            obj = step.done(
+                obj.apply(
+                    key=jax.random.fold_in(key, i),
+                    inv_permittivities=frozen("inv_permittivities"),
+                    inv_permeabilities=frozen("inv_permeabilities"),
+                    dispersive_c1=frozen("dispersive_c1"),
+                    dispersive_c2=frozen("dispersive_c2"),
+                    dispersive_c3=frozen("dispersive_c3"),
+                    electric_conductivity=frozen("electric_conductivity"),
+                )
+            )
+        record = tuple(None if x is None else _primal(x) for x in slices)
+        if not any(isinstance(x, jax.core.Tracer) for x in record):
+            obj = obj.aset("_stack_materials", record, create_new_ok=True)
+        reapplied.append(obj.name)
+        new_objects.append(obj)
+    return type(objects)(object_list=new_objects, volume_idx=objects.volume_idx), reapplied, reused
