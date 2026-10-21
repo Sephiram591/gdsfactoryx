@@ -30949,8 +30949,8 @@ var PlaneGlyphs = class {
         rows,
         RGBAFormat
       );
-      item.texture.minFilter = NearestFilter;
-      item.texture.magFilter = NearestFilter;
+      item.texture.minFilter = LinearFilter;
+      item.texture.magFilter = LinearFilter;
       item.texture.colorSpace = SRGBColorSpace;
     }
     item.texture.image.data.set(bytes);

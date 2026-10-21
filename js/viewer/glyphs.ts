@@ -234,9 +234,10 @@ export class PlaneGlyphs {
       item.texture = new THREE.DataTexture(
         new Uint8Array(cols * rows * 4), cols, rows, THREE.RGBAFormat,
       );
-      // nearest-neighbour, so each recorded sample stays a visible block
-      item.texture.minFilter = THREE.NearestFilter;
-      item.texture.magFilter = THREE.NearestFilter;
+      // interpolated in 3D, where a smooth field reads better at an angle; the
+      // 2D section shades nearest-neighbour so the samples stay visible there
+      item.texture.minFilter = THREE.LinearFilter;
+      item.texture.magFilter = THREE.LinearFilter;
       item.texture.colorSpace = THREE.SRGBColorSpace;
     }
     (item.texture.image.data as Uint8Array).set(bytes);
