@@ -297,7 +297,8 @@ third of the test time in that run), and no suite was run with a feature off.
 | Option (default) | What it buys | Suite cost |
 |---|---|---|
 | `corner_lines=2` (0: off) | exact fill at polygon corners and edge crossings: corner voxels off by up to 0.25 (convex) and 0.31 (rotated polygons) without, 1e-6 with | 5.7 min (`corner_pass` 176 s, `corner_inputs` 123 s, `corner_budget` 38 s, `corner_plan` 6 s) |
-| `averaging="subpixel"` (`"inverse"`) | Kottke averaging: second-order accurate interfaces | part of `composite` painting, at most 4.2 min with everything else painted there |
+| `averaging="subpixel"` (`"inverse"`) | Kottke averaging (the diagonal of the averaged tensor): second-order accurate at interfaces along the grid; first order at oblique ones (see below) | part of `composite` painting, at most 4.2 min with everything else painted there |
+| `averaging="subpixel_full"` (opt-in) | the full averaged tensor (its off-diagonal entries too): oblique interfaces converge like grid-aligned ones | 9-component arrays: fdtdx's fully anisotropic update in the whole simulation, ~4.9x per time step and ~1.8x GPU memory on a 33M-cell device |
 | `subpixel_normal="voxel"` (`"gradient"`) | the normal of each voxel's own model: exact at slanted walls (0.01 deg), where finite differences of the mean eps are 8-33 deg off | part of the same painting; per call about 1.7x write forward and 3.0x gradient over `"gradient"` (0.095 s / 0.59 s against 0.056 s / 0.20 s on the 130 x 90 x 45 test device) |
 | `yee_staggered=True` | each E component's own Yee position (first-order error without) | 1.1 min (`write.Ey`, `write.Ez`) plus the corner budget's extra grids |
 | `xy_subsamples=1` | (s > 1 refines tips and dense curves; cost ~ s^2) | 1.4 min for the tests that use 2 |
@@ -655,6 +656,30 @@ when it detects that combination.
   GPU, after compiling for about 40 s and 80 s.
   `averaging="inverse"` is fdtdx's inverse-permittivity average; it and
   `material_weights` cost nothing extra. Conductivity is averaged linearly.
+- **Full tensor (`averaging="subpixel_full"`).** `"subpixel"` writes only the
+  diagonal of the averaged inverse permittivity
+  `K = I/<ε> + (<1/ε> - 1/<ε>) n nᵀ`; where the normal is oblique to the grid,
+  the off-diagonal entries are dropped and the interface correction is only
+  first order. `"subpixel_full"` writes all nine entries into 9-component
+  arrays: row c at E_c's Yee position (fdtdx applies it there to the other
+  components averaged onto that position), from the same voxel model (the
+  signed products of the interface flux's components, the tilted vertical
+  profile, and signed central differences of the mean ε for the unexplained
+  variance). The diagonal is identical to `"subpixel"`. The entries coupling
+  z come from sloped sidewalls and rough surfaces. A 2D test (a periodic
+  grating of ε = 12 rectangles rotated 30° and 45°, in-plane E, zero-order
+  transmission t, |t| ≈ 0.6) shows the difference: at 20 nm the error of t is
+  about 5e-3 (30°) and 3e-2 (45°) with the full tensor, 0.25 and 0.36 with the
+  diagonal; at 5 nm 1e-3 and 4e-3 against 0.067 and 0.076. Both converge to
+  the same limit (the diagonal at first order). At 30° the full tensor and
+  meep's subpixel smoothing extrapolate to the same t (within 1.2e-4), and
+  the full tensor is closer than meep at every resolution. Out-of-plane E and
+  grid-aligned walls are unaffected. fdtdx's fully anisotropic update stayed
+  stable over 3e5 time steps at contrasts 12 and 40. The cost is the whole
+  simulation's: every voxel takes the 3 x 3 update (measured: 4.9x per time
+  step and 1.8x the GPU memory on the elevator coupler's 33M cells), so it is
+  opt-in. With 9-component arrays from another object, `"subpixel"` and
+  `"inverse"` write their diagonal and zero off-diagonal entries.
 
 ### Dispersive materials
 
