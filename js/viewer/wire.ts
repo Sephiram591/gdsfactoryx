@@ -129,10 +129,17 @@ export interface SimSettingsPayload {
   //: the bottom of the `logabs` color ramp, in decades below the plane's
   //: maximum (spec R15, Q22)
   log_range: number;
+  //: how the device averages the permittivity at material interfaces (spec
+  //: R13): the diagonal Kottke tensor, the full tensor (oblique and sloped
+  //: walls; ~5x the time per step) or fdtdx's isotropic inverse average
+  averaging: Averaging;
   //: whether a stopped run keeps its partial detector fields instead of
   //: discarding them (spec D17)
   keep_partial: boolean;
 }
+
+//: The permittivity averagings the Simulation tab offers (spec R13).
+export type Averaging = "subpixel" | "subpixel_full" | "inverse";
 
 //: One detector's field from the last result (spec R15, D16, R17). The float32
 //: buffers are frequency-major stacks: frequency `f` occupies

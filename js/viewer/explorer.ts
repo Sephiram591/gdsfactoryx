@@ -619,6 +619,15 @@ export class Explorer {
     add("resolution_um", "resolution", this.numberControl(
       0.02, 0.001, (value) => this.callbacks.onSettings({ resolution_um: value }), true,
     ), "grid resolution, in µm");
+    // how the device paints the grid at material interfaces (spec R13): the
+    // names are StackDevice's own `averaging` values, so the export reads alike
+    add("averaging", "averaging", this.selectControl(
+      ["subpixel", "subpixel_full", "inverse"], "subpixel",
+      (value) => this.callbacks.onSettings({ averaging: value }),
+    ), "permittivity averaging at material interfaces: subpixel = Kottke, the diagonal "
+      + "of the averaged tensor; subpixel_full = the full tensor, accurate at oblique and "
+      + "sloped walls (~5x the time per step, ~1.8x the memory); inverse = fdtdx's "
+      + "isotropic inverse average");
     // the box is in fs; the kernel stores seconds (scale = s per fs), so the
     // typed text survives the round-trip (spec R13)
     add("time_fs", "time", this.numberControl(
@@ -649,6 +658,7 @@ export class Explorer {
       // the control's write() divides by its scale, so pass kernel units here
       time_fs: settings.time_s,
       log_range: settings.log_range,
+      averaging: settings.averaging,
       keep_partial: settings.keep_partial,
     };
     for (const [key, control] of this.simFields) {

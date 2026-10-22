@@ -206,6 +206,94 @@ def test_a_bad_settings_edit_leaves_the_state_unchanged() -> None:
     assert viewer.settings.resolution_um == before
 
 
+# ---------------------------------------------------------- R13: averaging
+
+
+def test_the_averagings_are_the_stack_devices_own() -> None:
+    """R13/C3: the settings repeat ``fdtdx_stack.Averaging`` without importing it."""
+    import typing
+
+    from gdsfactory.fdtdx_stack import Averaging
+
+    assert set(sim.AVERAGINGS) == set(typing.get_args(Averaging))
+
+
+def test_averaging_starts_as_the_devices_own() -> None:
+    """R13: the setting starts as the averaging the device was built with."""
+    built = f1_stack()
+    assert state.ViewerState(built).settings.averaging == built.averaging
+    viewer_state = state.ViewerState(built.aset("averaging", "inverse"))
+    assert viewer_state.settings.averaging == "inverse"
+    assert viewer_state.to_state()["simulation"]["averaging"] == "inverse"
+    # a result world's settings follow the device the result was recorded on
+    given = sim.SimSettings(averaging="subpixel_full", log_range=3.0)
+    viewer_state = state.ViewerState(built, settings=given)
+    assert viewer_state.settings.averaging == built.averaging
+    assert viewer_state.settings.log_range == 3.0
+
+
+def test_an_averaging_edit_is_the_one_the_device_is_placed_with() -> None:
+    """R13: the Simulation tab's averaging reaches the prepared device."""
+    viewer = widget.view(f1_stack())
+    _coarse(viewer)
+    viewer._on_msg(None, {"event": "set_settings", "settings": {"averaging": "inverse"}}, [])
+    assert viewer.state["simulation"]["averaging"] == "inverse"
+    assert viewer.stack.averaging == "inverse"
+    devices = [o for o in viewer.objects if type(o).__name__ == "StackDevice"]
+    assert [d.averaging for d in devices] == ["inverse"]
+    # the averaging does not move the geometry, so the meshes are not re-sent
+    assert viewer._viewer_state.geometry_changed is False
+
+
+def test_an_averaging_edit_survives_a_rebox() -> None:
+    """R13: a re-box rebuilds the device from its base and keeps the averaging."""
+    viewer_state = state.ViewerState(f1_stack())
+    viewer_state.apply_patch({"simulation": {"averaging": "inverse"}})
+    viewer_state.apply_patch({"simulation": {"boundary_offset": [1, -1, 0, 0, 0, 0]}})
+    assert viewer_state.stack.averaging == "inverse"
+    # both in one patch
+    viewer_state.apply_patch(
+        {"simulation": {"boundary_offset": [0, 0, 0, 0, 0, 0], "averaging": "subpixel_full"}}
+    )
+    assert viewer_state.stack.averaging == "subpixel_full"
+
+
+def test_an_unknown_averaging_is_refused() -> None:
+    """R13: an averaging the device does not know leaves the settings unchanged."""
+    built = f1_stack()
+    viewer = widget.view(built)
+    viewer._on_msg(None, {"event": "set_settings", "settings": {"averaging": "harmonic"}}, [])
+    assert viewer.settings.averaging == built.averaging
+    assert viewer.stack.averaging == built.averaging
+    with pytest.raises(ValueError, match="averaging"):
+        sim.SimSettings.from_wire({"averaging": "harmonic"})
+
+
+def test_subpixel_full_places_fully_anisotropic_arrays() -> None:
+    """R13: picking ``subpixel_full`` gives the device the 9-component arrays it writes.
+
+    Placement and the stack write only, no FDTD run.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    from gdsfactory.fdtdx_stack import apply_stack, init_stack_params
+
+    viewer = widget.view(f1_stack())
+    _coarse(viewer)
+    viewer._on_msg(None, {"event": "set_settings", "settings": {"averaging": "subpixel_full"}}, [])
+    key = jax.random.PRNGKey(0)
+    placed, arrays, params, _, _ = fdtdx.place_objects(
+        viewer.objects, viewer.config, viewer.constraints, key
+    )
+    assert arrays.inv_permittivities.shape[0] == 9
+    arrays, placed, _ = apply_stack(arrays, placed, {**params, **init_stack_params(placed)}, key)
+    inv = arrays.inv_permittivities
+    assert bool(jnp.all(jnp.isfinite(inv)))
+    # F1's sloped walls couple the components: some off-diagonal entry is set
+    assert float(jnp.max(jnp.abs(inv[jnp.array([1, 2, 3, 5, 6, 7])]))) > 0
+
+
 # ------------------------------------------------------- R12/R14 mode 2: export
 
 
@@ -854,6 +942,29 @@ def test_launch_code_reproduces_a_boundary_offset() -> None:
     assert "rebox_stack" in code
     # the emitted box is the re-boxed one: the x faces moved 1 um each
     assert "rebox_stack(stack, (1, -1, 0, 0, 0, 0,))" in code
+
+
+def test_launch_code_reproduces_an_averaging_edit() -> None:
+    """R13: an averaging other than the device's own is emitted as an ``aset``.
+
+    The script the tail is appended to defines the device as built, so the
+    emitted line must turn it into the averaging the viewer places with; back
+    on the built averaging there is nothing to emit.
+    """
+    built = f1_stack()
+    viewer = widget.view(built)
+    _coarse(viewer)
+    assert 'aset("averaging"' not in viewer.launch_code
+
+    viewer._on_msg(None, {"event": "set_settings", "settings": {"averaging": "subpixel_full"}}, [])
+    code = viewer.launch_code
+    assert "stack = stack.aset(\"averaging\", 'subpixel_full')" in code
+    namespace: dict[str, Any] = {"stack": built}
+    exec(compile(code.split("# --- run:")[0], "<launch_code>", "exec"), namespace)
+    assert namespace["objects"][1].averaging == "subpixel_full"
+
+    viewer._on_msg(None, {"event": "set_settings", "settings": {"averaging": built.averaging}}, [])
+    assert 'aset("averaging"' not in viewer.launch_code
 
 
 def test_launch_code_skips_adopted_specs() -> None:
