@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any, NamedTuple
 
 __all__ = [
+    "AVERAGINGS",
     "TYPES",
     "CancelCondition",
     "ObjectSpec",
@@ -212,6 +213,12 @@ class ObjectSpec:
         return cls(type=type_name, port=port, params=params, id=str(data.get("id") or ""))
 
 
+#: the permittivity averagings a :class:`SimSettings` accepts (spec R13): the
+#: values of :data:`gdsfactory.fdtdx_stack.Averaging`, repeated here so that
+#: importing this module does not import the simulation stack (spec C3)
+AVERAGINGS: tuple[str, ...] = ("inverse", "subpixel", "subpixel_full")
+
+
 @dataclass
 class SimSettings:
     """The setup-wide simulation settings (spec R13).
@@ -246,6 +253,14 @@ class SimSettings:
     #: (spec D16, Q22). One value for every detector's overlay; the bottom of the
     #: ``logabs`` color ramp, so a true zero maps to the floor, not to ``-inf``.
     log_range: float = 6.0
+    #: how the device averages the permittivity at material interfaces (spec
+    #: R13), one of :data:`AVERAGINGS`: ``"subpixel"`` (Kottke, the diagonal of
+    #: the averaged tensor), ``"subpixel_full"`` (the full tensor, with the
+    #: off-diagonal entries oblique and sloped walls need; about 5x the time
+    #: per step and 1.8x the memory) or ``"inverse"`` (fdtdx's isotropic
+    #: inverse average). The viewer seeds it from the device's own
+    #: ``averaging`` and places the device with it.
+    averaging: str = "subpixel"
     #: whether a run the user stops keeps its partial result (spec D17). When
     #: False (the default) a stopped run is discarded and the previous result
     #: stays on screen; when True its detectors' partial fields are shown.
@@ -262,6 +277,7 @@ class SimSettings:
             "time_s": float(self.time_s),
             "boundary_offset": [float(v) for v in self.boundary_offset],
             "log_range": float(self.log_range),
+            "averaging": str(self.averaging),
             "keep_partial": bool(self.keep_partial),
         }
 
@@ -287,6 +303,9 @@ class SimSettings:
         log_range = float(data.get("log_range", defaults.log_range))
         if not math.isfinite(log_range) or log_range <= 0:
             raise ValueError(f"log_range must be a positive number of decades, got {log_range!r}")
+        averaging = str(data.get("averaging", defaults.averaging))
+        if averaging not in AVERAGINGS:
+            raise ValueError(f"averaging must be one of {AVERAGINGS}, got {averaging!r}")
         return cls(
             wavelength_um=wavelength,
             pulse_width_frac=float(data.get("pulse_width_frac", defaults.pulse_width_frac)),
@@ -296,6 +315,7 @@ class SimSettings:
             time_s=time_s,
             boundary_offset=offset,
             log_range=log_range,
+            averaging=averaging,
             keep_partial=bool(data.get("keep_partial", defaults.keep_partial)),
         )
 
@@ -824,7 +844,8 @@ def launch_code(stack: Any, state: Any) -> str:
     Appending the result to a script that defines ``stack`` (the
     :class:`~gdsfactory.fdtdx_stack.StackDevice`) builds the same object list
     mode 2 returns. A non-zero ``boundary_offset`` is emitted as a
-    ``rebox_stack`` call reproducing the viewer's re-box (spec R13).
+    ``rebox_stack`` call reproducing the viewer's re-box, and an ``averaging``
+    other than the one the device was built with as an ``aset`` (spec R13).
 
     Args:
         stack: the :class:`~gdsfactory.fdtdx_stack.StackDevice` the code names
@@ -845,6 +866,12 @@ def launch_code(stack: Any, state: Any) -> str:
     if tuple(settings.boundary_offset) != (0.0,) * 6:
         lines.append("from gdsfactory.viewer.state import rebox_stack")
         lines.append(f"stack = rebox_stack(stack, {_seq(settings.boundary_offset)})")
+        lines.append("")
+
+    # an averaging picked in the viewer replaces the one the device was built
+    # with (spec R13): the emitted script places the device with the same one
+    if settings.averaging != getattr(state, "built_averaging", settings.averaging):
+        lines.append(f"stack = stack.aset(\"averaging\", {_repr(settings.averaging)})")
         lines.append("")
 
     # the volume and the device — the head of build_objects' object list

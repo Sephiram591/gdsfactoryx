@@ -16,6 +16,7 @@ and only :mod:`gdsfactory.viewer.widget` wraps it in a widget.
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from typing import Any, NamedTuple
 
 from gdsfactory.viewer.palette import fallback_color
@@ -116,8 +117,13 @@ class ViewerState:
             stack: a :class:`~gdsfactory.fdtdx_stack.StackDevice`.
             settings: kernel-side simulation settings for the new state;
                 defaults to fresh defaults (used by ``load_result``, R16).
+                Their ``averaging`` is replaced by the device's own.
         """
         self.stack = stack
+        #: the averaging the device was built with (spec R13): the settings
+        #: start from it, and the launch code emits an override only when the
+        #: viewer's choice differs from it
+        self.built_averaging: str = str(getattr(stack, "averaging", SimSettings.averaging))
         #: the device as built and its box, kept so a ``boundary_offset`` edit
         #: can re-box the device without rebuilding the geometry from scratch
         #: (spec R13): the offset moves the faces off this box
@@ -167,8 +173,11 @@ class ViewerState:
         #: ids of specs adopted from a loaded foreign result (spec R16); they
         #: are read-only, skipped by ``build_objects`` and flagged in ``to_state``
         self.adopted: set[str] = set()
-        #: the setup-wide simulation settings (spec R13)
-        self.settings = settings if settings is not None else SimSettings()
+        #: the setup-wide simulation settings (spec R13); their averaging starts
+        #: as the device's own, so the device and the settings agree
+        self.settings = replace(
+            settings if settings is not None else SimSettings(), averaging=self.built_averaging
+        )
         #: true while a mode-1 run is in flight; the kernel rejects setup edits
         #: in this state (spec D15). Set by the widget's run worker.
         self.running: bool = False
@@ -234,7 +243,10 @@ class ViewerState:
             base_center[1] + 0.5 * (offset[2] + offset[3]),
         )
         z_center = base_z + 0.5 * (offset[4] + offset[5])
-        stack = _rebox_stack(self._base_stack, shape, center, z_center)
+        # the base keeps the averaging it was built with; the settings' wins
+        stack = _with_averaging(
+            _rebox_stack(self._base_stack, shape, center, z_center), self.settings.averaging
+        )
         solids = analytic_solids(stack)
         self.stack = stack
         self.solids = solids
@@ -503,6 +515,9 @@ class ViewerState:
             if settings.boundary_offset != previous:
                 self.rebox(settings.boundary_offset)
             self.settings = settings
+            # the averaging is the device's own field (spec R13); the geometry
+            # does not depend on it, so nothing is rebuilt
+            self.stack = _with_averaging(self.stack, settings.averaging)
         if {"sources", "detectors", "simulation"} & set(patch):
             self.revision += 1
 
@@ -594,6 +609,18 @@ def _rebox_stack(device: Any, shape: tuple[float, float, float], center: tuple[f
     kwargs["center"] = tuple(center)
     kwargs["z_center"] = float(z_center)
     return type(device)(**kwargs)
+
+
+def _with_averaging(device: Any, averaging: str) -> Any:
+    """``device`` with its ``averaging`` set to ``averaging`` (spec R13).
+
+    The averaging only decides how the device paints the grid when it is
+    placed, so the polygons, levels and box are shared, not rebuilt. A device
+    that already averages that way (or has no ``averaging``) is returned as is.
+    """
+    if getattr(device, "averaging", averaging) == averaging:
+        return device
+    return device.aset("averaging", averaging)
 
 
 def _opacity(value: Any) -> float:

@@ -1,4 +1,4 @@
-// node_modules/three/build/three.core.js
+// ../../viewer-m5/js/node_modules/three/build/three.core.js
 var REVISION = "186";
 var MOUSE = { LEFT: 0, MIDDLE: 1, RIGHT: 2, ROTATE: 0, DOLLY: 1, PAN: 2 };
 var TOUCH = { ROTATE: 0, PAN: 1, DOLLY_PAN: 2, DOLLY_ROTATE: 3 };
@@ -17918,7 +17918,7 @@ if (typeof window !== "undefined") {
   }
 }
 
-// node_modules/three/build/three.module.js
+// ../../viewer-m5/js/node_modules/three/build/three.module.js
 function WebGLAnimation() {
   let context = null;
   let isAnimating = false;
@@ -30016,6 +30016,11 @@ var Explorer = class {
       (value) => this.callbacks.onSettings({ resolution_um: value }),
       true
     ), "grid resolution, in \xB5m");
+    add("averaging", "averaging", this.selectControl(
+      ["subpixel", "subpixel_full", "inverse"],
+      "subpixel",
+      (value) => this.callbacks.onSettings({ averaging: value })
+    ), "permittivity averaging at material interfaces: subpixel = Kottke, the diagonal of the averaged tensor; subpixel_full = the full tensor, accurate at oblique and sloped walls (~5x the time per step, ~1.8x the memory); inverse = fdtdx's isotropic inverse average");
     add("time_fs", "time", this.numberControl(
       400,
       10,
@@ -30047,6 +30052,7 @@ var Explorer = class {
       // the control's write() divides by its scale, so pass kernel units here
       time_fs: settings.time_s,
       log_range: settings.log_range,
+      averaging: settings.averaging,
       keep_partial: settings.keep_partial
     };
     for (const [key, control] of this.simFields) {
@@ -31094,7 +31100,7 @@ var LevelMeshes = class {
   }
 };
 
-// node_modules/three/examples/jsm/controls/ArcballControls.js
+// ../../viewer-m5/js/node_modules/three/examples/jsm/controls/ArcballControls.js
 var STATE = {
   IDLE: /* @__PURE__ */ Symbol(),
   ROTATE: /* @__PURE__ */ Symbol(),
@@ -33065,7 +33071,7 @@ function onWheel(event) {
   }
 }
 
-// node_modules/three/examples/jsm/controls/OrbitControls.js
+// ../../viewer-m5/js/node_modules/three/examples/jsm/controls/OrbitControls.js
 var _changeEvent2 = { type: "change" };
 var _startEvent2 = { type: "start" };
 var _endEvent2 = { type: "end" };
@@ -33981,7 +33987,7 @@ function interceptControlUp(event) {
   }
 }
 
-// node_modules/three/examples/jsm/controls/TrackballControls.js
+// ../../viewer-m5/js/node_modules/three/examples/jsm/controls/TrackballControls.js
 var _changeEvent3 = { type: "change" };
 var _startEvent3 = { type: "start" };
 var _endEvent3 = { type: "end" };
