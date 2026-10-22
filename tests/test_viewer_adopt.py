@@ -70,13 +70,18 @@ def test_glyph_from_grid_z_plane() -> None:
     glyph = adopt.glyph_from_grid(grid, 0.1e-6, (10, 10, 6), (5.0, 5.0, 0.3),
                                   "d1", "det", "PhasorDetector", "detector")
     # corner = origin - 0.5*size = (4.5, 4.5, 0.0); the slice spans 0.2..0.3 um
-    # from it along x, so the center sits at x = 4.75 in the local (mesh) frame
+    # from it along x, i.e. x = 4.7..4.8 in the local (mesh) frame. fdtdx samples
+    # an x-normal detector on the cell's lower edge, so the glyph sits at 4.7
     assert glyph["axis"] == 0
-    assert glyph["center"] == pytest.approx([4.75, 5.5, 0.5], abs=1e-9)
+    assert glyph["center"] == pytest.approx([4.7, 5.5, 0.5], abs=1e-9)
     assert glyph["u_half"] == pytest.approx(1.0, abs=1e-9)   # y half (in-plane min axis)
     assert glyph["v_half"] == pytest.approx(0.5, abs=1e-9)   # z half (in-plane max axis)
     assert glyph["port"] == "None"
     assert glyph["kind"] == "detector"
+    # a source on the same cell is not moved: it sits at the cell's center
+    source = adopt.glyph_from_grid(grid, 0.1e-6, (10, 10, 6), (5.0, 5.0, 0.3),
+                                   "s1", "src", "ModePlaneSource", "source")
+    assert source["center"] == pytest.approx([4.75, 5.5, 0.5], abs=1e-9)
 
 
 def test_glyph_from_grid_x_plane_has_axis_and_halves() -> None:
@@ -504,9 +509,22 @@ def test_none_port_spec_renders_an_absolute_glyph() -> None:
 
     Glyphs are in the meshes' local frame (center minus the box origin,
     spec C5), so the wire center is the params' stack-frame center shifted.
+    In the plane it is exactly the params' center; along the normal a
+    detector's glyph sits where fdtdx samples it (D18): for this z-normal
+    plane, the center of the cell the plane is placed in, within half a cell
+    of the requested z.
     """
     viewer = _detector_viewer()
     origin = viewer._viewer_state.origin
+    resolution = viewer.settings.resolution_um
+    box_z = float(viewer.stack.partial_real_shape[2]) * 1e6
+
+    def expected_center(center: tuple[float, float, float]) -> list[float]:
+        local = [c - o for c, o in zip(center, origin, strict=True)]
+        sampled = sim.sampled_coordinate(2, local[2], box_z, resolution)
+        assert abs(sampled - local[2]) <= 0.5 * resolution + 1e-9
+        return [local[0], local[1], sampled]
+
     viewer._on_msg(
         None,
         {"event": "add_detector", "port": "o1",
@@ -517,8 +535,7 @@ def test_none_port_spec_renders_an_absolute_glyph() -> None:
     )
     spec = next(s for s in viewer.specs if s.port == "None")
     glyph = next(g for g in viewer.state["glyphs"] if g["id"] == spec.id)
-    expected = [c - o for c, o in zip((5.0, 5.0, 0.3), origin, strict=True)]
-    assert glyph["center"] == pytest.approx(expected, abs=1e-6)
+    assert glyph["center"] == pytest.approx(expected_center((5.0, 5.0, 0.3)), abs=1e-6)
     assert glyph["axis"] == 2
     assert glyph["u_half"] == pytest.approx(2.0, abs=1e-6)
     assert glyph["v_half"] == pytest.approx(0.5, abs=1e-6)
@@ -530,8 +547,7 @@ def test_none_port_spec_renders_an_absolute_glyph() -> None:
         [],
     )
     glyph = next(g for g in viewer.state["glyphs"] if g["id"] == spec.id)
-    expected = [c - o for c, o in zip((6.0, 4.0, 0.3), origin, strict=True)]
-    assert glyph["center"] == pytest.approx(expected, abs=1e-6)
+    assert glyph["center"] == pytest.approx(expected_center((6.0, 4.0, 0.3)), abs=1e-6)
 
 
 def test_none_port_spec_places_through_place_objects() -> None:
