@@ -165,6 +165,12 @@ export interface FieldPayload {
   freqs?: number[];
   //: the recorded times in seconds, for time frames; frame `i` is `times[i]`
   times?: number[];
+  //: for time frames, the solver step each frame was recorded at, and the
+  //: solve's clock (seconds per step, number of steps), so several detectors
+  //: can play on one timeline; absent for an untimed (foreign) recording
+  steps?: number[];
+  time_step?: number;
+  steps_total?: number;
   //: how many frames the detector recorded, and the stride the kernel thinned
   //: them by to fit the wire (1 = every recorded frame is here)
   frames_recorded?: number;

@@ -113,23 +113,28 @@ def _detector_frames(result: Any, name: str) -> tuple[Any, str] | None:
     return None
 
 
-def _detector_times(result: Any, name: str, num_frames: int) -> list[float]:
-    """The times a time-domain detector recorded at, in seconds.
+def _detector_steps(result: Any, name: str, num_frames: int) -> list[int] | None:
+    """The solver steps a time-domain detector recorded at, one per frame.
 
     Read from the placed detector's on-mask (``_is_on_at_time_step_arr``, one
-    flag per simulation step, set by its ``switch``) and the config's step
-    duration, so a ``record_interval`` shows up as the spacing between frames.
-    Falls back to frame indices when either is missing or the counts disagree.
+    flag per simulation step, set by its ``switch``), so a ``record_interval``
+    shows up as the spacing between frames. None when the mask is missing or
+    its count disagrees with the frames.
     """
     try:
         on = np.asarray(result.objects[name]._is_on_at_time_step_arr)
-        step = float(result.config.time_step_duration)
     except (AttributeError, KeyError, TypeError, ValueError):
-        return [float(i) for i in range(num_frames)]
+        return None
     steps = np.flatnonzero(on)
-    if steps.size != num_frames:
-        return [float(i) for i in range(num_frames)]
-    return [float(s) * step for s in steps]
+    return [int(s) for s in steps] if steps.size == num_frames else None
+
+
+def _solve_clock(result: Any) -> tuple[float, int] | None:
+    """The run's ``(time_step_duration, time_steps_total)``, or None."""
+    try:
+        return float(result.config.time_step_duration), int(result.config.time_steps_total)
+    except (AttributeError, TypeError, ValueError):
+        return None
 
 
 def _detector_components(result: Any, name: str) -> list[str]:
@@ -184,8 +189,10 @@ def field_payload(result: Any, name: str, spec_id: str) -> dict[str, Any] | None
     Returns:
         ``{"id", "name", "components", "grid", "shift", "frame_kind", "freq",
         "frames_recorded", "frame_stride", "real"}`` plus ``"freqs"`` (Hz) and
-        ``"imag"`` for a phasor or ``"times"`` (s) for a time-domain recording,
-        with the buffers as ``memoryview``s, or None. ``shift`` is the
+        ``"imag"`` for a phasor, or ``"times"`` (s) for a time-domain
+        recording — with ``"steps"`` (the solver step of each frame),
+        ``"time_step"`` (s) and ``"steps_total"`` when the result carries its
+        clock — with the buffers as ``memoryview``s, or None. ``shift`` is the
         ``(u, v)`` offset of a sample from its cell's centre, in cells
         (``-0.5`` on x and y, ``0`` on z); ``freq`` is the initially selected
         frame.
@@ -240,7 +247,19 @@ def field_payload(result: Any, name: str, spec_id: str) -> dict[str, Any] | None
         entry["freqs"] = _detector_freqs(result, name, recorded)[::stride]
         entry["imag"] = np.ascontiguousarray(ordered.imag, dtype=np.float32).data
     else:
-        entry["times"] = _detector_times(result, name, recorded)[::stride]
+        steps = _detector_steps(result, name, recorded)
+        clock = _solve_clock(result)
+        if steps is not None and clock is not None:
+            # the solver steps the frames were recorded at, and the solve's own
+            # clock, so the browser can play several detectors on one timeline
+            step, total = clock
+            entry["steps"] = steps[::stride]
+            entry["times"] = [s * step for s in entry["steps"]]
+            entry["time_step"] = step
+            entry["steps_total"] = total
+        else:
+            # no on-mask or clock: the frames are ordered but not timed
+            entry["times"] = [float(i) for i in range(recorded)][::stride]
     return entry
 
 

@@ -88,7 +88,7 @@ def _fake_result(frames: np.ndarray, on: np.ndarray, step: float = 1e-17) -> Any
     return SimpleNamespace(
         objects={"d": obj},
         arrays=SimpleNamespace(detector_states={"d": {"fields": frames}}),
-        config=SimpleNamespace(time_step_duration=step),
+        config=SimpleNamespace(time_step_duration=step, time_steps_total=len(on)),
     )
 
 
@@ -111,6 +111,10 @@ def test_a_field_detector_records_frames_the_browser_can_play() -> None:
     assert entry["frames_recorded"] == frames == -(-total // 50)
     assert entry["frame_stride"] == 1
     assert np.allclose(np.diff(entry["times"]), 50 * float(result.config.time_step_duration))
+    # the solver steps and the solve's clock, for playing detectors together
+    assert entry["steps"] == list(range(0, total, 50))
+    assert entry["steps_total"] == total
+    assert entry["time_step"] == pytest.approx(float(result.config.time_step_duration))
     rows, cols = entry["grid"]
     real = np.frombuffer(entry["real"], dtype=np.float32)
     assert real.size == frames * rows * cols
@@ -129,10 +133,22 @@ def test_frames_over_the_wire_budget_are_thinned(monkeypatch: pytest.MonkeyPatch
     assert entry["frame_stride"] == 3
     assert entry["frames_recorded"] == 10
     assert entry["times"] == pytest.approx([0.0, 6e-17, 12e-17, 18e-17])
+    assert entry["steps"] == [0, 6, 12, 18]
+    assert entry["steps_total"] == 20
     # (frames, components, v, u): the y-normal plane's u is x (4), v is z (3)
     assert entry["grid"] == [3, 4]
     sent = np.frombuffer(entry["real"], dtype=np.float32).reshape(4, 2, 3, 4)
     assert np.array_equal(sent, np.swapaxes(frames[::3, :, :, 0, :], 2, 3))
+
+
+def test_an_untimed_recording_is_ordered_but_not_timed() -> None:
+    """Without the on-mask or the solve's clock, frames get indices and no steps."""
+    frames = np.zeros((3, 2, 4, 1, 3), dtype=np.float32)
+    result = _fake_result(frames, np.ones(3, dtype=bool))
+    del result.objects["d"]._is_on_at_time_step_arr
+    entry = fields.field_payload(result, "d", "id")
+    assert entry["times"] == [0.0, 1.0, 2.0]
+    assert "steps" not in entry and "steps_total" not in entry
 
 
 def test_a_phasor_still_sends_frequency_frames() -> None:

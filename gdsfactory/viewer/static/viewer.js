@@ -29681,6 +29681,7 @@ var Explorer = class {
     this.resultLayers = /* @__PURE__ */ new Map();
     /** each multi-frame detector's play / fps / save-video row, keyed by spec id */
     this.resultPlayback = /* @__PURE__ */ new Map();
+    this.groupPlaying = false;
     this.locked = false;
     this.root = document.createElement("div");
     this.root.className = "gfx-explorer";
@@ -29704,6 +29705,40 @@ var Explorer = class {
     );
     this.resultLayersList = document.createElement("div");
     this.resultLayersRoot = this.section("Layers", [this.resultLayersList]);
+    this.groupPlay = document.createElement("button");
+    this.groupPlay.type = "button";
+    this.groupPlay.className = "gfx-section-add";
+    this.groupRecord = document.createElement("button");
+    this.groupRecord.type = "button";
+    this.groupRecord.className = "gfx-section-add";
+    this.groupRecord.innerHTML = VIDEO_ICON;
+    this.groupRecord.setAttribute("aria-label", "record all time-domain detectors");
+    this.groupActions = document.createElement("span");
+    this.groupActions.className = "gfx-section-actions";
+    this.groupActions.append(this.groupPlay, this.groupRecord);
+    this.groupFps = document.createElement("input");
+    this.groupFps.type = "number";
+    this.groupFps.className = "gfx-numeric";
+    this.groupFps.min = "1";
+    this.groupFps.max = "120";
+    this.groupFps.step = "1";
+    this.groupFps.value = "20";
+    this.groupReadout = document.createElement("span");
+    this.groupReadout.className = "gfx-label";
+    this.groupRow = fieldRow(
+      "fps",
+      this.groupFps,
+      "frames per second for playing or recording every time-domain detector together"
+    );
+    this.groupRow.appendChild(this.groupReadout);
+    const groupRate = () => Math.min(120, Math.max(1, Math.round(Number(this.groupFps.value) || 20)));
+    this.groupPlay.addEventListener("click", () => this.callbacks.onPlayAll(!this.groupPlaying, groupRate()));
+    this.groupFps.addEventListener("change", () => {
+      if (this.groupPlaying) this.callbacks.onPlayAll(true, groupRate());
+    });
+    this.groupRecord.addEventListener("click", () => this.callbacks.onRecordAll(groupRate()));
+    this.setGroupPlaying(false);
+    this.setGroup(null);
     this.layoutPanel = this.panel([]);
     this.resultPanel = this.panel([
       this.resultNote,
@@ -29711,7 +29746,7 @@ var Explorer = class {
       this.section("Sources", [this.resultSourceList]),
       // one card per detector with a field, under its own header like the
       // Layers and Sources sections above
-      this.section("Detectors", [this.resultSections])
+      this.section("Detectors", [this.groupRow, this.resultSections], this.groupActions)
     ]);
     this.panels = [
       this.layoutPanel,
@@ -29781,6 +29816,36 @@ var Explorer = class {
     row2.playing = playing;
     row2.play.textContent = playing ? "\u275A\u275A" : "\u25B6";
     row2.play.title = playing ? "pause" : "play the recorded frames";
+  }
+  /**
+   * Shows or hides play / record all (they need a time-domain detector) and
+   * says in their tooltips what the shared timeline is.
+   */
+  setGroup(info) {
+    const available = info !== null;
+    this.groupActions.hidden = !available;
+    this.groupRow.hidden = !available;
+    if (!info) return;
+    const what = info.detectors === 1 ? "the time-domain detector" : `all ${info.detectors} time-domain detectors`;
+    const timeline = info.kind === "solve" ? `their time grids differ, so every step of the solve (${info.frames} frames); each shows its last recorded frame, and is transparent until it first records` : `${info.frames} frames`;
+    this.groupPlay.dataset.hint = `play ${what} together: ${timeline}`;
+    this.groupRecord.title = `record ${what} together as one MP4 of the active viewport: ${timeline}; the settings screen's "Save to" picks download or server`;
+    this.setGroupPlaying(this.groupPlaying);
+  }
+  /** Shows play all as playing (pause) or stopped (play). */
+  setGroupPlaying(playing) {
+    this.groupPlaying = playing;
+    this.groupPlay.textContent = playing ? "\u275A\u275A" : "\u25B6";
+    this.groupPlay.title = playing ? "pause" : this.groupPlay.dataset.hint ?? "play all";
+  }
+  /** Greys play / record all while their video is being saved. */
+  setGroupSaving(saving) {
+    this.groupPlay.disabled = saving;
+    this.groupRecord.disabled = saving;
+  }
+  /** The shared timeline's position: its time in fs, or its frame index. */
+  showGroupTime(text) {
+    this.groupReadout.textContent = text;
   }
   /** Greys a detector's playback row while its video is being saved. */
   setSaving(id, saving) {
@@ -30493,10 +30558,11 @@ var Explorer = class {
     controls.set("field_freq", {
       element: freq,
       write: (value) => {
-        const frame = Math.max(0, Math.floor(Number(value ?? 0)));
+        const raw = Math.floor(Number(value ?? 0));
+        const frame = Math.max(0, raw);
         if (document.activeElement !== freq && freq.value !== String(frame)) freq.value = String(frame);
-        freqLabel.textContent = frameReadout(this.fields[id], frame);
-        freqLabel.title = frameNote(this.fields[id], frame);
+        freqLabel.textContent = raw < 0 ? "not recorded yet" : frameReadout(this.fields[id], frame);
+        freqLabel.title = raw < 0 ? "" : frameNote(this.fields[id], frame);
       },
       setDisabled(value) {
         freq.disabled = value;
@@ -31197,14 +31263,15 @@ var PlaneGlyphs = class {
    * `field` — no result, no component, or `field_visible` off — restores the
    * plain glyph. `frame` overrides the stored `field_freq` (playback and video
    * export step it client-side); every frame is shaded on the detector's one
-   * fixed range (`shadeRange`).
+   * fixed range (`shadeRange`). A negative `frame` — a detector that has not
+   * recorded yet at this point of a shared timeline — shades fully transparent.
    */
   setField(id, field, settings, logRange, frame) {
     const item = this.items.get(id);
     if (!item || !item.plane) return;
     const component = settings.field_component;
     const shown = frame ?? settings.field_freq ?? 0;
-    const data = field && component ? componentData(field, component, shown) : null;
+    const data = field && component ? componentData(field, component, Math.max(0, shown)) : null;
     if (!field || !data || !settings.field_visible) {
       this.clearField(item);
       return;
@@ -31213,7 +31280,8 @@ var PlaneGlyphs = class {
     const range = shadeRange(field, settings, logRange);
     const low = parseColor(settings.field_color_low);
     const high = parseColor(settings.field_color_high);
-    const bytes = rampTexture(values, range, settings.field_transform, low, high, settings.field_opacity);
+    const opacity = shown < 0 ? 0 : settings.field_opacity;
+    const bytes = rampTexture(values, range, settings.field_transform, low, high, opacity);
     const [rows, cols] = field.grid;
     if (!item.texture || item.texture.image.width !== cols || item.texture.image.height !== rows) {
       item.texture?.dispose();
@@ -35285,8 +35353,18 @@ var Section2D = class {
   }
   /** Shows `frame` of a detector instead of its stored one (null: stop); re-draws. */
   setFrame(id, frame) {
-    if (frame === null) this.frameOverrides.delete(id);
-    else this.frameOverrides.set(id, frame);
+    this.setFrames(/* @__PURE__ */ new Map([[id, frame]]));
+  }
+  /**
+   * Shows several detectors' frames at once (a shared timeline), with one
+   * re-draw. A negative frame — not recorded yet — draws nothing for that
+   * detector (fully transparent); null returns it to its stored frame.
+   */
+  setFrames(frames) {
+    for (const [id, frame] of frames) {
+      if (frame === null) this.frameOverrides.delete(id);
+      else this.frameOverrides.set(id, frame);
+    }
     this.draw();
   }
   /** Draws now and returns the canvas, so a video frame captures this state. */
@@ -35429,6 +35507,7 @@ var Section2D = class {
       const field = this.fields[glyph.id];
       if (!settings || !settings.field_visible || !field || !settings.field_component) continue;
       const frame = this.frameOverrides.get(glyph.id) ?? settings.field_freq ?? 0;
+      if (frame < 0) continue;
       const data = componentData(field, settings.field_component, frame);
       if (!data) continue;
       const distance = glyph.center[glyph.axis] - (payload.position - origin[normalStack]);
@@ -35851,6 +35930,47 @@ var Section2D = class {
   }
 };
 
+// viewer/timeline.ts
+function buildTimeline(fields) {
+  const entries = Object.entries(fields).filter(([, field]) => field.frame_kind === "time");
+  if (entries.length === 0) return null;
+  const ids = entries.map(([id]) => id);
+  const frames = /* @__PURE__ */ new Map();
+  const grids = entries.map(([, field]) => field.steps ?? null);
+  const first = grids[0];
+  if (first && grids.every((grid) => grid !== null && sameNumbers(grid, first))) {
+    for (const id of ids) frames.set(id, Int32Array.from(first, (_, i) => i));
+    const times = entries[0][1].times ?? first.map((_, i) => i);
+    return { ids, times: times.slice(0, first.length), frames, kind: "shared" };
+  }
+  const timed = entries.every(([, field]) => field.steps && field.time_step !== void 0 && field.steps_total !== void 0);
+  if (timed) {
+    const total = Math.max(...entries.map(([, field]) => field.steps_total ?? 0));
+    const step = entries[0][1].time_step ?? 0;
+    for (const [id, field] of entries) frames.set(id, holdFrames(field.steps ?? [], total));
+    return { ids, times: Array.from({ length: total }, (_, k) => k * step), frames, kind: "solve" };
+  }
+  const counts = entries.map(([, field]) => (field.times ?? []).length);
+  const length = Math.max(1, ...counts);
+  entries.forEach(([id], d) => {
+    const last = Math.max(0, counts[d] - 1);
+    frames.set(id, Int32Array.from({ length }, (_, i) => Math.min(i, last)));
+  });
+  return { ids, times: Array.from({ length }, (_, i) => i), frames, kind: "index" };
+}
+function holdFrames(steps, total) {
+  const out = new Int32Array(total).fill(-1);
+  let next = 0;
+  for (let k = 0; k < total; k += 1) {
+    while (next < steps.length && steps[next] <= k) next += 1;
+    out[k] = next - 1;
+  }
+  return out;
+}
+function sameNumbers(a, b) {
+  return a.length === b.length && a.every((value, i) => value === b[i]);
+}
+
 // viewer/video.ts
 var CANDIDATES = [
   { codec: "avc1.640033", kind: "h264" },
@@ -36078,6 +36198,11 @@ function render({ model, el }) {
     onPlay: (id, play, fps) => play ? startPlaying(id, fps) : stopPlaying(id),
     onSaveVideo: (id, fps) => {
       void saveVideo(id, fps);
+    },
+    // every time-domain detector together, on one timeline (see timeline.ts)
+    onPlayAll: (play, fps) => play ? startGroup(fps) : stopGroup(),
+    onRecordAll: (fps) => {
+      void recordAll(fps);
     }
   });
   const viewport = document.createElement("div");
@@ -36234,6 +36359,8 @@ function render({ model, el }) {
   const exporting = /* @__PURE__ */ new Set();
   const awaitingEcho = /* @__PURE__ */ new Set();
   let playHandle = 0;
+  let group = null;
+  let timelineCache = null;
   const disposeContent = () => {
     for (const meshes of levels.values()) {
       meshes.dispose();
@@ -36391,9 +36518,12 @@ function render({ model, el }) {
     const settings2 = state.field_settings ?? {};
     const logRange = state.simulation?.log_range ?? 6;
     const shading = state.active_tab === "result";
-    if (!shading) for (const id of [...playing.keys()]) stopPlaying(id);
+    if (!shading) {
+      for (const id of [...playing.keys()]) stopPlaying(id);
+      stopGroup();
+    }
     for (const [id, frame] of [...playFrame]) {
-      if (playing.has(id) || exporting.has(id)) continue;
+      if (playing.has(id) || exporting.has(id) || group?.timeline.ids.includes(id)) continue;
       const echoed = (settings2[id]?.field_freq ?? 0) === frame;
       if (echoed || !awaitingEcho.has(id)) {
         playFrame.delete(id);
@@ -36412,21 +36542,32 @@ function render({ model, el }) {
       );
     }
     explorer.setFields(fields);
+    const timeline = currentTimeline();
+    explorer.setGroup(timeline ? { frames: timeline.times.length, detectors: timeline.ids.length, kind: timeline.kind } : null);
     section.setFields(shading ? fields : {});
     renderColorbar(state, fields, shading);
   }
-  const currentFields = () => model.get("fields") ?? {};
+  function currentFields() {
+    return model.get("fields") ?? {};
+  }
   const storedFrame = (id) => model.get("state").field_settings?.[id]?.field_freq ?? 0;
-  const shadeFrame = (id, frame) => {
+  const shadeFrames = (frames) => {
     const state = model.get("state");
-    const settings2 = state.field_settings?.[id];
-    const field = currentFields()[id];
-    if (!settings2 || !field) return;
-    playFrame.set(id, frame);
-    planes.setField(id, field, settings2, state.simulation?.log_range ?? 6, frame);
-    section.setFrame(id, frame);
-    explorer.showFrame(id, frame);
+    const fields = currentFields();
+    const logRange = state.simulation?.log_range ?? 6;
+    const shown = /* @__PURE__ */ new Map();
+    for (const [id, frame] of frames) {
+      const settings2 = state.field_settings?.[id];
+      const field = fields[id];
+      if (!settings2 || !field) continue;
+      playFrame.set(id, frame);
+      planes.setField(id, field, settings2, logRange, frame);
+      explorer.showFrame(id, frame);
+      shown.set(id, frame);
+    }
+    section.setFrames(shown);
   };
+  const shadeFrame = (id, frame) => shadeFrames(/* @__PURE__ */ new Map([[id, frame]]));
   const tick = (now) => {
     playHandle = 0;
     const fields = currentFields();
@@ -36440,10 +36581,16 @@ function render({ model, el }) {
       clock.last = now;
       shadeFrame(id, ((playFrame.get(id) ?? storedFrame(id)) + 1) % frameCount(field));
     }
-    if (playing.size > 0) playHandle = requestAnimationFrame(tick);
+    if (group && now - group.last >= 1e3 / group.fps) {
+      group.last = now;
+      group.index = (group.index + 1) % group.timeline.times.length;
+      showGroupFrame(group.timeline, group.index);
+    }
+    if (playing.size > 0 || group) playHandle = requestAnimationFrame(tick);
   };
   function startPlaying(id, fps) {
     if (exporting.has(id)) return;
+    stopGroup();
     const was = playing.get(id);
     playing.set(id, { fps, last: was?.last ?? performance.now() });
     if (!playFrame.has(id)) playFrame.set(id, storedFrame(id));
@@ -36475,6 +36622,7 @@ function render({ model, el }) {
       showToast("pick a component to shade before saving a video");
       return;
     }
+    stopGroup();
     stopPlaying(id);
     exporting.add(id);
     explorer.setSaving(id, true);
@@ -36505,6 +36653,101 @@ function render({ model, el }) {
       explorer.setSaving(id, false);
       playFrame.delete(id);
       section.setFrame(id, null);
+      applyFields();
+    }
+  }
+  function currentTimeline() {
+    const fields = currentFields();
+    if (timelineCache?.fields !== fields) {
+      timelineCache = { fields, timeline: buildTimeline(fields) };
+    }
+    return timelineCache.timeline;
+  }
+  const framesAt = (timeline, index) => new Map(timeline.ids.map((id) => [id, timeline.frames.get(id)?.[index] ?? -1]));
+  function showGroupFrame(timeline, index) {
+    shadeFrames(framesAt(timeline, index));
+    const count = timeline.times.length;
+    explorer.showGroupTime(timeline.kind === "index" ? `frame ${index + 1} of ${count}` : `${(timeline.times[index] * 1e15).toFixed(1)} fs (${index + 1} of ${count})`);
+  }
+  function startGroup(fps) {
+    if (group) {
+      group.fps = fps;
+      return;
+    }
+    const timeline = currentTimeline();
+    const state = model.get("state");
+    if (!timeline || timeline.times.length === 0 || state.active_tab !== "result") return;
+    if (timeline.ids.some((id) => exporting.has(id))) return;
+    for (const id of [...playing.keys()]) stopPlaying(id);
+    group = { timeline, fps, last: performance.now(), index: 0 };
+    showGroupFrame(timeline, 0);
+    explorer.setGroupPlaying(true);
+    if (playHandle === 0) playHandle = requestAnimationFrame(tick);
+  }
+  function stopGroup() {
+    if (!group) return;
+    const { timeline, index } = group;
+    group = null;
+    explorer.setGroupPlaying(false);
+    const stopped = new Map(timeline.ids.map((id) => [id, Math.max(0, timeline.frames.get(id)?.[index] ?? 0)]));
+    shadeFrames(stopped);
+    for (const [id, frame] of stopped) {
+      awaitingEcho.add(id);
+      send(model, {
+        event: "update_spec",
+        kind: "detector",
+        spec: { id, params: { field_freq: frame } }
+      });
+    }
+  }
+  async function recordAll(fps) {
+    const timeline = currentTimeline();
+    const state = model.get("state");
+    if (!timeline || state.active_tab !== "result") return;
+    if (!videoSupported()) {
+      showToast("this browser cannot encode video (no WebCodecs): use a recent Chrome, Edge, Safari or Firefox");
+      return;
+    }
+    if (timeline.ids.some((id) => exporting.has(id))) return;
+    stopGroup();
+    for (const id of [...playing.keys()]) stopPlaying(id);
+    for (const id of timeline.ids) exporting.add(id);
+    explorer.setGroupSaving(true);
+    const is2d = state.active_viewport === "2d";
+    try {
+      const video = await encodeFrames(
+        timeline.times.length,
+        fps,
+        (index) => {
+          showGroupFrame(timeline, index);
+          return is2d ? section.captureCanvas() : scene.captureCanvas();
+        },
+        (index, count) => {
+          if (index % 25 === 0 || index === count - 1) showToast(`encoding frame ${index + 1} of ${count}`);
+        }
+      );
+      showToast(video.codec === "h264" ? "writing the MP4\u2026" : `writing the MP4 (from ${video.codec})\u2026`);
+      model.send(
+        {
+          event: "save_video",
+          filename: "time-domain-detectors",
+          codec: video.codec,
+          fps,
+          target: readSaveTarget()
+        },
+        void 0,
+        [video.bytes.buffer]
+      );
+    } catch (error2) {
+      showToast(`video export failed: ${error2 instanceof Error ? error2.message : String(error2)}`);
+    } finally {
+      for (const id of timeline.ids) {
+        exporting.delete(id);
+        playFrame.delete(id);
+      }
+      section.setFrames(new Map(timeline.ids.map((id) => [id, null])));
+      explorer.setGroupSaving(false);
+      explorer.showGroupTime("");
       applyFields();
     }
   }
@@ -36665,10 +36908,13 @@ function render({ model, el }) {
   };
   const applyNewFields = () => {
     for (const id of playing.keys()) explorer.setPlaying(id, false);
-    for (const id of playFrame.keys()) section.setFrame(id, null);
+    section.setFrames(new Map([...playFrame.keys()].map((id) => [id, null])));
     playing.clear();
     playFrame.clear();
     awaitingEcho.clear();
+    group = null;
+    explorer.setGroupPlaying(false);
+    explorer.showGroupTime("");
     applyFields();
   };
   model.on("msg:custom", (content2, buffers) => {

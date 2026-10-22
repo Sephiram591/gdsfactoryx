@@ -13,6 +13,7 @@ import { PlaneGlyphs, PortGlyphs } from "./glyphs";
 import { LevelMeshes } from "./mesh";
 import { Scene3D, CONTROL_KINDS, type ControlKind } from "./scene";
 import { Section2D } from "./section";
+import { buildTimeline, type Timeline } from "./timeline";
 import { encodeFrames, videoSupported } from "./video";
 import type {
   FieldPayload,
@@ -226,6 +227,11 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
     onSaveVideo: (id, fps) => {
       void saveVideo(id, fps);
     },
+    // every time-domain detector together, on one timeline (see timeline.ts)
+    onPlayAll: (play, fps) => (play ? startGroup(fps) : stopGroup()),
+    onRecordAll: (fps) => {
+      void recordAll(fps);
+    },
   });
 
   // -- viewport -------------------------------------------------------------
@@ -425,6 +431,10 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   //: detectors whose stopped-on frame was sent and not yet echoed back
   const awaitingEcho = new Set<string>();
   let playHandle = 0;
+  //: play all: every time-domain detector stepping one shared timeline
+  let group: { timeline: Timeline; fps: number; last: number; index: number } | null = null;
+  //: the shared timeline of the current fields payload, built once per payload
+  let timelineCache: { fields: Record<string, FieldPayload>; timeline: Timeline | null } | null = null;
 
   const disposeContent = (): void => {
     for (const meshes of levels.values()) {
@@ -633,11 +643,14 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
     // fields shade only while the Result tab is active (spec R17): the editor
     // views show the setup, never an overlay — and nothing plays there
     const shading = state.active_tab === "result";
-    if (!shading) for (const id of [...playing.keys()]) stopPlaying(id);
+    if (!shading) {
+      for (const id of [...playing.keys()]) stopPlaying(id);
+      stopGroup();
+    }
     // a frame shown by playback stays until the kernel echoes the one playback
     // stopped on; then the stored `field_freq` takes over again
     for (const [id, frame] of [...playFrame]) {
-      if (playing.has(id) || exporting.has(id)) continue;
+      if (playing.has(id) || exporting.has(id) || group?.timeline.ids.includes(id)) continue;
       const echoed = (settings[id]?.field_freq ?? 0) === frame;
       if (echoed || !awaitingEcho.has(id)) {
         playFrame.delete(id);
@@ -653,6 +666,10 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
       );
     }
     explorer.setFields(fields);
+    const timeline = currentTimeline();
+    explorer.setGroup(timeline
+      ? { frames: timeline.times.length, detectors: timeline.ids.length, kind: timeline.kind }
+      : null);
     section.setFields(shading ? fields : {});
     renderColorbar(state, fields, shading);
   }
@@ -664,22 +681,35 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   // round trip, on the detector's one fixed colour scale. `playFrame` (declared
   // with the planes, since the first content build already shades) overrides
   // the stored `field_freq` while it plays or is exported.
-  const currentFields = (): Record<string, FieldPayload> =>
-    (model.get("fields") as Record<string, FieldPayload> | undefined) ?? {};
+  // a declaration, so the first content build's applyFields can already call it
+  function currentFields(): Record<string, FieldPayload> {
+    return (model.get("fields") as Record<string, FieldPayload> | undefined) ?? {};
+  }
   const storedFrame = (id: string): number =>
     (model.get("state") as StatePayload).field_settings?.[id]?.field_freq ?? 0;
 
-  /** Shows frame `frame` of a detector everywhere it is drawn. */
-  const shadeFrame = (id: string, frame: number): void => {
+  /**
+   * Shows the given frame of each detector everywhere it is drawn (the 2D
+   * section re-draws once). A negative frame — a detector that has not
+   * recorded yet on a shared timeline — is fully transparent.
+   */
+  const shadeFrames = (frames: Map<string, number>): void => {
     const state = model.get("state") as StatePayload;
-    const settings = state.field_settings?.[id];
-    const field = currentFields()[id];
-    if (!settings || !field) return;
-    playFrame.set(id, frame);
-    planes.setField(id, field, settings, state.simulation?.log_range ?? 6, frame);
-    section.setFrame(id, frame);
-    explorer.showFrame(id, frame);
+    const fields = currentFields();
+    const logRange = state.simulation?.log_range ?? 6;
+    const shown = new Map<string, number | null>();
+    for (const [id, frame] of frames) {
+      const settings = state.field_settings?.[id];
+      const field = fields[id];
+      if (!settings || !field) continue;
+      playFrame.set(id, frame);
+      planes.setField(id, field, settings, logRange, frame);
+      explorer.showFrame(id, frame);
+      shown.set(id, frame);
+    }
+    section.setFrames(shown);
   };
+  const shadeFrame = (id: string, frame: number): void => shadeFrames(new Map([[id, frame]]));
 
   const tick = (now: number): void => {
     playHandle = 0;
@@ -694,11 +724,17 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
       clock.last = now;
       shadeFrame(id, ((playFrame.get(id) ?? storedFrame(id)) + 1) % frameCount(field));
     }
-    if (playing.size > 0) playHandle = requestAnimationFrame(tick);
+    if (group && now - group.last >= 1000 / group.fps) {
+      group.last = now;
+      group.index = (group.index + 1) % group.timeline.times.length;
+      showGroupFrame(group.timeline, group.index);
+    }
+    if (playing.size > 0 || group) playHandle = requestAnimationFrame(tick);
   };
 
   function startPlaying(id: string, fps: number): void {
     if (exporting.has(id)) return;
+    stopGroup(); // one detector playing on its own takes over from play all
     const was = playing.get(id);
     playing.set(id, { fps, last: was?.last ?? performance.now() });
     if (!playFrame.has(id)) playFrame.set(id, storedFrame(id));
@@ -739,6 +775,7 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
       showToast("pick a component to shade before saving a video");
       return;
     }
+    stopGroup();
     stopPlaying(id);
     exporting.add(id);
     explorer.setSaving(id, true);
@@ -771,6 +808,120 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
       // back to the stored frame
       playFrame.delete(id);
       section.setFrame(id, null);
+      applyFields();
+    }
+  }
+
+  // -- play / record all: every time-domain detector on one timeline ---------
+  // The Detectors header's play and record buttons step every time-domain
+  // detector together (timeline.ts): their own frames when they share a time
+  // grid, else every step of the solve with each holding its last recorded
+  // frame (fully transparent before its first).
+
+  /** The shared timeline of the current payload (built once per payload). */
+  function currentTimeline(): Timeline | null {
+    const fields = currentFields();
+    if (timelineCache?.fields !== fields) {
+      timelineCache = { fields, timeline: buildTimeline(fields) };
+    }
+    return timelineCache.timeline;
+  }
+
+  /** Each detector's frame at timeline entry `index`. */
+  const framesAt = (timeline: Timeline, index: number): Map<string, number> =>
+    new Map(timeline.ids.map((id) => [id, timeline.frames.get(id)?.[index] ?? -1]));
+
+  /** Shows timeline entry `index` on every detector, and its time in the header row. */
+  function showGroupFrame(timeline: Timeline, index: number): void {
+    shadeFrames(framesAt(timeline, index));
+    const count = timeline.times.length;
+    explorer.showGroupTime(timeline.kind === "index"
+      ? `frame ${index + 1} of ${count}`
+      : `${(timeline.times[index] * 1e15).toFixed(1)} fs (${index + 1} of ${count})`);
+  }
+
+  function startGroup(fps: number): void {
+    if (group) {
+      group.fps = fps; // a frame-rate edit while playing
+      return;
+    }
+    const timeline = currentTimeline();
+    const state = model.get("state") as StatePayload;
+    if (!timeline || timeline.times.length === 0 || state.active_tab !== "result") return;
+    if (timeline.ids.some((id) => exporting.has(id))) return;
+    for (const id of [...playing.keys()]) stopPlaying(id);
+    group = { timeline, fps, last: performance.now(), index: 0 };
+    showGroupFrame(timeline, 0);
+    explorer.setGroupPlaying(true);
+    if (playHandle === 0) playHandle = requestAnimationFrame(tick);
+  }
+
+  function stopGroup(): void {
+    if (!group) return;
+    const { timeline, index } = group;
+    group = null;
+    explorer.setGroupPlaying(false);
+    // each detector keeps the frame it stopped on (one not recorded yet, its
+    // first); like a single detector's stop, the frame becomes its stored one
+    const stopped = new Map(timeline.ids.map((id) =>
+      [id, Math.max(0, timeline.frames.get(id)?.[index] ?? 0)]));
+    shadeFrames(stopped);
+    for (const [id, frame] of stopped) {
+      awaitingEcho.add(id);
+      send(model, {
+        event: "update_spec", kind: "detector", spec: { id, params: { field_freq: frame } },
+      });
+    }
+  }
+
+  /**
+   * Renders every entry of the shared timeline in the active viewport (3D or
+   * 2D) and saves it as one MP4, like a single detector's "save video".
+   */
+  async function recordAll(fps: number): Promise<void> {
+    const timeline = currentTimeline();
+    const state = model.get("state") as StatePayload;
+    if (!timeline || state.active_tab !== "result") return;
+    if (!videoSupported()) {
+      showToast("this browser cannot encode video (no WebCodecs): use a recent Chrome, Edge, Safari or Firefox");
+      return;
+    }
+    if (timeline.ids.some((id) => exporting.has(id))) return;
+    stopGroup();
+    for (const id of [...playing.keys()]) stopPlaying(id);
+    for (const id of timeline.ids) exporting.add(id);
+    explorer.setGroupSaving(true);
+    const is2d = state.active_viewport === "2d";
+    try {
+      const video = await encodeFrames(
+        timeline.times.length,
+        fps,
+        (index) => {
+          showGroupFrame(timeline, index);
+          return is2d ? section.captureCanvas() : scene.captureCanvas();
+        },
+        (index, count) => {
+          if (index % 25 === 0 || index === count - 1) showToast(`encoding frame ${index + 1} of ${count}`);
+        },
+      );
+      showToast(video.codec === "h264" ? "writing the MP4…" : `writing the MP4 (from ${video.codec})…`);
+      model.send(
+        { event: "save_video", filename: "time-domain-detectors", codec: video.codec, fps,
+          target: readSaveTarget() },
+        undefined,
+        [video.bytes.buffer as ArrayBuffer],
+      );
+    } catch (error) {
+      showToast(`video export failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      // back to each detector's stored frame
+      for (const id of timeline.ids) {
+        exporting.delete(id);
+        playFrame.delete(id);
+      }
+      section.setFrames(new Map(timeline.ids.map((id) => [id, null])));
+      explorer.setGroupSaving(false);
+      explorer.showGroupTime("");
       applyFields();
     }
   }
@@ -990,10 +1141,13 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   // indices mean nothing now) and every override is dropped
   const applyNewFields = (): void => {
     for (const id of playing.keys()) explorer.setPlaying(id, false);
-    for (const id of playFrame.keys()) section.setFrame(id, null);
+    section.setFrames(new Map([...playFrame.keys()].map((id) => [id, null])));
     playing.clear();
     playFrame.clear();
     awaitingEcho.clear();
+    group = null; // the old timeline's frames mean nothing for the new result
+    explorer.setGroupPlaying(false);
+    explorer.showGroupTime("");
     applyFields();
   };
 

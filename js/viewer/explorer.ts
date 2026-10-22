@@ -53,6 +53,19 @@ export interface ExplorerCallbacks {
   onPlay(id: string, playing: boolean, fps: number): void;
   /** renders every frame of a multi-frame detector and saves it as a video */
   onSaveVideo(id: string, fps: number): void;
+  /** starts or stops playing every time-domain detector on one timeline */
+  onPlayAll(playing: boolean, fps: number): void;
+  /** records every time-domain detector together as one video */
+  onRecordAll(fps: number): void;
+}
+
+//: What the Result tab's play/record-all controls describe: the shared
+//: timeline's length and kind (see `timeline.ts`), or null with no
+//: time-domain detector.
+export interface GroupInfo {
+  frames: number;
+  detectors: number;
+  kind: "shared" | "solve" | "index";
 }
 
 //: The playback rows of a multi-frame detector's Result card: play / save
@@ -244,6 +257,14 @@ export class Explorer {
   private readonly resultLayersList: HTMLElement;
   /** each multi-frame detector's play / fps / save-video row, keyed by spec id */
   private resultPlayback = new Map<string, PlaybackRow>();
+  /** play / record every time-domain detector together, beside the Detectors header */
+  private readonly groupActions: HTMLElement;
+  private readonly groupPlay: HTMLButtonElement;
+  private readonly groupRecord: HTMLButtonElement;
+  private readonly groupRow: HTMLElement;
+  private readonly groupFps: HTMLInputElement;
+  private readonly groupReadout: HTMLElement;
+  private groupPlaying = false;
   private locked = false;
 
   constructor(
@@ -277,13 +298,50 @@ export class Explorer {
     this.resultLayersList = document.createElement("div");
     this.resultLayersRoot = this.section("Layers", [this.resultLayersList]);
 
+    // play / record every time-domain detector together (beside the Detectors
+    // header), with their shared frame rate and the timeline's time on a row
+    // under it; all hidden until a result has a time-domain detector
+    this.groupPlay = document.createElement("button");
+    this.groupPlay.type = "button";
+    this.groupPlay.className = "gfx-section-add";
+    this.groupRecord = document.createElement("button");
+    this.groupRecord.type = "button";
+    this.groupRecord.className = "gfx-section-add";
+    this.groupRecord.innerHTML = VIDEO_ICON;
+    this.groupRecord.setAttribute("aria-label", "record all time-domain detectors");
+    this.groupActions = document.createElement("span");
+    this.groupActions.className = "gfx-section-actions";
+    this.groupActions.append(this.groupPlay, this.groupRecord);
+    this.groupFps = document.createElement("input");
+    this.groupFps.type = "number";
+    this.groupFps.className = "gfx-numeric";
+    this.groupFps.min = "1";
+    this.groupFps.max = "120";
+    this.groupFps.step = "1";
+    this.groupFps.value = "20";
+    this.groupReadout = document.createElement("span");
+    this.groupReadout.className = "gfx-label";
+    this.groupRow = fieldRow("fps", this.groupFps,
+      "frames per second for playing or recording every time-domain detector together");
+    this.groupRow.appendChild(this.groupReadout);
+    const groupRate = (): number =>
+      Math.min(120, Math.max(1, Math.round(Number(this.groupFps.value) || 20)));
+    this.groupPlay.addEventListener("click", () =>
+      this.callbacks.onPlayAll(!this.groupPlaying, groupRate()));
+    this.groupFps.addEventListener("change", () => {
+      if (this.groupPlaying) this.callbacks.onPlayAll(true, groupRate());
+    });
+    this.groupRecord.addEventListener("click", () => this.callbacks.onRecordAll(groupRate()));
+    this.setGroupPlaying(false);
+    this.setGroup(null);
+
     this.layoutPanel = this.panel([]);
     this.resultPanel = this.panel([
       this.resultNote, this.resultLayersRoot,
       this.section("Sources", [this.resultSourceList]),
       // one card per detector with a field, under its own header like the
       // Layers and Sources sections above
-      this.section("Detectors", [this.resultSections]),
+      this.section("Detectors", [this.groupRow, this.resultSections], this.groupActions),
     ]);
     this.panels = [
       this.layoutPanel,
@@ -360,6 +418,44 @@ export class Explorer {
     row.playing = playing;
     row.play.textContent = playing ? "❚❚" : "▶";
     row.play.title = playing ? "pause" : "play the recorded frames";
+  }
+
+  /**
+   * Shows or hides play / record all (they need a time-domain detector) and
+   * says in their tooltips what the shared timeline is.
+   */
+  setGroup(info: GroupInfo | null): void {
+    const available = info !== null;
+    this.groupActions.hidden = !available;
+    this.groupRow.hidden = !available;
+    if (!info) return;
+    const what = info.detectors === 1 ? "the time-domain detector" : `all ${info.detectors} time-domain detectors`;
+    const timeline = info.kind === "solve"
+      ? `their time grids differ, so every step of the solve (${info.frames} frames); each `
+        + "shows its last recorded frame, and is transparent until it first records"
+      : `${info.frames} frames`;
+    this.groupPlay.dataset.hint = `play ${what} together: ${timeline}`;
+    this.groupRecord.title = `record ${what} together as one MP4 of the active viewport: ${timeline}; `
+      + "the settings screen's \"Save to\" picks download or server";
+    this.setGroupPlaying(this.groupPlaying);
+  }
+
+  /** Shows play all as playing (pause) or stopped (play). */
+  setGroupPlaying(playing: boolean): void {
+    this.groupPlaying = playing;
+    this.groupPlay.textContent = playing ? "❚❚" : "▶";
+    this.groupPlay.title = playing ? "pause" : this.groupPlay.dataset.hint ?? "play all";
+  }
+
+  /** Greys play / record all while their video is being saved. */
+  setGroupSaving(saving: boolean): void {
+    this.groupPlay.disabled = saving;
+    this.groupRecord.disabled = saving;
+  }
+
+  /** The shared timeline's position: its time in fs, or its frame index. */
+  showGroupTime(text: string): void {
+    this.groupReadout.textContent = text;
   }
 
   /** Greys a detector's playback row while its video is being saved. */
@@ -1153,10 +1249,13 @@ export class Explorer {
     controls.set("field_freq", {
       element: freq,
       write: (value) => {
-        const frame = Math.max(0, Math.floor(Number(value ?? 0)));
+        const raw = Math.floor(Number(value ?? 0));
+        const frame = Math.max(0, raw);
         if (document.activeElement !== freq && freq.value !== String(frame)) freq.value = String(frame);
-        freqLabel.textContent = frameReadout(this.fields[id], frame);
-        freqLabel.title = frameNote(this.fields[id], frame);
+        // a negative frame: playing all together, this detector has not
+        // recorded yet at the shared timeline's time (it is transparent)
+        freqLabel.textContent = raw < 0 ? "not recorded yet" : frameReadout(this.fields[id], frame);
+        freqLabel.title = raw < 0 ? "" : frameNote(this.fields[id], frame);
       },
       setDisabled(value) {
         freq.disabled = value;
@@ -1568,7 +1667,7 @@ export class Explorer {
     this.callbacks.onActiveTab(tabs[index]);
   }
 
-  private section(title: string, rows: HTMLElement[], add?: HTMLButtonElement): HTMLElement {
+  private section(title: string, rows: HTMLElement[], add?: HTMLElement): HTMLElement {
     const section = document.createElement("div");
     section.className = "gfx-section";
     const header = document.createElement("div");
@@ -1576,7 +1675,8 @@ export class Explorer {
     const name = document.createElement("span");
     name.textContent = title;
     header.appendChild(name);
-    // the "+" adds a source or detector straight from its own section (spec R12)
+    // the "+" adds a source or detector straight from its own section (spec R12);
+    // the Result tab's Detectors header holds play / record all instead
     if (add) header.appendChild(add);
     section.appendChild(header);
     for (const row of rows) section.appendChild(row);

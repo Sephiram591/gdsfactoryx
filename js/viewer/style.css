@@ -262,6 +262,25 @@
   cursor: default;
 }
 
+/* play / record all, beside the Result tab's Detectors header */
+.gfx-section-actions {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.gfx-section-actions .gfx-section-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 18px;
+}
+
+.gfx-section-actions svg {
+  width: 13px;
+  height: 13px;
+}
+
 .gfx-row {
   display: flex;
   align-items: center;

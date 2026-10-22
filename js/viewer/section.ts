@@ -161,8 +161,19 @@ export class Section2D {
 
   /** Shows `frame` of a detector instead of its stored one (null: stop); re-draws. */
   setFrame(id: string, frame: number | null): void {
-    if (frame === null) this.frameOverrides.delete(id);
-    else this.frameOverrides.set(id, frame);
+    this.setFrames(new Map([[id, frame]]));
+  }
+
+  /**
+   * Shows several detectors' frames at once (a shared timeline), with one
+   * re-draw. A negative frame — not recorded yet — draws nothing for that
+   * detector (fully transparent); null returns it to its stored frame.
+   */
+  setFrames(frames: Map<string, number | null>): void {
+    for (const [id, frame] of frames) {
+      if (frame === null) this.frameOverrides.delete(id);
+      else this.frameOverrides.set(id, frame);
+    }
     this.draw();
   }
 
@@ -323,6 +334,7 @@ export class Section2D {
       const field = this.fields[glyph.id];
       if (!settings || !settings.field_visible || !field || !settings.field_component) continue;
       const frame = this.frameOverrides.get(glyph.id) ?? settings.field_freq ?? 0;
+      if (frame < 0) continue; // not recorded yet on a shared timeline: transparent
       const data = componentData(field, settings.field_component, frame);
       if (!data) continue;
       // the gaussian the ports use, from the section plane to the detector's

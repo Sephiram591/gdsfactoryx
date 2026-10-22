@@ -210,7 +210,8 @@ export class PlaneGlyphs {
    * `field` — no result, no component, or `field_visible` off — restores the
    * plain glyph. `frame` overrides the stored `field_freq` (playback and video
    * export step it client-side); every frame is shaded on the detector's one
-   * fixed range (`shadeRange`).
+   * fixed range (`shadeRange`). A negative `frame` — a detector that has not
+   * recorded yet at this point of a shared timeline — shades fully transparent.
    */
   setField(
     id: string,
@@ -225,7 +226,7 @@ export class PlaneGlyphs {
     // the selected frame, client-side so a slider move re-shades with no kernel
     // round-trip (spec R17)
     const shown = frame ?? settings.field_freq ?? 0;
-    const data = field && component ? componentData(field, component, shown) : null;
+    const data = field && component ? componentData(field, component, Math.max(0, shown)) : null;
     if (!field || !data || !settings.field_visible) {
       this.clearField(item);
       return;
@@ -234,7 +235,8 @@ export class PlaneGlyphs {
     const range = shadeRange(field, settings, logRange);
     const low = parseColor(settings.field_color_low);
     const high = parseColor(settings.field_color_high);
-    const bytes = rampTexture(values, range, settings.field_transform, low, high, settings.field_opacity);
+    const opacity = shown < 0 ? 0 : settings.field_opacity;
+    const bytes = rampTexture(values, range, settings.field_transform, low, high, opacity);
 
     const [rows, cols] = field.grid;
     if (!item.texture || item.texture.image.width !== cols || item.texture.image.height !== rows) {
