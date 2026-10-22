@@ -106,6 +106,69 @@ const SOURCE_TYPES = ["ModePlaneSource", "GaussianPlaneSource", "UniformPlaneSou
 const DETECTOR_TYPES = ["ModeOverlapDetector", "PoyntingFluxDetector", "PhasorDetector",
   "FieldDetector", "EnergyDetector"];
 
+//: Tooltips for the Sources / Detectors tab: what each type does, and what each
+//: field of a row sets. Native `title`s, like the rest of the viewer's controls.
+const TYPE_HINTS: Record<string, string> = {
+  ModePlaneSource: "injects the waveguide mode solved on the plane",
+  GaussianPlaneSource: "a Gaussian beam launched from the plane",
+  UniformPlaneSource: "a uniform-amplitude plane wave launched from the plane",
+  HardConstantAmplitudePlanceSource: "a hard source: forces a constant amplitude on the plane",
+  PointDipoleSource: "a point dipole: a single-cell source with no plane",
+  ModeOverlapDetector: "the overlap of the field with a waveguide mode (the mode amplitude)",
+  PoyntingFluxDetector: "the power flowing through the plane (Poynting flux)",
+  PhasorDetector: "the frequency-domain field (phasor) on the plane",
+  FieldDetector: "the raw E and H fields recorded on the plane",
+  EnergyDetector: "the electromagnetic energy on the plane or in its volume",
+};
+const FIELD_HINTS: Record<string, string> = {
+  port: "the device port the plane is centered on and normal to; xy / xz / yz are planes "
+    + "through the simulation box center; None places it by axis, center and size instead",
+  type: "the fdtdx object type",
+  axis: "the plane's normal axis: 0 = x (a yz plane), 1 = y (an xz plane), 2 = z (an xy plane)",
+  center: "the plane's center (x, y, z) in µm, in stack coordinates",
+  size: "the plane's two in-plane sizes in µm, along its lower then higher stack axes",
+  direction: "which way it faces relative to the component: in = into the component through "
+    + "the port, out = out of it",
+  port_offset: "shift along the port's injection direction in µm; negative moves the plane "
+    + "out of the component, e.g. into a port extension",
+  port_size_mult: "the plane's width and height as multiples of the port width and the level "
+    + "height",
+  level: "the level whose height and middle set the plane's z; (auto) uses the port's own "
+    + "level, or the box's mid-height for a box plane; z_center pins it to the box's mid-height",
+  wavelengths: "wavelengths in µm, comma separated",
+  name: "the object's name; blank uses <port>_<type>",
+  mode_index: "the mode order: 0 is the fundamental mode",
+  filter_pol: "keep only te or tm modes; blank keeps all",
+  scaling_mode: "how the phasor is normalized: continuous or pulse",
+  reduce_volume: "reduce the recorded volume to a single value instead of a field grid",
+  components: "the field components recorded, e.g. Ex, Hy",
+  aggregate: "how the energy is combined over the detector",
+  polarization: "the dipole's polarization axis",
+  source_type: "the fdtdx point-dipole source type",
+};
+const VISIBLE_HINT = "show or hide this in the viewports (display only; the simulation is unchanged)";
+
+/** The tooltip for a row's field: a source launches, a detector measures. */
+function specFieldHint(key: string, kind: "source" | "detector"): string | undefined {
+  if (key === "direction") {
+    return kind === "source"
+      ? "which way it launches: in = into the component through the port, out = out of it"
+      : "which wave it measures: out = leaving the component through the port, in = entering it";
+  }
+  return FIELD_HINTS[key];
+}
+
+/** The tooltip for a port option: a box plane, a device port, or none (absolute). */
+function portHint(name: string): string {
+  if (name === "None") return "no port: place it by axis, center and size in stack coordinates";
+  const planes: Record<string, string> = {
+    xy: "the plane through the box center normal to z",
+    xz: "the plane through the box center normal to y",
+    yz: "the plane through the box center normal to x",
+  };
+  return planes[name] ?? `centered on the device port ${name} and normal to it`;
+}
+
 //: The transforms a detector's field can take (spec R15); the first three are
 //: signed, the last two non-negative, which picks the ramp's shape (spec D16).
 const FIELD_TRANSFORMS = ["real", "imag", "abs", "phase", "logabs"];
@@ -360,7 +423,7 @@ export class Explorer {
     plus.type = "button";
     plus.className = "gfx-section-add";
     plus.textContent = "+";
-    plus.title = `add a ${kind} with defaults`;
+    plus.title = `add a ${kind} with the default type${kind === "detector" ? " on the last port" : " on the first port"}`;
     plus.addEventListener("click", () => {
       // one click adds a row: no picker. A source defaults to the first port and
       // a detector to the last, so the pair lands on opposite ends of the device
@@ -433,12 +496,14 @@ export class Explorer {
     const visible = checkbox(true, (value) =>
       this.callbacks.onUpdateSpec(kind, spec.id, { params: { visible: value } }),
     );
+    visible.title = VISIBLE_HINT;
     const name = document.createElement("span");
     name.className = "gfx-label";
+    name.title = `this ${kind}'s name; click the row to select it in the viewports`;
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "gfx-button gfx-remove";
-    remove.title = "remove";
+    remove.title = `remove this ${kind}`;
     remove.textContent = "×";
     remove.addEventListener("click", () => {
       if (this.locked) return;
@@ -461,13 +526,13 @@ export class Explorer {
     // port-frame rows below are replaced by axis/center/size.
     controls.set("port", this.selectControl(
       ["None", ...this.meta.ports.map((p) => p.name)], spec.port,
-      (value) => update({ port: value }),
+      (value) => update({ port: value }), portHint,
     ));
     // type (spec R12)
     const typeNames = kind === "source" ? SOURCE_TYPES : DETECTOR_TYPES;
     controls.set("type", this.selectControl(
       typeNames.filter((n) => this.meta.types[n]), spec.type,
-      (value) => update({ type: value }),
+      (value) => update({ type: value }), (name) => TYPE_HINTS[name],
     ));
     // absolute placement (spec R18): only when the spec's port is "None". A
     // point type (dipole) takes a center but no axis/size.
@@ -476,6 +541,7 @@ export class Explorer {
         controls.set("axis", this.selectControl(
           ["0", "1", "2"], "2",
           (value) => setParam("axis", Number(value)),
+          (name) => ({ "0": "x: a yz plane", "1": "y: an xz plane", "2": "z: an xy plane" })[name],
         ));
       }
       controls.set("center", this.tripleControl(
@@ -492,6 +558,10 @@ export class Explorer {
         controls.set("direction", this.selectControl(
           ["in", "out"], "in",
           (value) => setParam("direction", value),
+          (name) => ({
+            in: "into the component through the port",
+            out: "out of the component through the port",
+          })[name],
         ));
       }
       // port_offset (spec R12): live, so the plane moves as it is edited
@@ -511,6 +581,11 @@ export class Explorer {
         controls.set("level", this.selectControl(
           ["", ...this.meta.levels.map((l) => l.name), Z_CENTER_LEVEL], "",
           (value) => setParam("level", value || null),
+          (name) => name === ""
+            ? "the port's own level, or the box's mid-height for a box plane"
+            : name === Z_CENTER_LEVEL
+              ? "the box's mid-height"
+              : `center the plane on the z span of level ${name}`,
         ));
       }
     }
@@ -528,7 +603,11 @@ export class Explorer {
     }
 
     for (const [key, control] of controls) {
-      fields.appendChild(fieldRow(key, control.element));
+      const hint = specFieldHint(key, kind);
+      // on the control too, so hovering the box explains it as well as the label;
+      // a control that already titles its own boxes (the center) keeps them
+      if (hint && !control.element.title) control.element.title = hint;
+      fields.appendChild(fieldRow(key, control.element, hint));
     }
 
     const row: SpecRow = {
@@ -1013,6 +1092,7 @@ export class Explorer {
     options: string[],
     initial: string,
     onChange: (value: string) => void,
+    optionHint?: (name: string) => string | undefined,
   ): Control {
     const select = document.createElement("select");
     select.className = "gfx-select";
@@ -1020,6 +1100,8 @@ export class Explorer {
       const option = document.createElement("option");
       option.value = name;
       option.textContent = name || "(auto)";
+      const hint = optionHint?.(name);
+      if (hint) option.title = hint;
       select.appendChild(option);
     }
     select.value = initial;
