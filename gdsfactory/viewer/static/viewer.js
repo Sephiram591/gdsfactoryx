@@ -29426,16 +29426,15 @@ function componentData(field, component, frame = 0) {
   const [rows, cols] = field.grid;
   const count = rows * cols;
   const perFrame = field.components.length * count;
-  const total = Math.floor(field.real.byteLength / 4);
-  const maxFrame = perFrame > 0 ? Math.floor(total / perFrame) - 1 : 0;
-  const f = Math.min(Math.max(0, Math.floor(frame)), Math.max(0, maxFrame));
+  const f = Math.min(Math.max(0, Math.floor(frame)), frameCount(field) - 1);
   const base = f * perFrame;
+  const imagAt = (offset) => field.imag ? decodeFloat32(field.imag, offset, count) : new Float32Array(count);
   if (component === TOTAL_COMPONENT) {
     const real = new Float32Array(count);
     for (let i = 0; i < field.components.length; i += 1) {
       if (!field.components[i].startsWith("E")) continue;
       const re = decodeFloat32(field.real, base + i * count, count);
-      const im = decodeFloat32(field.imag, base + i * count, count);
+      const im = imagAt(base + i * count);
       for (let k = 0; k < count; k += 1) real[k] += re[k] * re[k] + im[k] * im[k];
     }
     for (let k = 0; k < count; k += 1) real[k] = Math.sqrt(real[k]);
@@ -29445,8 +29444,44 @@ function componentData(field, component, frame = 0) {
   if (index < 0) return null;
   return {
     real: decodeFloat32(field.real, base + index * count, count),
-    imag: decodeFloat32(field.imag, base + index * count, count)
+    imag: imagAt(base + index * count)
   };
+}
+function frameCount(field) {
+  const [rows, cols] = field.grid;
+  const perFrame = field.components.length * rows * cols;
+  const total = Math.floor(field.real.byteLength / 4);
+  return perFrame > 0 ? Math.max(1, Math.floor(total / perFrame)) : 1;
+}
+var RANGE_CACHE = /* @__PURE__ */ new WeakMap();
+function frameRange(field, component, transform, logRange) {
+  const key = `${component}\0${transform}\0${logRange}`;
+  let cache = RANGE_CACHE.get(field);
+  const hit = cache?.get(key);
+  if (hit) return hit;
+  let min = Infinity;
+  let max = -Infinity;
+  for (let f = 0; f < frameCount(field); f += 1) {
+    const data = componentData(field, component, f);
+    if (!data) break;
+    const [lo, hi] = extent(transformValues(data.real, data.imag, transform));
+    if (lo < min) min = lo;
+    if (hi > max) max = hi;
+  }
+  const range = clampRange(min, max, transform, logRange);
+  if (!cache) {
+    cache = /* @__PURE__ */ new Map();
+    RANGE_CACHE.set(field, cache);
+  }
+  cache.set(key, range);
+  return range;
+}
+function shadeRange(field, settings, logRange) {
+  const fixed = settings.field_range;
+  if (fixed && Number.isFinite(fixed[0]) && Number.isFinite(fixed[1]) && fixed[1] > fixed[0]) {
+    return [fixed[0], fixed[1]];
+  }
+  return frameRange(field, settings.field_component ?? "", settings.field_transform, logRange);
 }
 function transformValues(real, imag, transform) {
   const out = new Float32Array(real.length);
@@ -29472,13 +29507,16 @@ function transformValues(real, imag, transform) {
   }
   return out;
 }
-function valueRange(values, transform, logRange) {
+function extent(values) {
   let min = Infinity;
   let max = -Infinity;
   for (const value of values) {
     if (value < min) min = value;
     if (value > max) max = value;
   }
+  return [min, max];
+}
+function clampRange(min, max, transform, logRange) {
   if (!Number.isFinite(min) || !Number.isFinite(max)) return [0, 1];
   if (transform === "logabs") {
     const floor = max - Math.abs(logRange);
@@ -29595,7 +29633,9 @@ var FIELD_HINTS = {
   components: "the field components recorded, e.g. Ex, Hy",
   aggregate: "how the energy is combined over the detector",
   polarization: "the dipole's polarization axis",
-  source_type: "the fdtdx point-dipole source type"
+  source_type: "the fdtdx point-dipole source type",
+  record_interval: "temporal downsampling: record every n-th time step (blank or 1 = every step); a FieldDetector stores one plane per recorded step, so this divides its memory and the number of video frames by n",
+  dft_subsample: "temporal downsampling: feed the phasor's DFT every n-th time step, rescaled to match every-step recording; auto picks n from the highest recorded frequency. Saves time, not memory"
 };
 var VISIBLE_HINT = "show or hide this in the viewports (display only; the simulation is unchanged)";
 function specFieldHint(key, kind) {
@@ -29637,8 +29677,8 @@ var Explorer = class {
      * tab is active, independent of the editor's Layers tab (spec R17).
      */
     this.resultLayers = /* @__PURE__ */ new Map();
-    /** each detector's frequency list, from its field payload (spec R17) */
-    this.fieldFreqs = /* @__PURE__ */ new Map();
+    /** each multi-frame detector's play / fps / save-video row, keyed by spec id */
+    this.resultPlayback = /* @__PURE__ */ new Map();
     this.locked = false;
     this.root = document.createElement("div");
     this.root.className = "gfx-explorer";
@@ -29718,15 +29758,33 @@ var Explorer = class {
    * Records the last result's per-detector field payloads (spec R15, R17).
    *
    * The Result tab is rebuilt from these — one section per detector that has a
-   * payload — and the frequency slider's range comes from each payload's
-   * `freqs`. Called before :meth:`render`, which writes the rows.
+   * payload — and the frame slider's range is each payload's frame count (its
+   * recorded frequencies or time steps). Called before :meth:`render`, which
+   * writes the rows.
    */
   setFields(fields) {
     this.fields = fields ?? {};
-    this.fieldFreqs = new Map(
-      Object.entries(this.fields).map(([id, entry]) => [id, entry.freqs ?? []])
-    );
     this.renderResult();
+  }
+  /** Moves a detector's frame slider and readout without an edit (playback). */
+  showFrame(id, frame) {
+    this.resultControls.get(id)?.get("field_freq")?.write(frame);
+  }
+  /** Shows a detector's play button as playing (pause) or stopped (play). */
+  setPlaying(id, playing) {
+    const row2 = this.resultPlayback.get(id);
+    if (!row2) return;
+    row2.playing = playing;
+    row2.play.textContent = playing ? "\u275A\u275A" : "\u25B6";
+    row2.play.title = playing ? "pause" : "play the recorded frames";
+  }
+  /** Greys a detector's playback row while its video is being saved. */
+  setSaving(id, saving) {
+    const row2 = this.resultPlayback.get(id);
+    if (!row2) return;
+    row2.save.disabled = saving;
+    row2.play.disabled = saving;
+    row2.save.textContent = saving ? "saving\u2026" : "save video";
   }
   render(state) {
     for (const level of this.meta.levels) {
@@ -30181,6 +30239,7 @@ var Explorer = class {
       controls.get("section")?.element.remove();
       this.resultControls.delete(id);
       this.resultCollapsed.delete(id);
+      this.resultPlayback.delete(id);
     }
     for (const id of ids) {
       if (this.resultControls.has(id)) continue;
@@ -30217,16 +30276,27 @@ var Explorer = class {
           })
         );
       }
-      const freqs = this.fieldFreqs.get(id) ?? [];
+      const frames = entry ? frameCount(entry) : 1;
       const freq = controls.get("field_freq");
       if (freq) {
         const row2 = freq.element.parentElement;
-        if (row2) row2.hidden = freqs.length <= 1;
-        if (freqs.length > 1) freq.element.setAttribute("max", String(freqs.length - 1));
+        if (row2) {
+          row2.hidden = frames <= 1;
+          const rowLabel = row2.firstElementChild;
+          const text = entry?.frame_kind === "time" ? "time" : "frequency";
+          if (rowLabel && rowLabel.textContent !== text) rowLabel.textContent = text;
+        }
+        if (frames > 1) freq.element.setAttribute("max", String(frames - 1));
       }
+      const playback = this.resultPlayback.get(id);
+      if (playback) playback.root.hidden = frames <= 1;
       for (const [key, control] of controls) {
-        if (key === "section") continue;
+        if (key === "section" || key === "field_range") continue;
         control.write(s[key]);
+      }
+      const scale = controls.get("field_range");
+      if (scale && entry && s.field_component) {
+        scale.write({ range: shadeRange(entry, s, state.simulation?.log_range ?? 6), fixed: Boolean(s.field_range) });
       }
       const nonNegative = s.field_transform === "abs" || s.field_transform === "logabs";
       const low = controls.get("field_color_low");
@@ -30351,7 +30421,7 @@ var Explorer = class {
     const fields = document.createElement("div");
     fields.className = "gfx-spec-fields";
     const controls = /* @__PURE__ */ new Map();
-    const component = this.selectControl([], "", (value) => this.setParam(id, "field_component", value || null));
+    const component = this.selectControl([], "", (value) => this.setParams(id, { field_component: value || null, field_range: null }));
     controls.set("field_component", component);
     fields.appendChild(fieldRow(
       "component",
@@ -30361,7 +30431,7 @@ var Explorer = class {
     const transform = this.selectControl(
       [...FIELD_TRANSFORMS],
       "abs",
-      (value) => this.setParam(id, "field_transform", value)
+      (value) => this.setParams(id, { field_transform: value, field_range: null })
     );
     controls.set("field_transform", transform);
     fields.appendChild(fieldRow(
@@ -30402,6 +30472,7 @@ var Explorer = class {
       }
     });
     fields.appendChild(fieldRow("outline", outline, "draw the plane's outline while shaded"));
+    fields.appendChild(this.buildScaleRow(id, controls));
     const freqLabel = document.createElement("span");
     freqLabel.className = "gfx-label";
     const freq = document.createElement("input");
@@ -30409,23 +30480,31 @@ var Explorer = class {
     freq.min = "0";
     freq.step = "1";
     freq.className = "gfx-opacity";
-    freq.addEventListener("input", () => this.setParam(id, "field_freq", Number(freq.value)));
+    freq.addEventListener("input", () => {
+      const playback = this.resultPlayback.get(id);
+      if (playback?.playing) this.callbacks.onPlay(id, false, Number(playback.fps.value));
+      this.setParam(id, "field_freq", Number(freq.value));
+    });
     controls.set("field_freq", {
       element: freq,
-      write(value) {
+      write: (value) => {
         const frame = Math.max(0, Math.floor(Number(value ?? 0)));
         if (document.activeElement !== freq && freq.value !== String(frame)) freq.value = String(frame);
-        const freqs = entry.freqs ?? [];
-        const hz = freqs[frame];
-        freqLabel.textContent = hz !== void 0 ? `${(hz / 1e12).toFixed(4)} THz` : `frame ${frame}`;
+        freqLabel.textContent = frameReadout(this.fields[id], frame);
+        freqLabel.title = frameNote(this.fields[id], frame);
       },
       setDisabled(value) {
         freq.disabled = value;
       }
     });
-    const freqRow = fieldRow("frequency", freq, "which recorded frequency frame to shade");
+    const freqRow = fieldRow(
+      "frequency",
+      freq,
+      "which recorded frame to shade: a frequency of a phasor, a time step of a FieldDetector"
+    );
     freqRow.appendChild(freqLabel);
     fields.appendChild(freqRow);
+    fields.appendChild(this.buildPlaybackRow(id));
     section.append(header, fields);
     controls.set("section", { element: section, write() {
     }, setDisabled() {
@@ -30434,7 +30513,108 @@ var Explorer = class {
     return section;
   }
   setParam(id, key, value) {
-    this.callbacks.onUpdateSpec("detector", id, { params: { [key]: value } });
+    this.setParams(id, { [key]: value });
+  }
+  setParams(id, params) {
+    this.callbacks.onUpdateSpec("detector", id, { params });
+  }
+  /**
+   * The colour-scale row (spec R15): min and max boxes and an "auto" button.
+   *
+   * The boxes show the range every frame is shaded on — by default the whole
+   * recording's min and max, so playback and a saved video keep one scale.
+   * Editing either box fixes the scale (`field_range`); auto returns it to the
+   * recording's range. The row is registered as the `field_range` control, and
+   * written with the range in effect, not the raw setting.
+   */
+  buildScaleRow(id, controls) {
+    const row2 = document.createElement("div");
+    row2.className = "gfx-field";
+    const name = document.createElement("span");
+    name.className = "gfx-field-name";
+    name.textContent = "scale";
+    name.title = "the colour scale every frame is shaded on, in the transform's units; auto spans the whole recording's min and max";
+    const box = (title2) => {
+      const input = document.createElement("input");
+      input.type = "number";
+      input.className = "gfx-numeric";
+      input.title = title2;
+      return input;
+    };
+    const min = box("the value at the ramp's low end");
+    const max = box("the value at the ramp's high end");
+    const auto = document.createElement("button");
+    auto.type = "button";
+    auto.className = "gfx-button";
+    auto.textContent = "auto";
+    auto.title = "span the whole recording's min and max (every frame)";
+    const fix = () => {
+      const low = Number(min.value);
+      const high = Number(max.value);
+      if (min.value !== "" && max.value !== "" && Number.isFinite(low) && Number.isFinite(high) && high > low) {
+        this.setParam(id, "field_range", [low, high]);
+      }
+    };
+    min.addEventListener("change", fix);
+    max.addEventListener("change", fix);
+    auto.addEventListener("click", () => this.setParam(id, "field_range", null));
+    row2.append(name, min, max, auto);
+    controls.set("field_range", {
+      element: row2,
+      write(value) {
+        const { range, fixed } = value;
+        const shown = range.map((v) => String(Number(v.toPrecision(4))));
+        if (document.activeElement !== min && min.value !== shown[0]) min.value = shown[0];
+        if (document.activeElement !== max && max.value !== shown[1]) max.value = shown[1];
+        auto.disabled = !fixed;
+      },
+      setDisabled(value) {
+        min.disabled = value;
+        max.disabled = value;
+        auto.disabled = value;
+      }
+    });
+    return row2;
+  }
+  /**
+   * The playback row of a multi-frame detector: play/pause, the frame rate,
+   * and "save video", which renders every frame of the active viewport and
+   * saves it as an MP4 (the "Save to" setting picks download or server).
+   */
+  buildPlaybackRow(id) {
+    const root = document.createElement("div");
+    root.className = "gfx-field";
+    const name = document.createElement("span");
+    name.className = "gfx-field-name";
+    name.textContent = "play";
+    name.title = "play the recorded frames in the viewports, or save them as a video";
+    const play = document.createElement("button");
+    play.type = "button";
+    play.className = "gfx-button";
+    const fps = document.createElement("input");
+    fps.type = "number";
+    fps.className = "gfx-numeric";
+    fps.min = "1";
+    fps.max = "120";
+    fps.step = "1";
+    fps.value = "20";
+    fps.title = "frames per second, for playback and the saved video";
+    const rate = () => Math.min(120, Math.max(1, Math.round(Number(fps.value) || 20)));
+    const save = document.createElement("button");
+    save.type = "button";
+    save.className = "gfx-button";
+    save.textContent = "save video";
+    save.title = `render every frame of the active viewport (3D or 2D) and save an MP4; the settings screen's "Save to" picks download or server`;
+    const row2 = { root, play, fps, save, playing: false };
+    play.addEventListener("click", () => this.callbacks.onPlay(id, !row2.playing, rate()));
+    fps.addEventListener("change", () => {
+      if (row2.playing) this.callbacks.onPlay(id, true, rate());
+    });
+    save.addEventListener("click", () => this.callbacks.onSaveVideo(id, rate()));
+    root.append(name, play, fps, save);
+    this.resultPlayback.set(id, row2);
+    this.setPlaying(id, false);
+    return root;
   }
   // ------------------------------------------------------------------- controls
   selectControl(options, initial, onChange, optionHint) {
@@ -30800,6 +30980,21 @@ function specProperties(spec, types) {
   }
   return rows;
 }
+function frameReadout(field, frame) {
+  if (field?.frame_kind === "time") {
+    const seconds = field.times?.[frame];
+    return seconds !== void 0 ? `${(seconds * 1e15).toFixed(1)} fs` : `frame ${frame}`;
+  }
+  const hz = field?.freqs?.[frame];
+  return hz !== void 0 ? `${(hz / 1e12).toFixed(4)} THz` : `frame ${frame}`;
+}
+function frameNote(field, frame) {
+  if (!field) return "";
+  const count = frameCount(field);
+  const stride = field.frame_stride ?? 1;
+  const thinned = stride > 1 ? `; 1 in ${stride} of the ${field.frames_recorded ?? count * stride} recorded frames is shown` : "";
+  return `frame ${frame + 1} of ${count}${thinned}`;
+}
 function fieldRow(name, element, hint) {
   const row2 = document.createElement("label");
   row2.className = "gfx-field";
@@ -30992,20 +31187,22 @@ var PlaneGlyphs = class {
    * The transformed component becomes a texture on the plane; the plain
    * translucent fill is replaced (the outline marks the extent instead). A null
    * `field` — no result, no component, or `field_visible` off — restores the
-   * plain glyph.
+   * plain glyph. `frame` overrides the stored `field_freq` (playback and video
+   * export step it client-side); every frame is shaded on the detector's one
+   * fixed range (`shadeRange`).
    */
-  setField(id, field, settings, logRange) {
+  setField(id, field, settings, logRange, frame) {
     const item = this.items.get(id);
     if (!item || !item.plane) return;
     const component = settings.field_component;
-    const frame = settings.field_freq ?? 0;
-    const data = field && component ? componentData(field, component, frame) : null;
+    const shown = frame ?? settings.field_freq ?? 0;
+    const data = field && component ? componentData(field, component, shown) : null;
     if (!field || !data || !settings.field_visible) {
       this.clearField(item);
       return;
     }
     const values = transformValues(data.real, data.imag, settings.field_transform);
-    const range = valueRange(values, settings.field_transform, logRange);
+    const range = shadeRange(field, settings, logRange);
     const low = parseColor(settings.field_color_low);
     const high = parseColor(settings.field_color_high);
     const bytes = rampTexture(values, range, settings.field_transform, low, high, settings.field_opacity);
@@ -34961,6 +35158,11 @@ var Scene3D = class {
     this.renderer.render(this.scene, this.camera);
     return this.renderer.domElement.toDataURL("image/png");
   }
+  /** Renders now and returns the canvas, so a video frame captures this state. */
+  captureCanvas() {
+    this.renderer.render(this.scene, this.camera);
+    return this.renderer.domElement;
+  }
   resize() {
     const width = Math.max(this.container.clientWidth, 1);
     const height = Math.max(this.container.clientHeight, 1);
@@ -35006,6 +35208,9 @@ var Section2D = class {
     this.state = null;
     //: the last result's per-detector fields (spec R15); empty until a run lands
     this.fields = {};
+    //: frames shown in place of a detector's stored `field_freq` while it plays
+    //: or is exported as a video, so each tick re-shades without the kernel
+    this.frameOverrides = /* @__PURE__ */ new Map();
     //: a scratch canvas for rasterizing one field before it is drawn (spec R15)
     this.scratch = null;
     this.exaggeration = 1;
@@ -35069,6 +35274,17 @@ var Section2D = class {
   setFields(fields) {
     this.fields = fields ?? {};
     this.draw();
+  }
+  /** Shows `frame` of a detector instead of its stored one (null: stop); re-draws. */
+  setFrame(id, frame) {
+    if (frame === null) this.frameOverrides.delete(id);
+    else this.frameOverrides.set(id, frame);
+    this.draw();
+  }
+  /** Draws now and returns the canvas, so a video frame captures this state. */
+  captureCanvas() {
+    this.draw();
+    return this.canvas;
   }
   /**
    * Swaps the level/port metadata (spec R13).
@@ -35204,14 +35420,15 @@ var Section2D = class {
       const settings = state.field_settings?.[glyph.id];
       const field = this.fields[glyph.id];
       if (!settings || !settings.field_visible || !field || !settings.field_component) continue;
-      const data = componentData(field, settings.field_component, settings.field_freq ?? 0);
+      const frame = this.frameOverrides.get(glyph.id) ?? settings.field_freq ?? 0;
+      const data = componentData(field, settings.field_component, frame);
       if (!data) continue;
       const distance = glyph.center[glyph.axis] - (payload.position - origin[normalStack]);
       if (Math.abs(distance) > PLANE_FADE_CUTOFF * fade) continue;
       const alpha = Math.exp(-0.5 * (distance / fade) ** 2);
       if (alpha < 0.01) continue;
       const values = transformValues(data.real, data.imag, settings.field_transform);
-      const range = valueRange(values, settings.field_transform, state.simulation?.log_range ?? 6);
+      const range = shadeRange(field, settings, state.simulation?.log_range ?? 6);
       this.blitField(ctx, glyph, field, values, range, settings, alpha);
     }
   }
@@ -35335,7 +35552,7 @@ var Section2D = class {
     const [au, av] = { xy: [0, 1], xz: [0, 2], yz: [1, 2] }[payload.plane];
     const normalStack = { xy: 2, xz: 1, yz: 0 }[payload.plane];
     const spans = [0, 1, 2].filter((axis) => axis !== glyph.axis);
-    const extent = (axis) => {
+    const extent2 = (axis) => {
       if (glyph.u_half === 0 && glyph.v_half === 0) return half;
       return axis === spans[0] ? glyph.u_half : glyph.v_half;
     };
@@ -35345,18 +35562,18 @@ var Section2D = class {
       }
       return {
         kind: "rect",
-        u0: center[au] - extent(au),
-        u1: center[au] + extent(au),
-        v0: center[av] - extent(av),
-        v1: center[av] + extent(av)
+        u0: center[au] - extent2(au),
+        u1: center[au] + extent2(au),
+        v0: center[av] - extent2(av),
+        v1: center[av] + extent2(av)
       };
     }
-    if (Math.abs(center[normalStack] - (payload.position - origin[normalStack])) > extent(normalStack)) {
+    if (Math.abs(center[normalStack] - (payload.position - origin[normalStack])) > extent2(normalStack)) {
       return null;
     }
     const fixed = glyph.axis;
     const vary = fixed === au ? av : au;
-    const reach = extent(vary);
+    const reach = extent2(vary);
     if (fixed === au) {
       return { kind: "segment", a: [center[au], center[av] - reach], b: [center[au], center[av] + reach] };
     }
@@ -35626,6 +35843,116 @@ var Section2D = class {
   }
 };
 
+// viewer/video.ts
+var CANDIDATES = [
+  { codec: "avc1.640033", kind: "h264" },
+  { codec: "avc1.4d0028", kind: "h264" },
+  { codec: "vp09.00.40.08", kind: "vp9" },
+  { codec: "vp8", kind: "vp8" }
+];
+function videoSupported() {
+  return typeof VideoEncoder !== "undefined" && typeof VideoFrame !== "undefined";
+}
+async function encodeFrames(count, fps, draw, onProgress) {
+  const first = draw(0);
+  const width = Math.max(2, first.width - first.width % 2);
+  const height = Math.max(2, first.height - first.height % 2);
+  const bitrate = Math.round(Math.min(4e7, Math.max(2e6, width * height * fps * 0.2)));
+  const config = await chooseConfig(width, height, fps, bitrate);
+  if (!config) throw new Error("this browser has no H.264, VP9 or VP8 video encoder");
+  const chunks = [];
+  let failure = null;
+  const encoder = new VideoEncoder({
+    output: (chunk) => {
+      const data = new Uint8Array(chunk.byteLength);
+      chunk.copyTo(data);
+      chunks.push(data);
+    },
+    error: (error2) => {
+      failure = error2;
+    }
+  });
+  encoder.configure(config.config);
+  const staging = document.createElement("canvas");
+  staging.width = width;
+  staging.height = height;
+  const context = staging.getContext("2d");
+  if (!context) throw new Error("no 2D canvas context for the video frames");
+  const keyEvery = Math.max(1, Math.round(2 * fps));
+  for (let i = 0; i < count; i += 1) {
+    if (failure) break;
+    const source = i === 0 ? first : draw(i);
+    context.fillStyle = "#000000";
+    context.fillRect(0, 0, width, height);
+    context.drawImage(source, 0, 0, width, height, 0, 0, width, height);
+    const frame = new VideoFrame(staging, {
+      timestamp: Math.round(i * 1e6 / fps),
+      duration: Math.round(1e6 / fps)
+    });
+    encoder.encode(frame, { keyFrame: i % keyEvery === 0 });
+    frame.close();
+    while (encoder.encodeQueueSize > 4 && !failure) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    onProgress?.(i, count);
+  }
+  if (!failure) await encoder.flush();
+  encoder.close();
+  if (failure) throw failure;
+  const bytes = config.kind === "h264" ? concat(chunks) : ivf(chunks, config.kind, width, height, fps);
+  return { codec: config.kind, bytes, width, height, fps, frames: chunks.length };
+}
+async function chooseConfig(width, height, fps, bitrate) {
+  for (const candidate of CANDIDATES) {
+    const config = {
+      codec: candidate.codec,
+      width,
+      height,
+      bitrate,
+      framerate: fps
+    };
+    if (candidate.kind === "h264") config.avc = { format: "annexb" };
+    try {
+      const support = await VideoEncoder.isConfigSupported(config);
+      if (support.supported) return { kind: candidate.kind, config };
+    } catch {
+    }
+  }
+  return null;
+}
+function concat(chunks) {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+function ivf(chunks, kind, width, height, fps) {
+  const total = 32 + chunks.reduce((sum, chunk) => sum + 12 + chunk.byteLength, 0);
+  const out = new Uint8Array(total);
+  const view = new DataView(out.buffer);
+  out.set([68, 75, 73, 70], 0);
+  view.setUint16(4, 0, true);
+  view.setUint16(6, 32, true);
+  out.set(kind === "vp9" ? [86, 80, 57, 48] : [86, 80, 56, 48], 8);
+  view.setUint16(12, width, true);
+  view.setUint16(14, height, true);
+  view.setUint32(16, Math.round(fps), true);
+  view.setUint32(20, 1, true);
+  view.setUint32(24, chunks.length, true);
+  let offset = 32;
+  chunks.forEach((chunk, index) => {
+    view.setUint32(offset, chunk.byteLength, true);
+    view.setBigUint64(offset + 4, BigInt(index), true);
+    out.set(chunk, offset + 12);
+    offset += 12 + chunk.byteLength;
+  });
+  return out;
+}
+
 // viewer/index.ts
 var PLANES = ["xy", "xz", "yz"];
 var PHASE_LABELS = {
@@ -35737,7 +36064,13 @@ function render({ model, el }) {
     onAddDetector: (port) => send(model, { event: "add_detector", port }),
     onUpdateSpec: (kind, id, change) => send(model, { event: "update_spec", kind, spec: { id, ...change } }),
     onRemoveSpec: (kind, id) => send(model, { event: "remove_spec", kind, id }),
-    onSettings: (settings2) => send(model, { event: "set_settings", settings: settings2 })
+    onSettings: (settings2) => send(model, { event: "set_settings", settings: settings2 }),
+    // playback and video export run in the browser, over the frames already
+    // here (defined with the playback state below)
+    onPlay: (id, play, fps) => play ? startPlaying(id, fps) : stopPlaying(id),
+    onSaveVideo: (id, fps) => {
+      void saveVideo(id, fps);
+    }
   });
   const viewport = document.createElement("div");
   viewport.className = "gfx-viewport";
@@ -35888,6 +36221,11 @@ function render({ model, el }) {
   let levels = /* @__PURE__ */ new Map();
   let glyphs = new PortGlyphs(meta.ports);
   const planes = new PlaneGlyphs();
+  const playFrame = /* @__PURE__ */ new Map();
+  const playing = /* @__PURE__ */ new Map();
+  const exporting = /* @__PURE__ */ new Set();
+  const awaitingEcho = /* @__PURE__ */ new Set();
+  let playHandle = 0;
   const disposeContent = () => {
     for (const meshes of levels.values()) {
       meshes.dispose();
@@ -36045,18 +36383,122 @@ function render({ model, el }) {
     const settings2 = state.field_settings ?? {};
     const logRange = state.simulation?.log_range ?? 6;
     const shading = state.active_tab === "result";
+    if (!shading) for (const id of [...playing.keys()]) stopPlaying(id);
+    for (const [id, frame] of [...playFrame]) {
+      if (playing.has(id) || exporting.has(id)) continue;
+      const echoed = (settings2[id]?.field_freq ?? 0) === frame;
+      if (echoed || !awaitingEcho.has(id)) {
+        playFrame.delete(id);
+        awaitingEcho.delete(id);
+        section.setFrame(id, null);
+      }
+    }
     for (const glyph of state.glyphs ?? []) {
       if (glyph.kind !== "detector") continue;
       planes.setField(
         glyph.id,
         shading ? fields[glyph.id] ?? null : null,
         settings2[glyph.id],
-        logRange
+        logRange,
+        playFrame.get(glyph.id)
       );
     }
     explorer.setFields(fields);
     section.setFields(shading ? fields : {});
     renderColorbar(state, fields, shading);
+  }
+  const currentFields = () => model.get("fields") ?? {};
+  const storedFrame = (id) => model.get("state").field_settings?.[id]?.field_freq ?? 0;
+  const shadeFrame = (id, frame) => {
+    const state = model.get("state");
+    const settings2 = state.field_settings?.[id];
+    const field = currentFields()[id];
+    if (!settings2 || !field) return;
+    playFrame.set(id, frame);
+    planes.setField(id, field, settings2, state.simulation?.log_range ?? 6, frame);
+    section.setFrame(id, frame);
+    explorer.showFrame(id, frame);
+  };
+  const tick = (now) => {
+    playHandle = 0;
+    const fields = currentFields();
+    for (const [id, clock] of [...playing]) {
+      const field = fields[id];
+      if (!field) {
+        stopPlaying(id);
+        continue;
+      }
+      if (now - clock.last < 1e3 / clock.fps) continue;
+      clock.last = now;
+      shadeFrame(id, ((playFrame.get(id) ?? storedFrame(id)) + 1) % frameCount(field));
+    }
+    if (playing.size > 0) playHandle = requestAnimationFrame(tick);
+  };
+  function startPlaying(id, fps) {
+    if (exporting.has(id)) return;
+    const was = playing.get(id);
+    playing.set(id, { fps, last: was?.last ?? performance.now() });
+    if (!playFrame.has(id)) playFrame.set(id, storedFrame(id));
+    explorer.setPlaying(id, true);
+    if (playHandle === 0) playHandle = requestAnimationFrame(tick);
+  }
+  function stopPlaying(id) {
+    if (!playing.delete(id)) return;
+    explorer.setPlaying(id, false);
+    const frame = playFrame.get(id);
+    if (frame === void 0) return;
+    awaitingEcho.add(id);
+    send(model, {
+      event: "update_spec",
+      kind: "detector",
+      spec: { id, params: { field_freq: frame } }
+    });
+  }
+  async function saveVideo(id, fps) {
+    if (exporting.has(id)) return;
+    if (!videoSupported()) {
+      showToast("this browser cannot encode video (no WebCodecs): use a recent Chrome, Edge, Safari or Firefox");
+      return;
+    }
+    const state = model.get("state");
+    const settings2 = state.field_settings?.[id];
+    const field = currentFields()[id];
+    if (state.active_tab !== "result" || !field || !settings2?.field_component) {
+      showToast("pick a component to shade before saving a video");
+      return;
+    }
+    stopPlaying(id);
+    exporting.add(id);
+    explorer.setSaving(id, true);
+    const is2d = state.active_viewport === "2d";
+    try {
+      const video = await encodeFrames(
+        frameCount(field),
+        fps,
+        (index) => {
+          shadeFrame(id, index);
+          return is2d ? section.captureCanvas() : scene.captureCanvas();
+        },
+        (index, count) => {
+          if (index % 10 === 0 || index === count - 1) showToast(`encoding frame ${index + 1} of ${count}`);
+        }
+      );
+      const filename = `${field.name}-${settings2.field_component}-${settings2.field_transform}`.replace(/[^\w.-]+/g, "_");
+      showToast(video.codec === "h264" ? "writing the MP4\u2026" : `writing the MP4 (from ${video.codec})\u2026`);
+      model.send(
+        { event: "save_video", filename, codec: video.codec, fps, target: readSaveTarget() },
+        void 0,
+        [video.bytes.buffer]
+      );
+    } catch (error2) {
+      showToast(`video export failed: ${error2 instanceof Error ? error2.message : String(error2)}`);
+    } finally {
+      exporting.delete(id);
+      explorer.setSaving(id, false);
+      playFrame.delete(id);
+      section.setFrame(id, null);
+      applyFields();
+    }
   }
   function renderColorbar(state, fields, shading) {
     if (!shading) {
@@ -36077,13 +36519,11 @@ function render({ model, el }) {
     }
     const s = settings2[entry.id];
     const field = fields[entry.id];
-    const data = componentData(field, s.field_component, s.field_freq ?? 0);
-    if (!data) {
+    if (!componentData(field, s.field_component, 0)) {
       colorbar.hidden = true;
       return;
     }
-    const values = transformValues(data.real, data.imag, s.field_transform);
-    const range = valueRange(values, s.field_transform, logRange);
+    const range = shadeRange(field, s, logRange);
     const low = parseColor(s.field_color_low);
     const high = parseColor(s.field_color_high);
     const steps = 64;
@@ -36215,8 +36655,30 @@ function render({ model, el }) {
       folderInput.value = folder;
     }
   };
+  const applyNewFields = () => {
+    for (const id of playing.keys()) explorer.setPlaying(id, false);
+    for (const id of playFrame.keys()) section.setFrame(id, null);
+    playing.clear();
+    playFrame.clear();
+    awaitingEcho.clear();
+    applyFields();
+  };
+  model.on("msg:custom", (content2, buffers) => {
+    if (content2?.event !== "video_ready" || !buffers?.length) return;
+    const filename = String(content2.filename ?? "detector.mp4");
+    const view = buffers[0];
+    const bytes = new Uint8Array(view.byteLength);
+    bytes.set(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
+    const url = URL.createObjectURL(new Blob([bytes], { type: "video/mp4" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1e4);
+    showToast(`downloaded ${filename}`);
+  });
   model.on("change:state", applyState);
-  model.on("change:fields", applyFields);
+  model.on("change:fields", applyNewFields);
   model.on("change:progress", applyProgress);
   model.on("change:phase", applyPhase);
   model.on("change:stopping", applyRunControls);
@@ -36233,6 +36695,7 @@ function render({ model, el }) {
   applySaveFolderVisibility();
   return () => {
     if (positionFrame !== 0) cancelAnimationFrame(positionFrame);
+    if (playHandle !== 0) cancelAnimationFrame(playHandle);
     if (toastTimer !== 0) window.clearTimeout(toastTimer);
     section.dispose();
     scene.dispose();

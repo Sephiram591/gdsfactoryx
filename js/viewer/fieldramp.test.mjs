@@ -101,6 +101,50 @@ test("a component the detector did not record is null", () => {
   assert.equal(ramp.componentData(field, "Ey"), null);
 });
 
+// a FieldDetector-like payload: real samples only (no imag), three time frames
+// of one component on a 1x2 plane
+function timeField(frames) {
+  return {
+    id: "d", name: "d", components: ["Ey"], grid: [1, 2], frame_kind: "time",
+    times: frames.map((_, i) => i * 1e-15),
+    real: new Float32Array(frames.flat()).buffer,
+  };
+}
+
+test("a real-valued recording reads as imaginary zero, frame by frame", () => {
+  const field = timeField([[1, 2], [3, -4], [5, 6]]);
+  assert.equal(ramp.frameCount(field), 3);
+  const second = ramp.componentData(field, "Ey", 1);
+  assert.deepEqual([...second.real], [3, -4]);
+  assert.deepEqual([...second.imag], [0, 0]);
+  // a frame past the end clamps to the last one
+  assert.deepEqual([...ramp.componentData(field, "Ey", 99).real], [5, 6]);
+});
+
+test("the default scale spans every frame, not just the one shown", () => {
+  const field = timeField([[1, 2], [3, -4], [5, 6]]);
+  // frame 0 alone spans [1, 2]; the recording spans [-4, 6]
+  assert.deepEqual(ramp.valueRange(new Float32Array([1, 2]), "real", 6), [1, 2]);
+  assert.deepEqual(ramp.frameRange(field, "Ey", "real", 6), [-4, 6]);
+  assert.deepEqual(ramp.frameRange(field, "Ey", "abs", 6), [1, 6]);
+});
+
+test("logabs floors the whole recording's range below its maximum", () => {
+  const field = timeField([[1e-9, 1e-3], [1, 1e-12], [1e-6, 1e-4]]);
+  const [min, max] = ramp.frameRange(field, "Ey", "logabs", 6);
+  assert.ok(Math.abs(max - 0) < 1e-6, "the maximum is 10^0");
+  assert.ok(Math.abs(min - -6) < 1e-6, "the floor is 6 decades below it");
+});
+
+test("a fixed field_range overrides the recording's range", () => {
+  const field = timeField([[1, 2], [3, -4], [5, 6]]);
+  const settings = { field_component: "Ey", field_transform: "real", field_range: [-1, 1] };
+  assert.deepEqual(ramp.shadeRange(field, settings, 6), [-1, 1]);
+  assert.deepEqual(ramp.shadeRange(field, { ...settings, field_range: null }, 6), [-4, 6]);
+  // an unusable range (min >= max) falls back to the recording's
+  assert.deepEqual(ramp.shadeRange(field, { ...settings, field_range: [2, 2] }, 6), [-4, 6]);
+});
+
 test("rampTexture honors the map's alpha, scaled by opacity", () => {
   const values = new Float32Array([0, 0.5, 1]);
   const range = [0, 1];

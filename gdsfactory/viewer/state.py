@@ -27,9 +27,11 @@ from gdsfactory.viewer.sim import (
     TYPES,
     ObjectSpec,
     SimSettings,
+    _field_range,
     default_detector_spec,
     default_source_spec,
     spec_glyph,
+    validate_sampling,
 )
 from gdsfactory.viewer.solids import (
     LevelSolid,
@@ -386,6 +388,7 @@ class ViewerState:
             if unknown:
                 raise ValueError(f"Unknown parameters: {sorted(unknown)}")
             _validate_field_params(spec, data["params"])
+            validate_sampling(data["params"])
             spec.params.update(data["params"])
         return spec
 
@@ -670,6 +673,9 @@ def _validate_field_params(spec: ObjectSpec, params: dict[str, Any]) -> None:
         opacity = float(params["field_opacity"])
         if not math.isfinite(opacity) or not 0.0 <= opacity <= 1.0:
             raise ValueError(f"field_opacity must be in [0, 1], got {params['field_opacity']!r}")
+    if "field_range" in params:
+        # normalized in place, so the stored value is [float, float] or None
+        params["field_range"] = _field_range(params["field_range"])
 
 
 def _apply_spec_patch(state: ViewerState, category: str, ops: Any) -> None:
