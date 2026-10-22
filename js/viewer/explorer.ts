@@ -21,7 +21,7 @@ import type {
   StatePayload,
   TypeMeta,
 } from "./wire";
-import { TOTAL_COMPONENT } from "./fieldramp";
+import { TOTAL_COMPONENT, frameCount, shadeRange } from "./fieldramp";
 
 //: The ``level`` value naming the simulation volume's own mid-height, offered
 //: alongside the level names (spec R12). Mirrors ``Z_CENTER_LEVEL`` in
@@ -49,6 +49,20 @@ export interface ExplorerCallbacks {
   onRemoveSpec(kind: "source" | "detector", id: string): void;
   /** applies a partial edit to the simulation settings (spec R13) */
   onSettings(fields: Record<string, unknown>): void;
+  /** starts or stops a multi-frame detector's playback (client-side) */
+  onPlay(id: string, playing: boolean, fps: number): void;
+  /** renders every frame of a multi-frame detector and saves it as a video */
+  onSaveVideo(id: string, fps: number): void;
+}
+
+//: The playback rows of a multi-frame detector's Result card: play / save
+//: video, and the frame rate on a row of its own.
+interface PlaybackRow {
+  rows: HTMLElement[];
+  play: HTMLButtonElement;
+  fps: HTMLInputElement;
+  save: HTMLButtonElement;
+  playing: boolean;
 }
 
 interface LevelRow {
@@ -146,8 +160,24 @@ const FIELD_HINTS: Record<string, string> = {
   aggregate: "how the energy is combined over the detector",
   polarization: "the dipole's polarization axis",
   source_type: "the fdtdx point-dipole source type",
+  record_interval: "temporal downsampling: record every n-th time step (blank or 1 = every "
+    + "step); a FieldDetector stores one plane per recorded step, so this divides its memory "
+    + "and the number of video frames by n",
+  dft_subsample: "temporal downsampling: feed the phasor's DFT every n-th time step, rescaled "
+    + "to match every-step recording; auto picks n from the highest recorded frequency. "
+    + "Saves time, not memory",
 };
 const VISIBLE_HINT = "show or hide this in the viewports (display only; the simulation is unchanged)";
+
+//: A video-camera glyph for a detector card's "save video" button, drawn like
+//: the menubar's icons (15 px, stroked in the text color).
+const VIDEO_ICON =
+  '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+  + 'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+  + '<polygon points="23 7 16 12 23 17 23 7"/>'
+  + '<rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>';
+const SAVE_VIDEO_HINT = "save video: render every frame of the active viewport (3D or 2D) as "
+  + "an MP4; the settings screen's \"Save to\" picks download or server";
 
 /** The tooltip for a row's field: a source launches, a detector measures. */
 function specFieldHint(key: string, kind: "source" | "detector"): string | undefined {
@@ -211,8 +241,9 @@ export class Explorer {
    */
   private resultLayers = new Map<string, ResultLayerRow>();
   private readonly resultLayersRoot: HTMLElement;
-  private readonly resultLayersList: HTMLElement;  /** each detector's frequency list, from its field payload (spec R17) */
-  private fieldFreqs = new Map<string, number[]>();
+  private readonly resultLayersList: HTMLElement;
+  /** each multi-frame detector's play / fps / save-video row, keyed by spec id */
+  private resultPlayback = new Map<string, PlaybackRow>();
   private locked = false;
 
   constructor(
@@ -306,15 +337,37 @@ export class Explorer {
    * Records the last result's per-detector field payloads (spec R15, R17).
    *
    * The Result tab is rebuilt from these — one section per detector that has a
-   * payload — and the frequency slider's range comes from each payload's
-   * `freqs`. Called before :meth:`render`, which writes the rows.
+   * payload — and the frame slider's range is each payload's frame count (its
+   * recorded frequencies or time steps). Called before :meth:`render`, which
+   * writes the rows.
    */
   setFields(fields: Record<string, FieldPayload>): void {
     this.fields = fields ?? {};
-    this.fieldFreqs = new Map(
-      Object.entries(this.fields).map(([id, entry]) => [id, entry.freqs ?? []]),
-    );
     this.renderResult();
+  }
+
+  /** Moves a detector's frame slider and readout without an edit (playback). */
+  showFrame(id: string, frame: number): void {
+    this.resultControls.get(id)?.get("field_freq")?.write(frame);
+  }
+
+  /** Shows a detector's play button as playing (pause) or stopped (play). */
+  setPlaying(id: string, playing: boolean): void {
+    const row = this.resultPlayback.get(id);
+    if (!row) return;
+    row.playing = playing;
+    row.play.textContent = playing ? "❚❚" : "▶";
+    row.play.title = playing ? "pause" : "play the recorded frames";
+  }
+
+  /** Greys a detector's playback row while its video is being saved. */
+  setSaving(id: string, saving: boolean): void {
+    const row = this.resultPlayback.get(id);
+    if (!row) return;
+    row.save.disabled = saving;
+    row.play.disabled = saving;
+    row.save.classList.toggle("gfx-active", saving);
+    row.save.title = saving ? "saving the video…" : SAVE_VIDEO_HINT;
   }
 
   render(state: StatePayload): void {
@@ -816,6 +869,7 @@ export class Explorer {
       controls.get("section")?.element.remove();
       this.resultControls.delete(id);
       this.resultCollapsed.delete(id);
+      this.resultPlayback.delete(id);
     }
     for (const id of ids) {
       if (this.resultControls.has(id)) continue;
@@ -856,18 +910,32 @@ export class Explorer {
           }),
         );
       }
-      // the frequency slider only exists for a multi-frequency detector, and
-      // its range is that detector's recorded frame count (spec R17)
-      const freqs = this.fieldFreqs.get(id) ?? [];
+      // the frame slider and the playback row only exist for a multi-frame
+      // detector (several frequencies, or a time-domain recording), and the
+      // slider's range is its frame count (spec R17)
+      const frames = entry ? frameCount(entry) : 1;
       const freq = controls.get("field_freq");
       if (freq) {
         const row = freq.element.parentElement;
-        if (row) row.hidden = freqs.length <= 1;
-        if (freqs.length > 1) freq.element.setAttribute("max", String(freqs.length - 1));
+        if (row) {
+          row.hidden = frames <= 1;
+          const rowLabel = row.firstElementChild;
+          const text = entry?.frame_kind === "time" ? "time" : "frequency";
+          if (rowLabel && rowLabel.textContent !== text) rowLabel.textContent = text;
+        }
+        if (frames > 1) freq.element.setAttribute("max", String(frames - 1));
       }
+      const playback = this.resultPlayback.get(id);
+      for (const row of playback?.rows ?? []) row.hidden = frames <= 1;
       for (const [key, control] of controls) {
-        if (key === "section") continue;
+        if (key === "section" || key === "field_range") continue;
         control.write((s as unknown as Record<string, unknown>)[key]);
+      }
+      // the scale boxes show the range in effect: the fixed one, or the whole
+      // recording's when it is auto (spec R15)
+      const scale = controls.get("field_range");
+      if (scale && entry && s.field_component) {
+        scale.write({ range: shadeRange(entry, s, state.simulation?.log_range ?? 6), fixed: Boolean(s.field_range) });
       }
       // the low color is unused by a non-negative transform (spec D16)
       const nonNegative = s.field_transform === "abs" || s.field_transform === "logabs";
@@ -1014,13 +1082,16 @@ export class Explorer {
     fields.className = "gfx-spec-fields";
     const controls = new Map<string, Control>();
 
-    const component = this.selectControl([], "", (value) => this.setParam(id, "field_component", value || null));
+    // a fixed colour scale is in the units of one component and transform, so
+    // changing either returns the scale to auto (the whole recording's range)
+    const component = this.selectControl([], "", (value) =>
+      this.setParams(id, { field_component: value || null, field_range: null }));
     controls.set("field_component", component);
     fields.appendChild(fieldRow("component", component.element,
       "which recorded field component to shade the plane with"));
     const transform = this.selectControl(
       [...FIELD_TRANSFORMS], "abs",
-      (value) => this.setParam(id, "field_transform", value),
+      (value) => this.setParams(id, { field_transform: value, field_range: null }),
     );
     controls.set("field_transform", transform);
     fields.appendChild(fieldRow("transform", transform.element,
@@ -1060,8 +1131,10 @@ export class Explorer {
       },
     });
     fields.appendChild(fieldRow("outline", outline, "draw the plane's outline while shaded"));
-    // the frequency slider (spec R17): client-side slicing of the multi-frame
-    // buffers, so a move re-shades with no kernel round-trip
+    fields.appendChild(this.buildScaleRow(id, controls));
+    // the frame slider (spec R17): client-side slicing of the multi-frame
+    // buffers — one frame per recorded frequency, or per recorded time step —
+    // so a move re-shades with no kernel round-trip
     const freqLabel = document.createElement("span");
     freqLabel.className = "gfx-label";
     const freq = document.createElement("input");
@@ -1069,24 +1142,29 @@ export class Explorer {
     freq.min = "0";
     freq.step = "1";
     freq.className = "gfx-opacity";
-    freq.addEventListener("input", () => this.setParam(id, "field_freq", Number(freq.value)));
+    freq.addEventListener("input", () => {
+      // scrubbing takes over from playback
+      const playback = this.resultPlayback.get(id);
+      if (playback?.playing) this.callbacks.onPlay(id, false, Number(playback.fps.value));
+      this.setParam(id, "field_freq", Number(freq.value));
+    });
     controls.set("field_freq", {
       element: freq,
-      write(value) {
+      write: (value) => {
         const frame = Math.max(0, Math.floor(Number(value ?? 0)));
         if (document.activeElement !== freq && freq.value !== String(frame)) freq.value = String(frame);
-        // the readout shows the frequency the frame selects, in THz
-        const freqs = entry.freqs ?? [];
-        const hz = freqs[frame];
-        freqLabel.textContent = hz !== undefined ? `${(hz / 1e12).toFixed(4)} THz` : `frame ${frame}`;
+        freqLabel.textContent = frameReadout(this.fields[id], frame);
+        freqLabel.title = frameNote(this.fields[id], frame);
       },
       setDisabled(value) {
         freq.disabled = value;
       },
     });
-    const freqRow = fieldRow("frequency", freq, "which recorded frequency frame to shade");
+    const freqRow = fieldRow("frequency", freq,
+      "which recorded frame to shade: a frequency of a phasor, a time step of a FieldDetector");
     freqRow.appendChild(freqLabel);
     fields.appendChild(freqRow);
+    fields.append(...this.buildPlaybackRows(id));
 
     section.append(header, fields);
     controls.set("section", { element: section, write() {}, setDisabled() {} });
@@ -1095,7 +1173,115 @@ export class Explorer {
   }
 
   private setParam(id: string, key: string, value: unknown): void {
-    this.callbacks.onUpdateSpec("detector", id, { params: { [key]: value } });
+    this.setParams(id, { [key]: value });
+  }
+
+  private setParams(id: string, params: Record<string, unknown>): void {
+    this.callbacks.onUpdateSpec("detector", id, { params });
+  }
+
+  /**
+   * The colour-scale row (spec R15): min and max boxes and an "auto" button.
+   *
+   * The boxes show the range every frame is shaded on — by default the whole
+   * recording's min and max, so playback and a saved video keep one scale.
+   * Editing either box fixes the scale (`field_range`); auto returns it to the
+   * recording's range. The row is registered as the `field_range` control, and
+   * written with the range in effect, not the raw setting.
+   */
+  private buildScaleRow(id: string, controls: Map<string, Control>): HTMLElement {
+    const row = document.createElement("div");
+    row.className = "gfx-field";
+    const name = document.createElement("span");
+    name.className = "gfx-field-name";
+    name.textContent = "scale";
+    name.title = "the colour scale every frame is shaded on, in the transform's units; "
+      + "auto spans the whole recording's min and max";
+    const box = (title: string): HTMLInputElement => {
+      const input = document.createElement("input");
+      input.type = "number";
+      input.className = "gfx-numeric";
+      input.title = title;
+      return input;
+    };
+    const min = box("the value at the ramp's low end");
+    const max = box("the value at the ramp's high end");
+    const auto = document.createElement("button");
+    auto.type = "button";
+    auto.className = "gfx-button";
+    auto.textContent = "auto";
+    auto.title = "span the whole recording's min and max (every frame)";
+    const fix = (): void => {
+      const low = Number(min.value);
+      const high = Number(max.value);
+      if (min.value !== "" && max.value !== "" && Number.isFinite(low) && Number.isFinite(high) && high > low) {
+        this.setParam(id, "field_range", [low, high]);
+      }
+    };
+    min.addEventListener("change", fix);
+    max.addEventListener("change", fix);
+    auto.addEventListener("click", () => this.setParam(id, "field_range", null));
+    row.append(name, min, max, auto);
+    controls.set("field_range", {
+      element: row,
+      write(value) {
+        const { range, fixed } = value as { range: [number, number]; fixed: boolean };
+        const shown = range.map((v) => String(Number(v.toPrecision(4))));
+        if (document.activeElement !== min && min.value !== shown[0]) min.value = shown[0];
+        if (document.activeElement !== max && max.value !== shown[1]) max.value = shown[1];
+        auto.disabled = !fixed;
+      },
+      setDisabled(value) {
+        min.disabled = value;
+        max.disabled = value;
+        auto.disabled = value;
+      },
+    });
+    return row;
+  }
+
+  /**
+   * The playback rows of a multi-frame detector: play/pause and "save video"
+   * — which renders every frame of the active viewport and saves it as an MP4
+   * (the "Save to" setting picks download or server) — then the frame rate,
+   * on a row of its own.
+   */
+  private buildPlaybackRows(id: string): HTMLElement[] {
+    const root = document.createElement("div");
+    root.className = "gfx-field";
+    const name = document.createElement("span");
+    name.className = "gfx-field-name";
+    name.textContent = "play";
+    name.title = "play the recorded frames in the viewports, or save them as a video";
+    const play = document.createElement("button");
+    play.type = "button";
+    play.className = "gfx-button";
+    const fps = document.createElement("input");
+    fps.type = "number";
+    fps.className = "gfx-numeric";
+    fps.min = "1";
+    fps.max = "120";
+    fps.step = "1";
+    fps.value = "20";
+    fps.title = "frames per second, for playback and the saved video";
+    const rate = (): number => Math.min(120, Math.max(1, Math.round(Number(fps.value) || 20)));
+    const save = document.createElement("button");
+    save.type = "button";
+    save.className = "gfx-button gfx-icon";
+    save.innerHTML = VIDEO_ICON;
+    save.title = SAVE_VIDEO_HINT;
+    save.setAttribute("aria-label", "save video");
+    root.append(name, play, save);
+    const fpsRow = fieldRow("fps", fps, "frames per second, for playback and the saved video");
+    const row: PlaybackRow = { rows: [root, fpsRow], play, fps, save, playing: false };
+    play.addEventListener("click", () => this.callbacks.onPlay(id, !row.playing, rate()));
+    fps.addEventListener("change", () => {
+      if (row.playing) this.callbacks.onPlay(id, true, rate());
+    });
+    save.addEventListener("click", () => this.callbacks.onSaveVideo(id, rate()));
+    this.resultPlayback.set(id, row);
+    this.setPlaying(id, false);
+    return row.rows;
   }
 
   // ------------------------------------------------------------------- controls
@@ -1514,6 +1700,27 @@ function specProperties(spec: SpecPayload | undefined, types: Record<string, Typ
     rows.push([key, Array.isArray(value) ? (value as unknown[]).join(", ") : String(value)]);
   }
   return rows;
+}
+
+/** A frame's readout: its time in fs, its frequency in THz, or its index. */
+function frameReadout(field: FieldPayload | undefined, frame: number): string {
+  if (field?.frame_kind === "time") {
+    const seconds = field.times?.[frame];
+    return seconds !== undefined ? `${(seconds * 1e15).toFixed(1)} fs` : `frame ${frame}`;
+  }
+  const hz = field?.freqs?.[frame];
+  return hz !== undefined ? `${(hz / 1e12).toFixed(4)} THz` : `frame ${frame}`;
+}
+
+/** The frame readout's tooltip: position, and any thinning the kernel applied. */
+function frameNote(field: FieldPayload | undefined, frame: number): string {
+  if (!field) return "";
+  const count = frameCount(field);
+  const stride = field.frame_stride ?? 1;
+  const thinned = stride > 1
+    ? `; 1 in ${stride} of the ${field.frames_recorded ?? count * stride} recorded frames is shown`
+    : "";
+  return `frame ${frame + 1} of ${count}${thinned}`;
 }
 
 function fieldRow(name: string, element: HTMLElement, hint?: string): HTMLElement {

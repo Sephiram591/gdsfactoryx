@@ -4,7 +4,7 @@
 // section is sharp at any zoom and always agrees with the 3D view. Here the
 // rings are filled with Canvas2D's even-odd rule (holes come for free) and
 // zoom/pan are a screen transform applied on redraw, so nothing is resampled.
-import { componentData, parseColor, rampColor, transformValues, valueRange } from "./fieldramp";
+import { componentData, parseColor, rampColor, shadeRange, transformValues } from "./fieldramp";
 import { REGION_COLOR, formatTick, niceStep, tickValues } from "./ticks";
 import type {
   FieldPayload,
@@ -78,6 +78,9 @@ export class Section2D {
   private state: StatePayload | null = null;
   //: the last result's per-detector fields (spec R15); empty until a run lands
   private fields: Record<string, FieldPayload> = {};
+  //: frames shown in place of a detector's stored `field_freq` while it plays
+  //: or is exported as a video, so each tick re-shades without the kernel
+  private readonly frameOverrides = new Map<string, number>();
   //: a scratch canvas for rasterizing one field before it is drawn (spec R15)
   private scratch: HTMLCanvasElement | null = null;
   private exaggeration = 1;
@@ -154,6 +157,19 @@ export class Section2D {
   setFields(fields: Record<string, FieldPayload>): void {
     this.fields = fields ?? {};
     this.draw();
+  }
+
+  /** Shows `frame` of a detector instead of its stored one (null: stop); re-draws. */
+  setFrame(id: string, frame: number | null): void {
+    if (frame === null) this.frameOverrides.delete(id);
+    else this.frameOverrides.set(id, frame);
+    this.draw();
+  }
+
+  /** Draws now and returns the canvas, so a video frame captures this state. */
+  captureCanvas(): HTMLCanvasElement {
+    this.draw();
+    return this.canvas;
   }
 
   /**
@@ -306,7 +322,8 @@ export class Section2D {
       const settings = state.field_settings?.[glyph.id];
       const field = this.fields[glyph.id];
       if (!settings || !settings.field_visible || !field || !settings.field_component) continue;
-      const data = componentData(field, settings.field_component, settings.field_freq ?? 0);
+      const frame = this.frameOverrides.get(glyph.id) ?? settings.field_freq ?? 0;
+      const data = componentData(field, settings.field_component, frame);
       if (!data) continue;
       // the gaussian the ports use, from the section plane to the detector's
       // plane (both in the local frame) (spec D16, R4)
@@ -315,7 +332,7 @@ export class Section2D {
       const alpha = Math.exp(-0.5 * (distance / fade) ** 2);
       if (alpha < 0.01) continue;
       const values = transformValues(data.real, data.imag, settings.field_transform);
-      const range = valueRange(values, settings.field_transform, state.simulation?.log_range ?? 6);
+      const range = shadeRange(field, settings, state.simulation?.log_range ?? 6);
       this.blitField(ctx, glyph, field, values, range, settings, alpha);
     }
   }

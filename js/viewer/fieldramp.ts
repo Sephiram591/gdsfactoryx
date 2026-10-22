@@ -7,6 +7,11 @@
 // transparent → color, a single hue fading up from the low end. Alpha is the map
 // alone, never a separate function of magnitude (spec D16).
 //
+// The ramp spans one fixed range for every frame of a detector — the user's
+// `field_range`, or by default the min and max over the whole recording — so a
+// multi-frame detector (a phasor's frequencies, a FieldDetector's time steps)
+// keeps one brightness scale while it plays or is saved as a video.
+//
 // `logabs` is the one transform whose floor is not the plane's own minimum: it
 // floors at the global `log_range` decades below the plane's maximum, so a true
 // zero maps to the floor rather than to −∞ (spec D16, Q22).
@@ -34,9 +39,10 @@ export function isSigned(transform: Transform): boolean {
  * value (imaginary part zero): the Cartesian components are orthogonal, so
  * ``|E|^2 = |Ex|^2 + |Ey|^2 + |Ez|^2``. Only the ``E`` components contribute.
  *
- * The buffers are frequency-major stacks (spec R17); ``frame`` selects one
- * frequency, clamped to what the buffers hold, so a stale `field_freq` from a
- * previous result cannot read out of bounds.
+ * The buffers are frame-major stacks (spec R17): one frame per recorded
+ * frequency or time step. ``frame`` selects one, clamped to what the buffers
+ * hold, so a stale `field_freq` from a previous result cannot read out of
+ * bounds. A real-valued recording (no ``imag`` buffer) reads as imaginary 0.
  */
 export function componentData(
   field: FieldPayload,
@@ -46,16 +52,16 @@ export function componentData(
   const [rows, cols] = field.grid;
   const count = rows * cols;
   const perFrame = field.components.length * count;
-  const total = Math.floor(field.real.byteLength / 4);
-  const maxFrame = perFrame > 0 ? Math.floor(total / perFrame) - 1 : 0;
-  const f = Math.min(Math.max(0, Math.floor(frame)), Math.max(0, maxFrame));
+  const f = Math.min(Math.max(0, Math.floor(frame)), frameCount(field) - 1);
   const base = f * perFrame;
+  const imagAt = (offset: number): Float32Array =>
+    field.imag ? decodeFloat32(field.imag, offset, count) : new Float32Array(count);
   if (component === TOTAL_COMPONENT) {
     const real = new Float32Array(count);
     for (let i = 0; i < field.components.length; i += 1) {
       if (!field.components[i].startsWith("E")) continue;
       const re = decodeFloat32(field.real, base + i * count, count);
-      const im = decodeFloat32(field.imag, base + i * count, count);
+      const im = imagAt(base + i * count);
       for (let k = 0; k < count; k += 1) real[k] += re[k] * re[k] + im[k] * im[k];
     }
     for (let k = 0; k < count; k += 1) real[k] = Math.sqrt(real[k]);
@@ -65,8 +71,69 @@ export function componentData(
   if (index < 0) return null;
   return {
     real: decodeFloat32(field.real, base + index * count, count),
-    imag: decodeFloat32(field.imag, base + index * count, count),
+    imag: imagAt(base + index * count),
   };
+}
+
+/** How many frames a payload's buffers hold (at least 1). */
+export function frameCount(field: FieldPayload): number {
+  const [rows, cols] = field.grid;
+  const perFrame = field.components.length * rows * cols;
+  const total = Math.floor(field.real.byteLength / 4);
+  return perFrame > 0 ? Math.max(1, Math.floor(total / perFrame)) : 1;
+}
+
+//: whole-recording ranges, per payload (a new result is a new object, so its
+//: entries go with it) and per component/transform/log range
+const RANGE_CACHE = new WeakMap<FieldPayload, Map<string, [number, number]>>();
+
+/**
+ * The value range over **every** frame of a payload (spec R15, D16).
+ *
+ * The default colour scale: one range for the whole recording, so each frame
+ * is shaded on the same scale and playback does not flicker. ``logabs`` floors
+ * `log_range` decades below the recording's maximum. Cached, since a
+ * time-domain recording can hold many frames.
+ */
+export function frameRange(
+  field: FieldPayload,
+  component: string,
+  transform: Transform,
+  logRange: number,
+): [number, number] {
+  const key = `${component}\u0000${transform}\u0000${logRange}`;
+  let cache = RANGE_CACHE.get(field);
+  const hit = cache?.get(key);
+  if (hit) return hit;
+  let min = Infinity;
+  let max = -Infinity;
+  for (let f = 0; f < frameCount(field); f += 1) {
+    const data = componentData(field, component, f);
+    if (!data) break;
+    const [lo, hi] = extent(transformValues(data.real, data.imag, transform));
+    if (lo < min) min = lo;
+    if (hi > max) max = hi;
+  }
+  const range = clampRange(min, max, transform, logRange);
+  if (!cache) {
+    cache = new Map();
+    RANGE_CACHE.set(field, cache);
+  }
+  cache.set(key, range);
+  return range;
+}
+
+/** The range a detector is shaded on: the user's fixed one, else the recording's. */
+export function shadeRange(
+  field: FieldPayload,
+  settings: FieldSettings,
+  logRange: number,
+): [number, number] {
+  const fixed = settings.field_range;
+  if (fixed && Number.isFinite(fixed[0]) && Number.isFinite(fixed[1]) && fixed[1] > fixed[0]) {
+    return [fixed[0], fixed[1]];
+  }
+  return frameRange(field, settings.field_component ?? "", settings.field_transform, logRange);
 }
 
 /** A component's transformed values, in place order (spec R15). */
@@ -101,16 +168,27 @@ export function transformValues(
 
 /** The value range the ramp spans, honoring the logabs floor (spec D16, Q22). */
 export function valueRange(values: Float32Array, transform: Transform, logRange: number): [number, number] {
+  const [min, max] = extent(values);
+  return clampRange(min, max, transform, logRange);
+}
+
+/** The min and max of some values (±Infinity when there are none). */
+function extent(values: Float32Array): [number, number] {
   let min = Infinity;
   let max = -Infinity;
   for (const value of values) {
     if (value < min) min = value;
     if (value > max) max = value;
   }
+  return [min, max];
+}
+
+/** A raw min/max made into a usable ramp range (logabs floor, non-empty span). */
+function clampRange(min: number, max: number, transform: Transform, logRange: number): [number, number] {
   if (!Number.isFinite(min) || !Number.isFinite(max)) return [0, 1];
   if (transform === "logabs") {
-    // the floor is `log_range` decades below the plane's maximum (spec D16); the
-    // span never shrinks below it, so a weak plane still reads across the ramp
+    // the floor is `log_range` decades below the maximum (spec D16); the span
+    // never shrinks below it, so a weak plane still reads across the ramp
     const floor = max - Math.abs(logRange);
     if (min < floor) min = floor;
   }

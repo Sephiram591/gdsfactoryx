@@ -8,8 +8,8 @@ import {
   componentData,
   parseColor,
   rampTexture,
+  shadeRange,
   transformValues,
-  valueRange,
 } from "./fieldramp";
 import type { FieldPayload, FieldSettings, GlyphPayload, PortMeta } from "./wire";
 
@@ -208,22 +208,30 @@ export class PlaneGlyphs {
    * The transformed component becomes a texture on the plane; the plain
    * translucent fill is replaced (the outline marks the extent instead). A null
    * `field` — no result, no component, or `field_visible` off — restores the
-   * plain glyph.
+   * plain glyph. `frame` overrides the stored `field_freq` (playback and video
+   * export step it client-side); every frame is shaded on the detector's one
+   * fixed range (`shadeRange`).
    */
-  setField(id: string, field: FieldPayload | null, settings: FieldSettings, logRange: number): void {
+  setField(
+    id: string,
+    field: FieldPayload | null,
+    settings: FieldSettings,
+    logRange: number,
+    frame?: number,
+  ): void {
     const item = this.items.get(id);
     if (!item || !item.plane) return;
     const component = settings.field_component;
-    // the selected frequency frame, client-side so a slider move re-shades with
-    // no kernel round-trip (spec R17)
-    const frame = settings.field_freq ?? 0;
-    const data = field && component ? componentData(field, component, frame) : null;
+    // the selected frame, client-side so a slider move re-shades with no kernel
+    // round-trip (spec R17)
+    const shown = frame ?? settings.field_freq ?? 0;
+    const data = field && component ? componentData(field, component, shown) : null;
     if (!field || !data || !settings.field_visible) {
       this.clearField(item);
       return;
     }
     const values = transformValues(data.real, data.imag, settings.field_transform);
-    const range = valueRange(values, settings.field_transform, logRange);
+    const range = shadeRange(field, settings, logRange);
     const low = parseColor(settings.field_color_low);
     const high = parseColor(settings.field_color_high);
     const bytes = rampTexture(values, range, settings.field_transform, low, high, settings.field_opacity);

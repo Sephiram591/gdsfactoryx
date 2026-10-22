@@ -157,13 +157,23 @@ export interface FieldPayload {
   //: where a sample sits along the plane's `(u, v)` axes, in cells from the
   //: cell's centre (-0.5 on x and y, 0 on z); absent means cell-centred
   shift?: [number, number];
+  //: what a frame of the buffers is: a recorded frequency (a phasor, "freq",
+  //: the default) or a recorded time step (a FieldDetector, "time")
+  frame_kind?: "freq" | "time";
   //: the recorded frequencies in Hz (spec R17); frame `i` of the buffers is
   //: `freqs[i]`
   freqs?: number[];
-  //: the initially selected frequency frame
+  //: the recorded times in seconds, for time frames; frame `i` is `times[i]`
+  times?: number[];
+  //: how many frames the detector recorded, and the stride the kernel thinned
+  //: them by to fit the wire (1 = every recorded frame is here)
+  frames_recorded?: number;
+  frame_stride?: number;
+  //: the initially selected frame
   freq?: number;
   real: DataView | ArrayBuffer;
-  imag: DataView | ArrayBuffer;
+  //: absent for a real-valued (time-domain) recording: the imaginary part is 0
+  imag?: DataView | ArrayBuffer;
 }
 
 //: A detector's field display settings (spec R15, D16). `component` is null
@@ -179,6 +189,10 @@ export interface FieldSettings {
   field_freq?: number;
   //: whether shading draws the plane's outline (spec R17); default true
   field_outline?: boolean;
+  //: the colour scale's fixed `[min, max]` in the transform's units; null (the
+  //: default) spans the whole recording — every frame — so playback and a
+  //: saved video keep one scale
+  field_range?: [number, number] | null;
 }
 
 export interface StatePayload {

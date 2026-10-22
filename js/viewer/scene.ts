@@ -407,6 +407,12 @@ export class Scene3D {
     return this.renderer.domElement.toDataURL("image/png");
   }
 
+  /** Renders now and returns the canvas, so a video frame captures this state. */
+  captureCanvas(): HTMLCanvasElement {
+    this.renderer.render(this.scene, this.camera);
+    return this.renderer.domElement;
+  }
+
   private resize(): void {
     const width = Math.max(this.container.clientWidth, 1);
     const height = Math.max(this.container.clientHeight, 1);

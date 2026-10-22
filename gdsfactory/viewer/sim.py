@@ -37,6 +37,7 @@ __all__ = [
     "launch_code",
     "run",
     "spec_glyph",
+    "validate_sampling",
 ]
 
 
@@ -76,17 +77,43 @@ TYPES: dict[str, ObjectType] = {
         ObjectType("PointDipoleSource", "source", "create_point_dipole_source_at", plane=False,
                    extra=("polarization", "source_type")),
         ObjectType("ModeOverlapDetector", "detector", "create_mode_overlap_detector_at", wave="many",
-                   direction=True, extra=("mode_index", "filter_pol", "scaling_mode")),
+                   direction=True, extra=("mode_index", "filter_pol", "scaling_mode", "dft_subsample")),
         ObjectType("PoyntingFluxDetector", "detector", "create_poynting_flux_detector_at", wave="none",
-                   direction=True, extra=("reduce_volume",)),
+                   direction=True, extra=("reduce_volume", "record_interval")),
         ObjectType("PhasorDetector", "detector", "create_phasor_detector_at", wave="many",
-                   extra=("components", "reduce_volume", "scaling_mode")),
+                   extra=("components", "reduce_volume", "scaling_mode", "dft_subsample")),
         ObjectType("FieldDetector", "detector", "create_field_detector_at", wave="none",
-                   extra=("components", "reduce_volume")),
+                   extra=("components", "reduce_volume", "record_interval")),
         ObjectType("EnergyDetector", "detector", "create_energy_detector_at", wave="none",
-                   extra=("reduce_volume", "aggregate")),
+                   extra=("reduce_volume", "aggregate", "record_interval")),
     )
 }
+
+#: The temporal-downsampling extras (spec R12). ``record_interval`` is the
+#: viewer's name for a time-domain detector's recording stride — it becomes
+#: fdtdx's ``switch=OnOffSwitch(interval=n)``, so only every n-th step is
+#: stored — and ``dft_subsample`` is fdtdx's own phasor-DFT stride: a positive
+#: integer, or ``"auto"`` to derive it from the highest recorded frequency.
+_SAMPLING = ("record_interval", "dft_subsample")
+
+
+def validate_sampling(params: dict[str, Any]) -> None:
+    """Refuses a bad temporal-downsampling parameter (spec R12).
+
+    ``record_interval`` must be a whole number of at least 1; ``dft_subsample``
+    the same, or ``"auto"``. ``None`` means unset (fdtdx's every-step default).
+
+    Raises:
+        ValueError: on a value fdtdx would reject.
+    """
+    for key in _SAMPLING:
+        value = params.get(key)
+        if value is None or (key == "dft_subsample" and value == "auto"):
+            continue
+        whole = isinstance(value, (int, float)) and not isinstance(value, bool) and float(value).is_integer()
+        if not whole or value < 1:
+            expected = "a whole number >= 1" + (' or "auto"' if key == "dft_subsample" else "")
+            raise ValueError(f"{key} must be {expected}, got {value!r}")
 
 #: The default type added by each gesture (spec R12, Q18).
 DEFAULT_SOURCE = "ModePlaneSource"
@@ -119,6 +146,7 @@ _FIELD_PARAMS = (
     "field_visible",
     "field_freq",
     "field_outline",
+    "field_range",
 )
 
 #: The display transforms a detector's field can take (spec R15).
@@ -187,6 +215,9 @@ class ObjectSpec:
             "field_visible": bool(self.params.get("field_visible", True)),
             "field_freq": int(self.params.get("field_freq", 0)),
             "field_outline": bool(self.params.get("field_outline", True)),
+            # the colour scale's fixed [min, max], in the transform's units; None
+            # means the browser spans the whole recording (every frame)
+            "field_range": _field_range(self.params.get("field_range")),
         }
 
     def to_wire(self) -> dict[str, Any]:
@@ -210,6 +241,7 @@ class ObjectSpec:
         if unknown:
             raise ValueError(f"Unknown parameters for {type_name!r}: {sorted(unknown)}")
         _validate_absolute(port, params)
+        validate_sampling(params)
         return cls(type=type_name, port=port, params=params, id=str(data.get("id") or ""))
 
 
@@ -428,6 +460,23 @@ def _field_opacity(value: Any) -> float:
     return min(1.0, max(0.0, float(value)))
 
 
+def _field_range(value: Any) -> list[float] | None:
+    """A detector's fixed colour-scale ``[min, max]``, or None for auto (spec R15).
+
+    Raises:
+        ValueError: unless ``value`` is None or two finite numbers, min < max.
+    """
+    if value is None:
+        return None
+    try:
+        low, high = (float(v) for v in value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"field_range must be [min, max] or null, got {value!r}") from exc
+    if not (math.isfinite(low) and math.isfinite(high) and low < high):
+        raise ValueError(f"field_range must be two finite numbers with min < max, got {value!r}")
+    return [low, high]
+
+
 def _validate_absolute(port: str, params: dict[str, Any]) -> None:
     """Checks a spec's absolute-placement params (spec R18).
 
@@ -555,9 +604,7 @@ def _create_absolute(spec: ObjectSpec, settings: SimSettings,
         # an absolute plane's direction is its normal axis' orientation: a
         # source "in" along +axis launches towards +axis (spec R18)
         fields["direction"] = "+" if params.get("direction", "in") == "in" else "-"
-    for key in kind.extra:
-        if key in params:
-            fields[key] = params[key]
+    fields.update(_extra_kwargs(kind, params))
     if kind.category == "detector" and settings.pulse_width_frac > 0 and "scaling_mode" in kind.extra:
         fields.setdefault("scaling_mode", "pulse")
     obj = cls(partial_real_shape=tuple(real), partial_grid_shape=tuple(grid), **fields)
@@ -614,13 +661,58 @@ def _create(stack: Any, spec: ObjectSpec, settings: SimSettings,
     if kind.direction:
         kwargs["direction"] = params.get("direction", "in" if kind.category == "source" else "out")
 
-    for key in kind.extra:
-        if key in params:
-            kwargs[key] = params[key]
+    kwargs.update(_extra_kwargs(kind, params))
     # pulse sources/detectors need the matching scaling mode
     if kind.category == "detector" and settings.pulse_width_frac > 0 and "scaling_mode" in kind.extra:
         kwargs.setdefault("scaling_mode", "pulse")
     return method(**kwargs)
+
+
+def _extra_kwargs(kind: ObjectType, params: dict[str, Any]) -> dict[str, Any]:
+    """The fdtdx keyword arguments for a spec's type extras (spec R12).
+
+    Every extra passes through by name except the temporal downsampling
+    (:data:`_SAMPLING`): ``record_interval`` becomes fdtdx's
+    ``switch=OnOffSwitch(interval=n)``, and a whole-number ``dft_subsample`` is
+    passed as an ``int``. A value of 1 (or unset) keeps fdtdx's every-step
+    default, so nothing is passed. :func:`_extra_args` emits the same as source.
+    """
+    kwargs: dict[str, Any] = {}
+    for key in kind.extra:
+        value = params.get(key)
+        if key not in params or (key in _SAMPLING and value is None):
+            continue
+        if key == "record_interval":
+            if int(value) > 1:
+                import fdtdx
+
+                kwargs["switch"] = fdtdx.OnOffSwitch(interval=int(value))
+        elif key == "dft_subsample":
+            kwargs[key] = value if value == "auto" else int(value)
+        else:
+            kwargs[key] = value
+    return kwargs
+
+
+def _extra_args(kind: ObjectType, params: dict[str, Any]) -> list[str]:
+    """``key=value`` source text for a spec's type extras (spec R14 mode 3).
+
+    The emitted twin of :func:`_extra_kwargs`, so the launch code builds the
+    same objects ``build_objects`` does.
+    """
+    args: list[str] = []
+    for key in kind.extra:
+        value = params.get(key)
+        if key not in params or (key in _SAMPLING and value is None):
+            continue
+        if key == "record_interval":
+            if int(value) > 1:
+                args.append(f"switch=fdtdx.OnOffSwitch(interval={int(value)})")
+        elif key == "dft_subsample":
+            args.append(f"dft_subsample={value if value == 'auto' else int(value)!r}")
+        else:
+            args.append(f"{key}={_repr(value)}")
+    return args
 
 
 def _pml_coeffs_in_config_dtype(objects: Any, config: Any) -> Any:
@@ -769,9 +861,7 @@ def _absolute_lines(spec: ObjectSpec, kind: ObjectType, settings: SimSettings,
         # an absolute plane's direction is its normal axis' orientation (R18)
         char = "+" if spec.params.get("direction", "in") == "in" else "-"
         lines.append(f"    direction={char!r},")
-    for key in kind.extra:
-        if key in spec.params:
-            lines.append(f"    {key}={_repr(spec.params[key])},")
+    lines.extend(f"    {arg}," for arg in _extra_args(kind, spec.params))
     if kind.category == "detector" and settings.pulse_width_frac > 0 and "scaling_mode" in kind.extra:
         lines.append("    scaling_mode='pulse',")
     lines.append(")")
@@ -906,9 +996,7 @@ def launch_code(stack: Any, state: Any) -> str:
             args.append("wave_characters=" + _waves_tuple(wavelengths))
         if kind.direction:
             args.append(f"direction={spec.params.get('direction', 'in' if kind.category == 'source' else 'out')!r}")
-        for key in kind.extra:
-            if key in spec.params:
-                args.append(f"{key}={_repr(spec.params[key])}")
+        args.extend(_extra_args(kind, spec.params))
         if kind.category == "detector" and settings.pulse_width_frac > 0 and "scaling_mode" in kind.extra:
             args.append("scaling_mode='pulse'")
         if spec.params.get("level") is not None:

@@ -1,18 +1,26 @@
 """Detector field extraction and result validation (spec R15, D16, Q20-Q23).
 
 A detector that recorded a field carries it on the last run's
-``result.arrays.detector_states[name]["phasor"]`` as a complex64 array shaped
-``(num_frequencies, num_components, *grid_shape)`` (spec R15). For a plane
-detector the grid shape has the detector's normal axis as a singleton and the
-two in-plane axes last, already in the order the glyph's ``(u, v)`` basis uses
-(spec D11), so the trailing two dims can be handed to a texture with no
-transpose.
+``result.arrays.detector_states[name]`` in one of two layouts, both a stack of
+**frames** shaped ``(num_frames, num_components, *grid_shape)`` (spec R15):
+
+- a phasor-family detector's complex ``"phasor"``, one frame per recorded
+  frequency (``frame_kind == "freq"``);
+- a ``FieldDetector``'s real ``"fields"``, one frame per recorded time step
+  (``frame_kind == "time"``), which the browser can play back and export as a
+  video.
+
+For a plane detector the grid shape has the detector's normal axis as a
+singleton and the two in-plane axes last, already in the order the glyph's
+``(u, v)`` basis uses (spec D11), so the trailing two dims can be handed to a
+texture with no transpose.
 
 The browser applies the display transform (``real``, ``imag``, ``abs``,
 ``phase``, ``logabs``), the colormap, the transparency and the opacity, so the
-kernel sends the **raw** complex field — its real and imaginary parts as float32
-buffers — and a transform or opacity edit re-shades with no kernel work beyond
-the state patch (spec R15's AC, D16).
+kernel sends the **raw** field — the real and imaginary parts of a phasor, the
+real samples of a time-domain recording, as float32 buffers — and a transform
+or opacity edit re-shades with no kernel work beyond the state patch (spec
+R15's AC, D16).
 
 :func:`validate_result` is the strict check ``viewer.show_result`` makes before
 adopting a user-supplied result (spec Q23): the result's detectors must match the
@@ -44,6 +52,12 @@ _GRID_TOL = 1
 #: The relative tolerance on a grid's physical spacing, in µm (spec Q23).
 _SPACING_RTOL = 1e-6
 
+#: The most float32 bytes one detector's frames may take on the wire. A
+#: ``FieldDetector`` stores one plane per recorded step, which can run to
+#: gigabytes; above this the frames are thinned by a stride (every k-th one is
+#: sent) and the payload says so (``frames_recorded``, ``frame_stride``).
+_MAX_FIELD_BYTES = 256 * 1024 * 1024
+
 
 def _grid_ndim(result: Any, name: str) -> int:
     """The number of grid axes a detector's field has (3 for a plane detector).
@@ -62,33 +76,60 @@ def _grid_ndim(result: Any, name: str) -> int:
         return 3
 
 
-def _detector_phasor(result: Any, name: str) -> np.ndarray | None:
-    """The complex field a detector recorded, as ``(num_freqs, *grid)``.
+def _detector_frames(result: Any, name: str) -> tuple[Any, str] | None:
+    """The frames a detector recorded, as ``((frames, components, *grid), kind)``.
 
-    The raw array is ``(latent, num_freqs, num_components, *grid_shape)`` — the
-    leading axis is the latent time step, a singleton for the phasor family
-    (``_num_latent_time_steps`` is 1). Only that one axis is peeled: the
+    A phasor's raw array is ``(latent, num_freqs, num_components, *grid_shape)``
+    — the leading axis is the latent time step, a singleton for the phasor
+    family (``_num_latent_time_steps`` is 1). Only that one axis is peeled: the
     frequency axis is kept, so a multi-frequency detector's every frame reaches
-    the browser. A detector that recorded no field, or whose array does not fit
-    that shape, yields None: it keeps its plain glyph.
+    the browser (``kind == "freq"``). A ``FieldDetector``'s real ``"fields"``
+    array is already ``(recorded_steps, num_components, *grid_shape)``
+    (``kind == "time"``).
+
+    The array is returned as the detector state holds it (a device array, not
+    yet copied to the host), so a caller can thin the frames before the copy. A
+    detector that recorded no field, or whose array does not fit those shapes
+    (e.g. a volume-reduced one), yields None: it keeps its plain glyph.
     """
     try:
         state = result.arrays.detector_states[name]
     except (AttributeError, KeyError, TypeError):
         return None
-    phasor = state.get("phasor") if hasattr(state, "get") else None
-    if phasor is None:
-        return None
-    array = np.asarray(phasor)
-    if not np.iscomplexobj(array):
+    if not hasattr(state, "get"):
         return None
     grid_ndim = _grid_ndim(result, name)
-    # peel the single latent time step axis, keeping (num_freqs, components, *grid)
-    if array.ndim > grid_ndim + 2 and array.shape[0] == 1:
-        array = array[0]
-    if array.ndim != grid_ndim + 2:
-        return None
-    return array
+    phasor = state.get("phasor")
+    if phasor is not None:
+        if not np.iscomplexobj(phasor):
+            return None
+        # peel the single latent time step axis, keeping (num_freqs, components, *grid)
+        if phasor.ndim > grid_ndim + 2 and phasor.shape[0] == 1:
+            phasor = phasor[0]
+        return (phasor, "freq") if phasor.ndim == grid_ndim + 2 else None
+    recorded = state.get("fields")
+    if recorded is not None and not np.iscomplexobj(recorded) and recorded.ndim == grid_ndim + 2:
+        return recorded, "time"
+    return None
+
+
+def _detector_times(result: Any, name: str, num_frames: int) -> list[float]:
+    """The times a time-domain detector recorded at, in seconds.
+
+    Read from the placed detector's on-mask (``_is_on_at_time_step_arr``, one
+    flag per simulation step, set by its ``switch``) and the config's step
+    duration, so a ``record_interval`` shows up as the spacing between frames.
+    Falls back to frame indices when either is missing or the counts disagree.
+    """
+    try:
+        on = np.asarray(result.objects[name]._is_on_at_time_step_arr)
+        step = float(result.config.time_step_duration)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return [float(i) for i in range(num_frames)]
+    steps = np.flatnonzero(on)
+    if steps.size != num_frames:
+        return [float(i) for i in range(num_frames)]
+    return [float(s) * step for s in steps]
 
 
 def _detector_components(result: Any, name: str) -> list[str]:
@@ -124,13 +165,16 @@ def _detector_freqs(result: Any, name: str, num_freqs: int) -> list[float]:
 def field_payload(result: Any, name: str, spec_id: str) -> dict[str, Any] | None:
     """One detector's raw field for the browser (spec R15, D16, R17).
 
-    Sends the real and imaginary parts of every recorded component of every
-    recorded frequency as contiguous float32 buffers shaped
-    ``(num_freqs, v, u)`` per part, so the browser can apply any transform and
-    pick any frequency frame without a further kernel round-trip. A
-    single-frequency run sends one frame, laid out exactly as before the
-    frequency axis existed. Returns None when the detector recorded no field,
-    so it keeps its plain glyph.
+    Sends every recorded component of every frame as contiguous float32
+    buffers shaped ``(num_frames, components, v, u)``, so the browser can apply
+    any transform and pick or play any frame without a further kernel
+    round-trip. A phasor sends its real and imaginary parts, one frame per
+    recorded frequency; a ``FieldDetector`` sends its real samples only (no
+    ``imag``), one frame per recorded time step. A single-frequency run sends
+    one frame, laid out exactly as before the frame axis existed. Frames over
+    ``_MAX_FIELD_BYTES`` are thinned by a stride before they leave the device.
+    Returns None when the detector recorded no field, so it keeps its plain
+    glyph.
 
     Args:
         result: the :class:`~gdsfactory.viewer.sim.RunResult` to read.
@@ -138,15 +182,26 @@ def field_payload(result: Any, name: str, spec_id: str) -> dict[str, Any] | None
         spec_id: the spec id, so the browser matches the field to its glyph.
 
     Returns:
-        ``{"id", "name", "components", "grid", "shift", "freqs", "freq",
-        "real", "imag"}`` with the two buffers as ``memoryview``s, or None.
-        ``shift`` is the ``(u, v)`` offset of a sample from its cell's centre,
-        in cells (``-0.5`` on x and y, ``0`` on z).
+        ``{"id", "name", "components", "grid", "shift", "frame_kind", "freq",
+        "frames_recorded", "frame_stride", "real"}`` plus ``"freqs"`` (Hz) and
+        ``"imag"`` for a phasor or ``"times"`` (s) for a time-domain recording,
+        with the buffers as ``memoryview``s, or None. ``shift`` is the
+        ``(u, v)`` offset of a sample from its cell's centre, in cells
+        (``-0.5`` on x and y, ``0`` on z); ``freq`` is the initially selected
+        frame.
     """
-    phasor = _detector_phasor(result, name)
-    if phasor is None or phasor.ndim < 4:
+    found = _detector_frames(result, name)
+    if found is None or found[0].ndim < 4:
         # no field, or a volume-reduced detector with no in-plane grid to draw
         return None
+    frames, kind = found
+    complex_valued = kind == "freq"
+    recorded = int(frames.shape[0])
+    # thin the frames on the device, before the host copy, when they would not
+    # fit the wire budget (float32, twice over for a complex field)
+    frame_bytes = int(np.prod(frames.shape[1:])) * 4 * (2 if complex_valued else 1)
+    stride = max(1, -(-recorded * frame_bytes // _MAX_FIELD_BYTES))
+    phasor = np.asarray(frames[::stride] if stride > 1 else frames)
     components = _detector_components(result, name)
     if not components or phasor.shape[1] != len(components):
         # fall back to generic names so the field is still plottable
@@ -168,20 +223,25 @@ def field_payload(result: Any, name: str, spec_id: str) -> dict[str, Any] | None
     # would read as 75x450.
     ordered = np.ascontiguousarray(np.swapaxes(plane, 2, 3))
     real = np.ascontiguousarray(ordered.real, dtype=np.float32)
-    imag = np.ascontiguousarray(ordered.imag, dtype=np.float32)
-    num_freqs = int(ordered.shape[0])
-    return {
+    entry: dict[str, Any] = {
         "id": spec_id,
         "name": name,
         "components": components,
         "grid": [int(ordered.shape[2]), int(ordered.shape[3])],
         # (u, v) sample offsets in cells, in the same stack-axis order as the grid
         "shift": [_SAMPLE_SHIFT[i - 2] for i in in_plane],
-        "freqs": _detector_freqs(result, name, num_freqs),
+        "frame_kind": kind,
         "freq": 0,
+        "frames_recorded": recorded,
+        "frame_stride": stride,
         "real": real.data,
-        "imag": imag.data,
     }
+    if complex_valued:
+        entry["freqs"] = _detector_freqs(result, name, recorded)[::stride]
+        entry["imag"] = np.ascontiguousarray(ordered.imag, dtype=np.float32).data
+    else:
+        entry["times"] = _detector_times(result, name, recorded)[::stride]
+    return entry
 
 
 def validate_result(state: Any, result: Any) -> None:
@@ -227,16 +287,17 @@ def validate_result(state: Any, result: Any) -> None:
         raise ValueError("the result has no grid resolution (.config.grid.spacing)")
 
     for name, spec in expected.items():
-        phasor = _detector_phasor(result, name)
-        if phasor is None:
+        found = _detector_frames(result, name)
+        if found is None:
             continue  # no field recorded: nothing to mis-shade
+        frames = found[0]
         components = _detector_components(result, name)
-        if components and phasor.shape[1] != len(components):
+        if components and frames.shape[1] != len(components):
             raise ValueError(
-                f"detector {name!r}: the result has {phasor.shape[1]} components but "
+                f"detector {name!r}: the result has {frames.shape[1]} components but "
                 f"the detector records {len(components)}"
             )
-        grid = tuple(int(v) for v in phasor.shape[2:])
+        grid = tuple(int(v) for v in frames.shape[2:])
         if not _grid_matches(state, spec, grid, resolution):
             raise ValueError(
                 f"detector {name!r}: the result's {grid} grid does not match the "
@@ -335,18 +396,25 @@ def validate_foreign_result(
     for obj in detectors:
         state = detector_states.get(obj.name) if hasattr(detector_states, "get") else None
         phasor = state.get("phasor") if hasattr(state, "get") else None
-        if phasor is None or not np.iscomplexobj(np.asarray(phasor)):
-            continue  # a plain detector: listed, never shaded — nothing to check
-        shape = np.asarray(phasor).shape
+        recorded = state.get("fields") if hasattr(state, "get") else None
         widths = [int(obj.grid_slice[i].stop - obj.grid_slice[i].start) for i in range(3)]
-        if sum(1 for w in widths if w > 1) != 2:
-            raise ValueError(
-                f"detector {obj.name!r} records a phasor but is not a plane "
-                f"(grid widths {widths}); its field could never shade"
-            )
+        is_plane = sum(1 for w in widths if w > 1) == 2
+        if phasor is not None and np.iscomplexobj(phasor):
+            if not is_plane:
+                raise ValueError(
+                    f"detector {obj.name!r} records a phasor but is not a plane "
+                    f"(grid widths {widths}); its field could never shade"
+                )
+            shape = tuple(phasor.shape)
+        elif recorded is not None and is_plane and len(recorded.shape) == 5:
+            # a time-domain plane recording shades too; a volume or volume-reduced
+            # one is listed but never shaded, so it has nothing to check
+            shape = tuple(recorded.shape)
+        else:
+            continue  # a plain detector: listed, never shaded — nothing to check
         if shape[-3:] != tuple(widths):
             raise ValueError(
-                f"detector {obj.name!r}: phasor grid shape {shape[-3:]} does not "
+                f"detector {obj.name!r}: field grid shape {shape[-3:]} does not "
                 f"match the placed detector's {tuple(widths)}"
             )
 

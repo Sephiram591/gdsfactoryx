@@ -21,6 +21,13 @@ The save button normally downloads a PNG in the browser (spec D14). A per-viewer
 writes the file under :attr:`Viewer.save_dir` (the process working directory by
 default), reporting the written path back in the ``save_result`` trait.
 
+A multi-frame detector (a phasor's frequencies, a ``FieldDetector``'s time
+steps) plays in the browser and can be saved as a video: the browser renders
+and encodes every frame, sends ``{"event": "save_video", ...}`` with the stream
+as a binary buffer, and :func:`wrap_video` makes an MP4 with ffmpeg — written
+under ``save_dir``, or sent back as a ``video_ready`` message to download,
+following the same "save to" preference.
+
 The three run modes (spec R14) hang off the handle:
 
 - ``.objects`` / ``.config`` / ``.constraints`` — the mode-2 export, computed on
@@ -40,6 +47,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import subprocess
+import tempfile
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -539,7 +548,7 @@ class Viewer(anywidget.AnyWidget):
 
     # ------------------------------------------------------------------ messages
 
-    def _on_msg(self, _widget: Any, content: dict[str, Any], _buffers: list) -> None:
+    def _on_msg(self, _widget: Any, content: dict[str, Any], buffers: list) -> None:
         """Applies a browser message to the kernel state and re-syncs (spec D10).
 
         Handles a state ``patch`` (the general path) and the setup events
@@ -566,6 +575,11 @@ class Viewer(anywidget.AnyWidget):
             # the browser's save button, routed to the kernel (spec D14): write
             # the PNG beside the notebook and report the path back
             self._save_image(content)
+            return
+        if event == "save_video":
+            # a multi-frame detector's "save video": the browser encoded the
+            # frames; wrap them into an MP4 and save or hand it back
+            self._save_video(content, buffers)
             return
         if event == "set_save_dir":
             # the settings screen's folder field (spec D14): point server-side
@@ -711,6 +725,77 @@ class Viewer(anywidget.AnyWidget):
             self.save_result = {"error": str(exc)}
         else:
             self.save_result = {"path": str(target.resolve())}
+
+    def _save_video(self, content: dict[str, Any], buffers: list) -> None:
+        """Saves a browser-encoded video of a detector's frames as an MP4.
+
+        The browser renders and encodes every frame of a multi-frame detector
+        (WebCodecs) and sends the stream as one binary buffer with its
+        ``codec`` and ``fps``; :func:`wrap_video` makes the MP4. With
+        ``target == "server"`` the file lands in :attr:`save_dir` (never
+        clobbering, like :meth:`_save_image`) and ``save_result`` carries the
+        path; otherwise the MP4 goes back to the browser as a ``video_ready``
+        message, which downloads it. A failure sets ``save_result["error"]``.
+        """
+        name = Path(str(content.get("filename") or "detector")).name
+        name = name if name.endswith(".mp4") else f"{name}.mp4"
+        server = content.get("target") == "server"
+        if not buffers:
+            self.save_result = {"error": "video: the browser sent no video data"}
+            return
+        try:
+            mp4 = wrap_video(bytes(buffers[0]), str(content.get("codec")), int(content.get("fps") or 20))
+            if server:
+                target = _free_path(Path(self.save_dir) / name)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(mp4)
+            else:
+                self.send({"event": "video_ready", "filename": name}, buffers=[mp4])
+        except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            self.save_result = {"error": f"video: {exc}"}
+        else:
+            if server:
+                self.save_result = {"path": str(target.resolve())}
+
+
+def wrap_video(stream: bytes, codec: str, fps: int) -> bytes:
+    """An H.264 MP4 from a browser-encoded video stream, via the bundled ffmpeg.
+
+    ``stream`` is what the viewer's encoder produced: an Annex B H.264
+    elementary stream (``codec == "h264"``), which is remuxed into the MP4
+    without re-encoding, or VP8/VP9 frames in IVF (``"vp8"``/``"vp9"``, from a
+    browser with no H.264 encoder), which are transcoded to H.264 so the file
+    plays everywhere. ffmpeg is the binary ``imageio-ffmpeg`` ships (fdtdx
+    depends on it for its own videos).
+
+    Raises:
+        ValueError: on an unknown codec or a frame rate outside 1-240.
+        RuntimeError: if ffmpeg is unavailable or fails.
+    """
+    if codec not in ("h264", "vp8", "vp9"):
+        raise ValueError(f"unknown video codec {codec!r}")
+    if not 1 <= fps <= 240:
+        raise ValueError(f"the frame rate must be 1-240, got {fps}")
+    try:
+        import imageio_ffmpeg
+    except ImportError as exc:
+        raise RuntimeError("saving a video needs imageio-ffmpeg, which ships ffmpeg") from exc
+    with tempfile.TemporaryDirectory() as folder:
+        source = Path(folder) / ("in.h264" if codec == "h264" else "in.ivf")
+        out = Path(folder) / "out.mp4"
+        source.write_bytes(stream)
+        command = [imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loglevel", "error"]
+        if codec == "h264":
+            command += ["-f", "h264", "-framerate", str(fps), "-i", str(source), "-c:v", "copy"]
+        else:
+            command += ["-i", str(source), "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                        "-preset", "veryfast", "-crf", "18"]
+        command += ["-movflags", "+faststart", str(out)]
+        done = subprocess.run(command, capture_output=True, timeout=600, check=False)
+        if done.returncode != 0 or not out.is_file():
+            detail = done.stderr.decode(errors="replace").strip()[-400:]
+            raise RuntimeError(f"ffmpeg could not write the MP4: {detail or done.returncode}")
+        return out.read_bytes()
 
 
 def _decode_data_url(data: Any) -> bytes:

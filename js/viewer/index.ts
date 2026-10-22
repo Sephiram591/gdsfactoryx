@@ -8,11 +8,12 @@ import "./style.css";
 import * as THREE from "three";
 
 import { Explorer } from "./explorer";
-import { componentData, parseColor, rampColor, transformValues, valueRange } from "./fieldramp";
+import { componentData, frameCount, parseColor, rampColor, shadeRange } from "./fieldramp";
 import { PlaneGlyphs, PortGlyphs } from "./glyphs";
 import { LevelMeshes } from "./mesh";
 import { Scene3D, CONTROL_KINDS, type ControlKind } from "./scene";
 import { Section2D } from "./section";
+import { encodeFrames, videoSupported } from "./video";
 import type {
   FieldPayload,
   GeometryPayload,
@@ -25,7 +26,9 @@ interface AnyModel {
   get(key: string): unknown;
   set(key: string, value: unknown): void;
   save_changes(): void;
-  send(content: Record<string, unknown>, callbacks?: unknown): void;
+  send(content: Record<string, unknown>, callbacks?: unknown, buffers?: ArrayBuffer[]): void;
+  //: a kernel `Widget.send(content, buffers)` arrives as "msg:custom"
+  on(event: "msg:custom", handler: (content: Record<string, unknown>, buffers?: DataView[]) => void): void;
   on(event: string, handler: () => void): void;
 }
 
@@ -217,6 +220,12 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
       send(model, { event: "update_spec", kind, spec: { id, ...change } }),
     onRemoveSpec: (kind, id) => send(model, { event: "remove_spec", kind, id }),
     onSettings: (settings) => send(model, { event: "set_settings", settings }),
+    // playback and video export run in the browser, over the frames already
+    // here (defined with the playback state below)
+    onPlay: (id, play, fps) => (play ? startPlaying(id, fps) : stopPlaying(id)),
+    onSaveVideo: (id, fps) => {
+      void saveVideo(id, fps);
+    },
   });
 
   // -- viewport -------------------------------------------------------------
@@ -408,6 +417,14 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   // source/detector planes, drawn from their specs before anything is placed
   // (spec R12, D11); rebuilt on every setup edit
   const planes = new PlaneGlyphs();
+  // the playback state of multi-frame detectors (see "playback and video
+  // export" below): the frame each one shows instead of its stored one
+  const playFrame = new Map<string, number>();
+  const playing = new Map<string, { fps: number; last: number }>();
+  const exporting = new Set<string>();
+  //: detectors whose stopped-on frame was sent and not yet echoed back
+  const awaitingEcho = new Set<string>();
+  let playHandle = 0;
 
   const disposeContent = (): void => {
     for (const meshes of levels.values()) {
@@ -614,17 +631,148 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
     const settings = state.field_settings ?? {};
     const logRange = state.simulation?.log_range ?? 6;
     // fields shade only while the Result tab is active (spec R17): the editor
-    // views show the setup, never an overlay
+    // views show the setup, never an overlay — and nothing plays there
     const shading = state.active_tab === "result";
+    if (!shading) for (const id of [...playing.keys()]) stopPlaying(id);
+    // a frame shown by playback stays until the kernel echoes the one playback
+    // stopped on; then the stored `field_freq` takes over again
+    for (const [id, frame] of [...playFrame]) {
+      if (playing.has(id) || exporting.has(id)) continue;
+      const echoed = (settings[id]?.field_freq ?? 0) === frame;
+      if (echoed || !awaitingEcho.has(id)) {
+        playFrame.delete(id);
+        awaitingEcho.delete(id);
+        section.setFrame(id, null);
+      }
+    }
     for (const glyph of state.glyphs ?? []) {
       if (glyph.kind !== "detector") continue;
       planes.setField(
         glyph.id, shading ? fields[glyph.id] ?? null : null, settings[glyph.id], logRange,
+        playFrame.get(glyph.id),
       );
     }
     explorer.setFields(fields);
     section.setFields(shading ? fields : {});
     renderColorbar(state, fields, shading);
+  }
+
+  // -- playback and video export of multi-frame detectors --------------------
+  // A detector's frames (its recorded frequencies, or a FieldDetector's time
+  // steps) play in the browser: each tick re-shades that detector's plane, its
+  // 2D raster and its slider from the buffers already here, with no kernel
+  // round trip, on the detector's one fixed colour scale. `playFrame` (declared
+  // with the planes, since the first content build already shades) overrides
+  // the stored `field_freq` while it plays or is exported.
+  const currentFields = (): Record<string, FieldPayload> =>
+    (model.get("fields") as Record<string, FieldPayload> | undefined) ?? {};
+  const storedFrame = (id: string): number =>
+    (model.get("state") as StatePayload).field_settings?.[id]?.field_freq ?? 0;
+
+  /** Shows frame `frame` of a detector everywhere it is drawn. */
+  const shadeFrame = (id: string, frame: number): void => {
+    const state = model.get("state") as StatePayload;
+    const settings = state.field_settings?.[id];
+    const field = currentFields()[id];
+    if (!settings || !field) return;
+    playFrame.set(id, frame);
+    planes.setField(id, field, settings, state.simulation?.log_range ?? 6, frame);
+    section.setFrame(id, frame);
+    explorer.showFrame(id, frame);
+  };
+
+  const tick = (now: number): void => {
+    playHandle = 0;
+    const fields = currentFields();
+    for (const [id, clock] of [...playing]) {
+      const field = fields[id];
+      if (!field) {
+        stopPlaying(id);
+        continue;
+      }
+      if (now - clock.last < 1000 / clock.fps) continue;
+      clock.last = now;
+      shadeFrame(id, ((playFrame.get(id) ?? storedFrame(id)) + 1) % frameCount(field));
+    }
+    if (playing.size > 0) playHandle = requestAnimationFrame(tick);
+  };
+
+  function startPlaying(id: string, fps: number): void {
+    if (exporting.has(id)) return;
+    const was = playing.get(id);
+    playing.set(id, { fps, last: was?.last ?? performance.now() });
+    if (!playFrame.has(id)) playFrame.set(id, storedFrame(id));
+    explorer.setPlaying(id, true);
+    if (playHandle === 0) playHandle = requestAnimationFrame(tick);
+  }
+
+  function stopPlaying(id: string): void {
+    if (!playing.delete(id)) return;
+    explorer.setPlaying(id, false);
+    // the frame playback stopped on becomes the stored one; the override stays
+    // until the kernel echoes it, so the view does not jump back meanwhile
+    const frame = playFrame.get(id);
+    if (frame === undefined) return;
+    awaitingEcho.add(id);
+    send(model, {
+      event: "update_spec", kind: "detector", spec: { id, params: { field_freq: frame } },
+    });
+  }
+
+  /**
+   * Renders every frame of a detector in the active viewport (3D or 2D) and
+   * saves it as an MP4 (spec: FieldDetector video). The browser encodes the
+   * frames (WebCodecs, faster than real time, no dropped frames); the kernel
+   * wraps the stream into the file with ffmpeg and writes it under the save
+   * folder, or hands it back for a download, per the "Save to" setting.
+   */
+  async function saveVideo(id: string, fps: number): Promise<void> {
+    if (exporting.has(id)) return;
+    if (!videoSupported()) {
+      showToast("this browser cannot encode video (no WebCodecs): use a recent Chrome, Edge, Safari or Firefox");
+      return;
+    }
+    const state = model.get("state") as StatePayload;
+    const settings = state.field_settings?.[id];
+    const field = currentFields()[id];
+    if (state.active_tab !== "result" || !field || !settings?.field_component) {
+      showToast("pick a component to shade before saving a video");
+      return;
+    }
+    stopPlaying(id);
+    exporting.add(id);
+    explorer.setSaving(id, true);
+    const is2d = state.active_viewport === "2d";
+    try {
+      const video = await encodeFrames(
+        frameCount(field),
+        fps,
+        (index) => {
+          shadeFrame(id, index);
+          return is2d ? section.captureCanvas() : scene.captureCanvas();
+        },
+        (index, count) => {
+          if (index % 10 === 0 || index === count - 1) showToast(`encoding frame ${index + 1} of ${count}`);
+        },
+      );
+      const filename = `${field.name}-${settings.field_component}-${settings.field_transform}`
+        .replace(/[^\w.-]+/g, "_");
+      showToast(video.codec === "h264" ? "writing the MP4…" : `writing the MP4 (from ${video.codec})…`);
+      model.send(
+        { event: "save_video", filename, codec: video.codec, fps, target: readSaveTarget() },
+        undefined,
+        [video.bytes.buffer as ArrayBuffer],
+      );
+    } catch (error) {
+      showToast(`video export failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      exporting.delete(id);
+      explorer.setSaving(id, false);
+      // back to the stored frame
+      playFrame.delete(id);
+      section.setFrame(id, null);
+      applyFields();
+    }
   }
 
   /**
@@ -658,13 +806,13 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
     }
     const s = settings[entry.id];
     const field = fields[entry.id];
-    const data = componentData(field, s.field_component!, s.field_freq ?? 0);
-    if (!data) {
+    if (!componentData(field, s.field_component!, 0)) {
       colorbar.hidden = true;
       return;
     }
-    const values = transformValues(data.real, data.imag, s.field_transform);
-    const range = valueRange(values, s.field_transform, logRange);
+    // the detector's one scale for every frame, so the bar holds still while
+    // its frames play (spec R15)
+    const range = shadeRange(field, s, logRange);
     const low = parseColor(s.field_color_low);
     const high = parseColor(s.field_color_high);
     const steps = 64;
@@ -838,8 +986,35 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
     }
   };
 
+  // a new result's frames are new: playback stops (silently — the old frame
+  // indices mean nothing now) and every override is dropped
+  const applyNewFields = (): void => {
+    for (const id of playing.keys()) explorer.setPlaying(id, false);
+    for (const id of playFrame.keys()) section.setFrame(id, null);
+    playing.clear();
+    playFrame.clear();
+    awaitingEcho.clear();
+    applyFields();
+  };
+
+  // a video the kernel wrapped for a browser download (Save to: browser)
+  model.on("msg:custom", (content, buffers) => {
+    if (content?.event !== "video_ready" || !buffers?.length) return;
+    const filename = String(content.filename ?? "detector.mp4");
+    const view = buffers[0];
+    const bytes = new Uint8Array(view.byteLength);
+    bytes.set(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
+    const url = URL.createObjectURL(new Blob([bytes], { type: "video/mp4" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 10000);
+    showToast(`downloaded ${filename}`);
+  });
+
   model.on("change:state", applyState);
-  model.on("change:fields", applyFields);
+  model.on("change:fields", applyNewFields);
   model.on("change:progress", applyProgress);
   model.on("change:phase", applyPhase);
   model.on("change:stopping", applyRunControls);
@@ -857,6 +1032,7 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
 
   return () => {
     if (positionFrame !== 0) cancelAnimationFrame(positionFrame);
+    if (playHandle !== 0) cancelAnimationFrame(playHandle);
     if (toastTimer !== 0) window.clearTimeout(toastTimer);
     section.dispose();
     scene.dispose();
