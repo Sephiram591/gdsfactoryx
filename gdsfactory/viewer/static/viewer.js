@@ -29638,6 +29638,8 @@ var FIELD_HINTS = {
   dft_subsample: "temporal downsampling: feed the phasor's DFT every n-th time step, rescaled to match every-step recording; auto picks n from the highest recorded frequency. Saves time, not memory"
 };
 var VISIBLE_HINT = "show or hide this in the viewports (display only; the simulation is unchanged)";
+var VIDEO_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>';
+var SAVE_VIDEO_HINT = `save video: render every frame of the active viewport (3D or 2D) as an MP4; the settings screen's "Save to" picks download or server`;
 function specFieldHint(key, kind) {
   if (key === "direction") {
     return kind === "source" ? "which way it launches: in = into the component through the port, out = out of it" : "which wave it measures: out = leaving the component through the port, in = entering it";
@@ -29784,7 +29786,8 @@ var Explorer = class {
     if (!row2) return;
     row2.save.disabled = saving;
     row2.play.disabled = saving;
-    row2.save.textContent = saving ? "saving\u2026" : "save video";
+    row2.save.classList.toggle("gfx-active", saving);
+    row2.save.title = saving ? "saving the video\u2026" : SAVE_VIDEO_HINT;
   }
   render(state) {
     for (const level of this.meta.levels) {
@@ -30289,7 +30292,7 @@ var Explorer = class {
         if (frames > 1) freq.element.setAttribute("max", String(frames - 1));
       }
       const playback = this.resultPlayback.get(id);
-      if (playback) playback.root.hidden = frames <= 1;
+      for (const row2 of playback?.rows ?? []) row2.hidden = frames <= 1;
       for (const [key, control] of controls) {
         if (key === "section" || key === "field_range") continue;
         control.write(s[key]);
@@ -30504,7 +30507,7 @@ var Explorer = class {
     );
     freqRow.appendChild(freqLabel);
     fields.appendChild(freqRow);
-    fields.appendChild(this.buildPlaybackRow(id));
+    fields.append(...this.buildPlaybackRows(id));
     section.append(header, fields);
     controls.set("section", { element: section, write() {
     }, setDisabled() {
@@ -30577,11 +30580,12 @@ var Explorer = class {
     return row2;
   }
   /**
-   * The playback row of a multi-frame detector: play/pause, the frame rate,
-   * and "save video", which renders every frame of the active viewport and
-   * saves it as an MP4 (the "Save to" setting picks download or server).
+   * The playback rows of a multi-frame detector: play/pause and "save video"
+   * — which renders every frame of the active viewport and saves it as an MP4
+   * (the "Save to" setting picks download or server) — then the frame rate,
+   * on a row of its own.
    */
-  buildPlaybackRow(id) {
+  buildPlaybackRows(id) {
     const root = document.createElement("div");
     root.className = "gfx-field";
     const name = document.createElement("span");
@@ -30602,19 +30606,21 @@ var Explorer = class {
     const rate = () => Math.min(120, Math.max(1, Math.round(Number(fps.value) || 20)));
     const save = document.createElement("button");
     save.type = "button";
-    save.className = "gfx-button";
-    save.textContent = "save video";
-    save.title = `render every frame of the active viewport (3D or 2D) and save an MP4; the settings screen's "Save to" picks download or server`;
-    const row2 = { root, play, fps, save, playing: false };
+    save.className = "gfx-button gfx-icon";
+    save.innerHTML = VIDEO_ICON;
+    save.title = SAVE_VIDEO_HINT;
+    save.setAttribute("aria-label", "save video");
+    root.append(name, play, save);
+    const fpsRow = fieldRow("fps", fps, "frames per second, for playback and the saved video");
+    const row2 = { rows: [root, fpsRow], play, fps, save, playing: false };
     play.addEventListener("click", () => this.callbacks.onPlay(id, !row2.playing, rate()));
     fps.addEventListener("change", () => {
       if (row2.playing) this.callbacks.onPlay(id, true, rate());
     });
     save.addEventListener("click", () => this.callbacks.onSaveVideo(id, rate()));
-    root.append(name, play, fps, save);
     this.resultPlayback.set(id, row2);
     this.setPlaying(id, false);
-    return root;
+    return row2.rows;
   }
   // ------------------------------------------------------------------- controls
   selectControl(options, initial, onChange, optionHint) {
