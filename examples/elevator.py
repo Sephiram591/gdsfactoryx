@@ -1,7 +1,7 @@
 import marimo
 
 __generated_with = "0.23.5"
-app = marimo.App(width="medium")
+app = marimo.App(width="full")
 
 
 @app.cell
@@ -28,8 +28,8 @@ def _():
     UPPER, LOWER = (34, 0), (35, 0)
     LENGTH = 10.0  # each taper
     W_MAX, W_MIN = 0.65, 0.05  # wide end / tip
-    OVERLAP = 3.0  # where the two tapers lie on top of each other
-    LEAD = 0.5  # straight sections that carry the ports
+    OVERLAP = 15.0  # where the two tapers lie on top of each other
+    LEAD = 10  # straight sections that carry the ports
     return LEAD, LENGTH, LOWER, N_OXIDE, N_SIN, OVERLAP, UPPER, W_MAX, W_MIN
 
 
@@ -104,6 +104,11 @@ def _(
 def _(stack, view):
     viewer = view(stack)
     viewer
+    return
+
+
+@app.cell
+def _():
     return
 
 
