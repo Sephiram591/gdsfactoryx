@@ -29709,7 +29709,9 @@ var Explorer = class {
       this.resultNote,
       this.resultLayersRoot,
       this.section("Sources", [this.resultSourceList]),
-      this.resultSections
+      // one card per detector with a field, under its own header like the
+      // Layers and Sources sections above
+      this.section("Detectors", [this.resultSections])
     ]);
     this.panels = [
       this.layoutPanel,
