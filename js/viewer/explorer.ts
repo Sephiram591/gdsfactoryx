@@ -57,15 +57,20 @@ export interface ExplorerCallbacks {
   onPlayAll(playing: boolean, fps: number): void;
   /** records every time-domain detector together as one video */
   onRecordAll(fps: number): void;
+  /** sets the global downsampling of the solve's time grid (play / record all) */
+  onGroupDownsample(stride: number): void;
 }
 
 //: What the Result tab's play/record-all controls describe: the shared
-//: timeline's length and kind (see `timeline.ts`), or null with no
-//: time-domain detector.
+//: timeline's length and kind (see `timeline.ts`), its global stride over the
+//: solve's time grid, and the largest stride that skips no recorded frame — or
+//: null with no time-domain detector.
 export interface GroupInfo {
   frames: number;
   detectors: number;
   kind: "shared" | "solve" | "index";
+  stride: number;
+  lossless: number;
 }
 
 //: The playback rows of a multi-frame detector's Result card: play / save
@@ -264,6 +269,9 @@ export class Explorer {
   private readonly groupRow: HTMLElement;
   private readonly groupFps: HTMLInputElement;
   private readonly groupReadout: HTMLElement;
+  /** the global downsampling of the solve's time grid, when the grids differ */
+  private readonly groupStrideRow: HTMLElement;
+  private readonly groupStride: HTMLInputElement;
   private groupPlaying = false;
   private locked = false;
 
@@ -332,6 +340,21 @@ export class Explorer {
       if (this.groupPlaying) this.callbacks.onPlayAll(true, groupRate());
     });
     this.groupRecord.addEventListener("click", () => this.callbacks.onRecordAll(groupRate()));
+    // the global downsampling (only when the detectors' recorded steps differ):
+    // the shared timeline is every n-th step of the solve, each detector shown
+    // at its last recorded frame at or before each one
+    this.groupStride = document.createElement("input");
+    this.groupStride.type = "number";
+    this.groupStride.className = "gfx-numeric";
+    this.groupStride.min = "1";
+    this.groupStride.step = "1";
+    this.groupStride.value = "1";
+    this.groupStrideRow = fieldRow("downsample", this.groupStride);
+    this.groupStride.addEventListener("change", () => {
+      const stride = Math.max(1, Math.round(Number(this.groupStride.value) || 1));
+      this.groupStride.value = String(stride);
+      this.callbacks.onGroupDownsample(stride);
+    });
     this.setGroupPlaying(false);
     this.setGroup(null);
 
@@ -341,7 +364,9 @@ export class Explorer {
       this.section("Sources", [this.resultSourceList]),
       // one card per detector with a field, under its own header like the
       // Layers and Sources sections above
-      this.section("Detectors", [this.groupRow, this.resultSections], this.groupActions),
+      this.section(
+        "Detectors", [this.groupRow, this.groupStrideRow, this.resultSections], this.groupActions,
+      ),
     ]);
     this.panels = [
       this.layoutPanel,
@@ -428,11 +453,23 @@ export class Explorer {
     const available = info !== null;
     this.groupActions.hidden = !available;
     this.groupRow.hidden = !available;
+    // the global downsampling only applies when the recorded steps differ
+    this.groupStrideRow.hidden = info?.kind !== "solve";
     if (!info) return;
+    if (document.activeElement !== this.groupStride) this.groupStride.value = String(info.stride);
+    const lossless = info.lossless > 1
+      ? `; ${info.lossless} (or a divisor of it) still lands on every recorded frame of every detector`
+      : "";
+    const strideHint = "global downsampling of the solve's time grid: play / record every n-th "
+      + "solver step, each detector showing its last recorded frame at or before it (1 = every "
+      + `step${lossless})`;
+    this.groupStrideRow.title = strideHint;
+    this.groupStride.title = strideHint;
     const what = info.detectors === 1 ? "the time-domain detector" : `all ${info.detectors} time-domain detectors`;
     const timeline = info.kind === "solve"
-      ? `their time grids differ, so every step of the solve (${info.frames} frames); each `
-        + "shows its last recorded frame, and is transparent until it first records"
+      ? `their time grids differ, so every ${info.stride === 1 ? "" : `${info.stride}th `}step of `
+        + `the solve (${info.frames} frames); each shows its last recorded frame at or before it, `
+        + "and is transparent until it first records"
       : `${info.frames} frames`;
     this.groupPlay.dataset.hint = `play ${what} together: ${timeline}`;
     this.groupRecord.title = `record ${what} together as one MP4 of the active viewport: ${timeline}; `

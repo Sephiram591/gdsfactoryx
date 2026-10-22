@@ -29737,6 +29737,18 @@ var Explorer = class {
       if (this.groupPlaying) this.callbacks.onPlayAll(true, groupRate());
     });
     this.groupRecord.addEventListener("click", () => this.callbacks.onRecordAll(groupRate()));
+    this.groupStride = document.createElement("input");
+    this.groupStride.type = "number";
+    this.groupStride.className = "gfx-numeric";
+    this.groupStride.min = "1";
+    this.groupStride.step = "1";
+    this.groupStride.value = "1";
+    this.groupStrideRow = fieldRow("downsample", this.groupStride);
+    this.groupStride.addEventListener("change", () => {
+      const stride = Math.max(1, Math.round(Number(this.groupStride.value) || 1));
+      this.groupStride.value = String(stride);
+      this.callbacks.onGroupDownsample(stride);
+    });
     this.setGroupPlaying(false);
     this.setGroup(null);
     this.layoutPanel = this.panel([]);
@@ -29746,7 +29758,11 @@ var Explorer = class {
       this.section("Sources", [this.resultSourceList]),
       // one card per detector with a field, under its own header like the
       // Layers and Sources sections above
-      this.section("Detectors", [this.groupRow, this.resultSections], this.groupActions)
+      this.section(
+        "Detectors",
+        [this.groupRow, this.groupStrideRow, this.resultSections],
+        this.groupActions
+      )
     ]);
     this.panels = [
       this.layoutPanel,
@@ -29825,9 +29841,15 @@ var Explorer = class {
     const available = info !== null;
     this.groupActions.hidden = !available;
     this.groupRow.hidden = !available;
+    this.groupStrideRow.hidden = info?.kind !== "solve";
     if (!info) return;
+    if (document.activeElement !== this.groupStride) this.groupStride.value = String(info.stride);
+    const lossless = info.lossless > 1 ? `; ${info.lossless} (or a divisor of it) still lands on every recorded frame of every detector` : "";
+    const strideHint = `global downsampling of the solve's time grid: play / record every n-th solver step, each detector showing its last recorded frame at or before it (1 = every step${lossless})`;
+    this.groupStrideRow.title = strideHint;
+    this.groupStride.title = strideHint;
     const what = info.detectors === 1 ? "the time-domain detector" : `all ${info.detectors} time-domain detectors`;
-    const timeline = info.kind === "solve" ? `their time grids differ, so every step of the solve (${info.frames} frames); each shows its last recorded frame, and is transparent until it first records` : `${info.frames} frames`;
+    const timeline = info.kind === "solve" ? `their time grids differ, so every ${info.stride === 1 ? "" : `${info.stride}th `}step of the solve (${info.frames} frames); each shows its last recorded frame at or before it, and is transparent until it first records` : `${info.frames} frames`;
     this.groupPlay.dataset.hint = `play ${what} together: ${timeline}`;
     this.groupRecord.title = `record ${what} together as one MP4 of the active viewport: ${timeline}; the settings screen's "Save to" picks download or server`;
     this.setGroupPlaying(this.groupPlaying);
@@ -35931,8 +35953,8 @@ var Section2D = class {
 };
 
 // viewer/timeline.ts
-function buildTimeline(fields) {
-  const entries = Object.entries(fields).filter(([, field]) => field.frame_kind === "time");
+function buildTimeline(fields, stride = 1) {
+  const entries = timeEntries(fields);
   if (entries.length === 0) return null;
   const ids = entries.map(([id]) => id);
   const frames = /* @__PURE__ */ new Map();
@@ -35941,14 +35963,22 @@ function buildTimeline(fields) {
   if (first && grids.every((grid) => grid !== null && sameNumbers(grid, first))) {
     for (const id of ids) frames.set(id, Int32Array.from(first, (_, i) => i));
     const times = entries[0][1].times ?? first.map((_, i) => i);
-    return { ids, times: times.slice(0, first.length), frames, kind: "shared" };
+    return { ids, times: times.slice(0, first.length), frames, kind: "shared", stride: 1 };
   }
   const timed = entries.every(([, field]) => field.steps && field.time_step !== void 0 && field.steps_total !== void 0);
   if (timed) {
     const total = Math.max(...entries.map(([, field]) => field.steps_total ?? 0));
+    const n = Math.min(Math.max(1, Math.round(stride) || 1), Math.max(1, total));
     const step = entries[0][1].time_step ?? 0;
-    for (const [id, field] of entries) frames.set(id, holdFrames(field.steps ?? [], total));
-    return { ids, times: Array.from({ length: total }, (_, k) => k * step), frames, kind: "solve" };
+    for (const [id, field] of entries) frames.set(id, holdFrames(field.steps ?? [], total, n));
+    const count = Math.ceil(total / n);
+    return {
+      ids,
+      times: Array.from({ length: count }, (_, i) => i * n * step),
+      frames,
+      kind: "solve",
+      stride: n
+    };
   }
   const counts = entries.map(([, field]) => (field.times ?? []).length);
   const length = Math.max(1, ...counts);
@@ -35956,16 +35986,34 @@ function buildTimeline(fields) {
     const last = Math.max(0, counts[d] - 1);
     frames.set(id, Int32Array.from({ length }, (_, i) => Math.min(i, last)));
   });
-  return { ids, times: Array.from({ length }, (_, i) => i), frames, kind: "index" };
+  return { ids, times: Array.from({ length }, (_, i) => i), frames, kind: "index", stride: 1 };
 }
-function holdFrames(steps, total) {
-  const out = new Int32Array(total).fill(-1);
+function holdFrames(steps, total, stride = 1) {
+  const count = Math.ceil(total / stride);
+  const out = new Int32Array(count).fill(-1);
   let next = 0;
-  for (let k = 0; k < total; k += 1) {
+  for (let i = 0; i < count; i += 1) {
+    const k = i * stride;
     while (next < steps.length && steps[next] <= k) next += 1;
-    out[k] = next - 1;
+    out[i] = next - 1;
   }
   return out;
+}
+function losslessStride(fields) {
+  let divisor = 0;
+  for (const [, field] of timeEntries(fields)) {
+    for (const step of field.steps ?? []) divisor = gcd(divisor, step);
+  }
+  return Math.max(1, divisor);
+}
+function timeEntries(fields) {
+  return Object.entries(fields).filter(([, field]) => field.frame_kind === "time");
+}
+function gcd(a, b) {
+  let x = Math.abs(Math.round(a));
+  let y = Math.abs(Math.round(b));
+  while (y !== 0) [x, y] = [y, x % y];
+  return x;
 }
 function sameNumbers(a, b) {
   return a.length === b.length && a.every((value, i) => value === b[i]);
@@ -36203,7 +36251,8 @@ function render({ model, el }) {
     onPlayAll: (play, fps) => play ? startGroup(fps) : stopGroup(),
     onRecordAll: (fps) => {
       void recordAll(fps);
-    }
+    },
+    onGroupDownsample: (stride) => setGroupStride(stride)
   });
   const viewport = document.createElement("div");
   viewport.className = "gfx-viewport";
@@ -36361,6 +36410,7 @@ function render({ model, el }) {
   let playHandle = 0;
   let videosAwaited = 0;
   let group = null;
+  let groupStride = 1;
   let timelineCache = null;
   const disposeContent = () => {
     for (const meshes of levels.values()) {
@@ -36544,7 +36594,13 @@ function render({ model, el }) {
     }
     explorer.setFields(fields);
     const timeline = currentTimeline();
-    explorer.setGroup(timeline ? { frames: timeline.times.length, detectors: timeline.ids.length, kind: timeline.kind } : null);
+    explorer.setGroup(timeline ? {
+      frames: timeline.times.length,
+      detectors: timeline.ids.length,
+      kind: timeline.kind,
+      stride: timeline.stride,
+      lossless: losslessStride(fields)
+    } : null);
     section.setFields(shading ? fields : {});
     renderColorbar(state, fields, shading);
   }
@@ -36664,10 +36720,22 @@ function render({ model, el }) {
   }
   function currentTimeline() {
     const fields = currentFields();
-    if (timelineCache?.fields !== fields) {
-      timelineCache = { fields, timeline: buildTimeline(fields) };
+    if (timelineCache?.fields !== fields || timelineCache.stride !== groupStride) {
+      timelineCache = { fields, stride: groupStride, timeline: buildTimeline(fields, groupStride) };
     }
     return timelineCache.timeline;
+  }
+  function setGroupStride(stride) {
+    if (stride === groupStride) return;
+    const step = group ? group.index * group.timeline.stride : 0;
+    groupStride = stride;
+    const timeline = currentTimeline();
+    if (group && timeline && timeline.times.length > 0) {
+      group.timeline = timeline;
+      group.index = Math.min(timeline.times.length - 1, Math.floor(step / timeline.stride));
+      showGroupFrame(timeline, group.index);
+    }
+    applyFields();
   }
   const framesAt = (timeline, index) => new Map(timeline.ids.map((id) => [id, timeline.frames.get(id)?.[index] ?? -1]));
   function showGroupFrame(timeline, index) {

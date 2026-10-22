@@ -13,7 +13,7 @@ import { PlaneGlyphs, PortGlyphs } from "./glyphs";
 import { LevelMeshes } from "./mesh";
 import { Scene3D, CONTROL_KINDS, type ControlKind } from "./scene";
 import { Section2D } from "./section";
-import { buildTimeline, type Timeline } from "./timeline";
+import { buildTimeline, losslessStride, type Timeline } from "./timeline";
 import { encodeFrames, videoSupported, type EncodedVideo } from "./video";
 import type {
   FieldPayload,
@@ -233,6 +233,7 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
     onRecordAll: (fps) => {
       void recordAll(fps);
     },
+    onGroupDownsample: (stride) => setGroupStride(stride),
   });
 
   // -- viewport -------------------------------------------------------------
@@ -439,8 +440,13 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   let videosAwaited = 0;
   //: play all: every time-domain detector stepping one shared timeline
   let group: { timeline: Timeline; fps: number; last: number; index: number } | null = null;
-  //: the shared timeline of the current fields payload, built once per payload
-  let timelineCache: { fields: Record<string, FieldPayload>; timeline: Timeline | null } | null = null;
+  //: the global downsampling of the solve's time grid (when the detectors'
+  //: recorded steps differ): play / record all step every n-th solver step
+  let groupStride = 1;
+  //: the shared timeline of the current fields payload and stride, built once each
+  let timelineCache: {
+    fields: Record<string, FieldPayload>; stride: number; timeline: Timeline | null;
+  } | null = null;
 
   const disposeContent = (): void => {
     for (const meshes of levels.values()) {
@@ -674,7 +680,10 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
     explorer.setFields(fields);
     const timeline = currentTimeline();
     explorer.setGroup(timeline
-      ? { frames: timeline.times.length, detectors: timeline.ids.length, kind: timeline.kind }
+      ? {
+        frames: timeline.times.length, detectors: timeline.ids.length, kind: timeline.kind,
+        stride: timeline.stride, lossless: losslessStride(fields),
+      }
       : null);
     section.setFields(shading ? fields : {});
     renderColorbar(state, fields, shading);
@@ -832,16 +841,33 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   // -- play / record all: every time-domain detector on one timeline ---------
   // The Detectors header's play and record buttons step every time-domain
   // detector together (timeline.ts): their own frames when they share a time
-  // grid, else every step of the solve with each holding its last recorded
-  // frame (fully transparent before its first).
+  // grid, else every n-th step of the solve (the global downsampling) with
+  // each holding its last recorded frame (fully transparent before its first).
 
-  /** The shared timeline of the current payload (built once per payload). */
+  /** The shared timeline of the current payload and stride (built once each). */
   function currentTimeline(): Timeline | null {
     const fields = currentFields();
-    if (timelineCache?.fields !== fields) {
-      timelineCache = { fields, timeline: buildTimeline(fields) };
+    if (timelineCache?.fields !== fields || timelineCache.stride !== groupStride) {
+      timelineCache = { fields, stride: groupStride, timeline: buildTimeline(fields, groupStride) };
     }
     return timelineCache.timeline;
+  }
+
+  /**
+   * Sets the global downsampling. While playing, the timeline is swapped in
+   * place and resumes from the same point of the solve on the new grid.
+   */
+  function setGroupStride(stride: number): void {
+    if (stride === groupStride) return;
+    const step = group ? group.index * group.timeline.stride : 0;
+    groupStride = stride;
+    const timeline = currentTimeline();
+    if (group && timeline && timeline.times.length > 0) {
+      group.timeline = timeline;
+      group.index = Math.min(timeline.times.length - 1, Math.floor(step / timeline.stride));
+      showGroupFrame(timeline, group.index);
+    }
+    applyFields(); // the controls' frame count and tooltips follow the new grid
   }
 
   /** Each detector's frame at timeline entry `index`. */

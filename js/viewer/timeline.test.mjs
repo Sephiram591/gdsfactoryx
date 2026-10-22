@@ -66,4 +66,42 @@ test("an untimed recording falls back to frame indices, holding the last frame",
 test("holdFrames: the last frame at or before each step", () => {
   assert.deepEqual([...timeline.holdFrames([1, 3], 5)], [-1, 0, 0, 1, 1]);
   assert.deepEqual([...timeline.holdFrames([], 3)], [-1, -1, -1]);
+  // every 2nd solver step: 0, 2, 4
+  assert.deepEqual([...timeline.holdFrames([1, 3], 5, 2)], [-1, 0, 1]);
+});
+
+test("a global downsampling steps every n-th solver step, each at its last frame", () => {
+  // a records steps 0, 4, 8; b 2, 5, 8; every 3rd of 10 solver steps: 0, 3, 6, 9
+  const line = timeline.buildTimeline({ a: recording([0, 4, 8]), b: recording([2, 5, 8]) }, 3);
+  assert.equal(line.kind, "solve");
+  assert.equal(line.stride, 3);
+  assert.deepEqual(line.times, [0, 3 * DT, 6 * DT, 9 * DT]);
+  assert.deepEqual([...line.frames.get("a")], [0, 0, 1, 2]);
+  // b is transparent at step 0, then its closest frame at or before each step
+  assert.deepEqual([...line.frames.get("b")], [-1, 0, 1, 2]);
+});
+
+test("the global downsampling only applies when the recorded steps differ", () => {
+  const line = timeline.buildTimeline({ a: recording([0, 4, 8]), b: recording([0, 4, 8]) }, 3);
+  assert.equal(line.kind, "shared");
+  assert.equal(line.stride, 1);
+  assert.equal(line.times.length, 3);
+});
+
+test("the global downsampling is clamped to 1..steps", () => {
+  const fields = { a: recording([0, 4, 8]), b: recording([2, 5, 8]) };
+  assert.equal(timeline.buildTimeline(fields, 0).stride, 1);
+  const coarse = timeline.buildTimeline(fields, 50);
+  assert.equal(coarse.stride, 10);
+  assert.deepEqual([...coarse.frames.get("a")], [0]);
+});
+
+test("losslessStride: the largest stride that lands on every recorded step", () => {
+  const every20 = recording([0, 20, 40, 60], 100);
+  const every50 = recording([0, 50], 100);
+  assert.equal(timeline.losslessStride({ a: every20, b: every50 }), 10);
+  // an offset start counts too
+  assert.equal(timeline.losslessStride({ a: every20, b: recording([5, 55], 100) }), 5);
+  assert.equal(timeline.losslessStride({}), 1);
+  assert.equal(timeline.losslessStride({ a: recording([0], 10) }), 1);
 });
