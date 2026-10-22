@@ -61,7 +61,7 @@ from gdsfactory.viewer.fields import validate_result
 from gdsfactory.viewer.payload import build_field_payload, build_payload, build_section_payload
 from gdsfactory.viewer.sim import RunResult, RunStopped, build_objects, launch_code as _launch_code_text
 from gdsfactory.viewer.sim import run as _run_sim
-from gdsfactory.viewer.state import ViewerState
+from gdsfactory.viewer.state import ViewerState, export_styles
 __all__ = ["Viewer", "view"]
 
 _STATIC = Path(__file__).parent / "static"
@@ -188,12 +188,16 @@ class Viewer(anywidget.AnyWidget):
 
         The result gets its own :class:`ViewerState` — built from ``stack``,
         holding the adopted specs and the Result tab's own styles — so the
-        editor's setup and level styles are untouched. Called by ``run``'s
-        worker (the widget's own stack) and by ``load_result`` (a foreign one).
+        editor's setup and level styles are untouched. The Result tab's level
+        styles start from the editor's, with every non-fill level at half the
+        editor's opacity so the fields show through (:func:`export_styles`).
+        Called by ``run``'s worker (the widget's own stack) and by
+        ``load_result`` (a foreign one).
         """
         from gdsfactory.viewer.adopt import adopt_result
 
         new_state = ViewerState(stack, settings=settings)
+        export_styles(self._viewer_state, new_state)
         adopt_result(new_state, result.objects, result.config)
         self._result_state = new_state
         geometry, meta = build_payload(new_state)

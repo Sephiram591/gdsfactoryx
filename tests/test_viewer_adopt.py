@@ -28,7 +28,7 @@ pytest.importorskip("manifold3d")
 
 from test_viewer_geometry import f1_stack  # noqa: E402
 
-from gdsfactory.viewer import adopt, fields, sim, widget  # noqa: E402
+from gdsfactory.viewer import adopt, fields, sim, state, widget  # noqa: E402
 from gdsfactory.viewer.payload import build_field_payload  # noqa: E402
 
 COARSE = {"resolution_um": 0.1, "pml_thickness": 4}
@@ -437,6 +437,38 @@ def test_field_freq_round_trips_through_the_patch_path() -> None:
         [],
     )
     assert viewer.state["field_settings"][spec.id]["field_freq"] == 0
+
+
+def test_export_styles_halves_the_non_fill_levels() -> None:
+    """R17: a result's levels take the editor's styles, non-fill ones at half opacity."""
+    editor = state.ViewerState(f1_stack())
+    result = state.ViewerState(f1_stack())
+    first = editor.levels[0].name
+    editor.apply_patch({"styles": {first: {"color": "#123456", "opacity": 0.8, "visible": False}}})
+    state.export_styles(editor, result)
+    for level in result.levels:
+        source, style = editor.styles[level.name], result.styles[level.name]
+        assert (style.color, style.visible) == (source.color, source.visible)
+        expected = source.opacity if level.fill else source.opacity * state.RESULT_LEVEL_OPACITY_SCALE
+        assert style.opacity == pytest.approx(expected)
+    if not editor.levels[0].fill:
+        assert result.styles[first].opacity == pytest.approx(0.4)
+    assert not result.styles[first].visible
+
+
+def test_a_run_starts_the_result_tab_from_the_editors_layers() -> None:
+    """R17: each run exports the editor's level styles; the editor keeps its own."""
+    viewer = _detector_viewer()
+    editor = viewer._viewer_state
+    name = next(level.name for level in editor.levels if not level.fill)
+    viewer._on_msg(None, {"event": "set_state",
+                          "patch": {"styles": {name: {"color": "#123456", "opacity": 0.8}}}}, [])
+    before = dict(editor.styles)
+    _run(viewer)
+    result = viewer._result_state
+    assert result.styles[name].color == "#123456"
+    assert result.styles[name].opacity == pytest.approx(0.4)
+    assert editor.styles == before, "the editor's own styles are untouched"
 
 
 def test_field_outline_defaults_off_and_round_trips() -> None:

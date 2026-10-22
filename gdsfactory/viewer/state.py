@@ -44,11 +44,16 @@ from gdsfactory.viewer.solids import (
     plane_ports,
 )
 
-__all__ = ["LayerStyle", "ViewerState", "rebox_stack", "spec_glyphs"]
+__all__ = ["LayerStyle", "ViewerState", "export_styles", "rebox_stack", "spec_glyphs"]
 
 #: Default opacity of a fill level and of every other level (spec R2, Q5).
 FILL_OPACITY = 0.15
 LEVEL_OPACITY = 0.9
+
+#: A result's layers start from the editor's (spec R17), every non-fill level
+#: at this fraction of the editor's opacity so the shaded fields show through
+#: the device; fill levels keep the editor's (already faint) opacity.
+RESULT_LEVEL_OPACITY_SCALE = 0.5
 
 #: Default plane fade as a fraction of the box size along the section's normal
 #: (spec R4). The 1/e distance is this fraction times that size.
@@ -559,6 +564,26 @@ class ViewerState:
             "simulation": self.settings.to_wire(),
             "running": self.running,
         }
+
+
+def export_styles(editor: ViewerState, result: ViewerState) -> None:
+    """Starts a result world's level styles from the editor's (spec R17).
+
+    Each level the result shares with the editor (by name) takes the editor's
+    color and visibility; a non-fill level's opacity is scaled by
+    :data:`RESULT_LEVEL_OPACITY_SCALE`, so the Result tab's fields show through
+    the device, while a fill level keeps the editor's. A level the editor does
+    not have keeps its default style. The Result tab edits these freely; the
+    editor's own styles are untouched.
+    """
+    for level in result.levels:
+        style = editor.styles.get(level.name)
+        if style is None:
+            continue
+        scale = 1.0 if level.fill else RESULT_LEVEL_OPACITY_SCALE
+        result.styles[level.name] = LayerStyle(
+            color=style.color, opacity=style.opacity * scale, visible=style.visible,
+        )
 
 
 def rebox_stack(device: Any, boundary_offset: Any) -> Any:
