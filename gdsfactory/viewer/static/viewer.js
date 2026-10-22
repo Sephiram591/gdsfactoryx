@@ -30531,7 +30531,7 @@ var Explorer = class {
         headerVisible.disabled = value;
       }
     });
-    const outline = checkbox(true, (value) => this.setParam(id, "field_outline", value));
+    const outline = checkbox(false, (value) => this.setParam(id, "field_outline", value));
     controls.set("field_outline", {
       element: outline,
       write(value) {
@@ -31311,7 +31311,7 @@ var PlaneGlyphs = class {
     item.fieldMaterial.map = item.texture;
     item.fieldMaterial.opacity = 1;
     item.fieldMaterial.needsUpdate = true;
-    if (item.outline) item.outline.visible = settings.field_outline !== false;
+    if (item.outline) item.outline.visible = settings.field_outline === true;
     item.material.visible = false;
   }
   clearField(item) {

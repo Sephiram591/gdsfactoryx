@@ -272,7 +272,7 @@ export class PlaneGlyphs {
     item.fieldMaterial.map = item.texture;
     item.fieldMaterial.opacity = 1;
     item.fieldMaterial.needsUpdate = true;
-    if (item.outline) item.outline.visible = settings.field_outline !== false;
+    if (item.outline) item.outline.visible = settings.field_outline === true;
     // the plain translucent fill is replaced by the field (spec R15)
     item.material.visible = false;
   }

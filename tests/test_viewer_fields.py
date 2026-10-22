@@ -29,7 +29,7 @@ pytest.importorskip("manifold3d")
 
 from test_viewer_geometry import f1_stack  # noqa: E402
 
-from gdsfactory.viewer import fields, state, widget  # noqa: E402
+from gdsfactory.viewer import fields, sim, state, widget  # noqa: E402
 from gdsfactory.viewer.payload import build_field_payload  # noqa: E402
 
 
@@ -178,7 +178,22 @@ def test_field_settings_default_and_travel_in_the_state() -> None:
     assert settings["field_transform"] == "abs"
     assert settings["field_visible"] is True
     assert settings["field_opacity"] == 1.0
-    assert settings["field_component"] is None
+    # shaded by the total E magnitude until a component is picked, no outline
+    assert settings["field_component"] == "|E|"
+    assert settings["field_outline"] is False
+
+
+def test_the_default_component_follows_what_the_detector_records() -> None:
+    """R15: |E| when an E component is recorded, else the first one; "(none)" sticks."""
+    def default(**params: Any) -> Any:
+        return sim.ObjectSpec(type="FieldDetector", port="xz", params=params).field_params()[
+            "field_component"]
+
+    assert default() == "|E|"  # fdtdx records all six by default
+    assert default(components=["Ex", "Hy"]) == "|E|"
+    assert default(components=["Hy", "Hz"]) == "Hy"
+    assert default(components="Hz") == "Hz"  # a single component typed in the box
+    assert default(components=["Hy"], field_component=None) is None  # "(none)" picked
 
 
 def test_a_display_edit_reaches_the_state() -> None:

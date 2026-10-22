@@ -193,7 +193,7 @@ export interface FieldSettings {
   field_visible: boolean;
   //: the selected frequency frame of a multi-frequency detector (spec R17)
   field_freq?: number;
-  //: whether shading draws the plane's outline (spec R17); default true
+  //: whether shading draws the plane's outline (spec R17); default false
   field_outline?: boolean;
   //: the colour scale's fixed `[min, max]` in the transform's units; null (the
   //: default) spans the whole recording — every frame — so playback and a

@@ -439,19 +439,11 @@ def test_field_freq_round_trips_through_the_patch_path() -> None:
     assert viewer.state["field_settings"][spec.id]["field_freq"] == 0
 
 
-def test_field_outline_defaults_true_and_round_trips() -> None:
-    """R17: field_outline defaults on and patches like the other display params."""
+def test_field_outline_defaults_off_and_round_trips() -> None:
+    """R17: field_outline defaults off and patches like the other display params."""
     viewer = _detector_viewer()
     spec = next(s for s in viewer.specs if s.category == "detector")
-    assert spec.field_params()["field_outline"] is True
-    viewer._on_msg(
-        None,
-        {"event": "update_spec", "kind": "detector",
-         "spec": {"id": spec.id, "params": {"field_outline": False}}},
-        [],
-    )
-    assert viewer.state["field_settings"][spec.id]["field_outline"] is False
-    # and back on
+    assert spec.field_params()["field_outline"] is False
     viewer._on_msg(
         None,
         {"event": "update_spec", "kind": "detector",
@@ -459,6 +451,14 @@ def test_field_outline_defaults_true_and_round_trips() -> None:
         [],
     )
     assert viewer.state["field_settings"][spec.id]["field_outline"] is True
+    # and back off
+    viewer._on_msg(
+        None,
+        {"event": "update_spec", "kind": "detector",
+         "spec": {"id": spec.id, "params": {"field_outline": False}}},
+        [],
+    )
+    assert viewer.state["field_settings"][spec.id]["field_outline"] is False
 
 
 def test_result_tab_routes_source_visibility_to_the_result_world() -> None:

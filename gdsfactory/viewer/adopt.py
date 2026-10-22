@@ -207,6 +207,11 @@ def _adopt_object(
     name = str(obj.name)
     type_name = _spec_type_for(obj, category)
     params: dict[str, Any] = {"name": name, "visible": True}
+    # the recorded components, so the default shading component (|E|, or the
+    # first one when no E was recorded) matches what the result holds
+    components = getattr(obj, "components", None)
+    if components and "components" in TYPES[type_name].extra:
+        params["components"] = [str(c) for c in components]
     spec = ObjectSpec(type=type_name, port="None", params=params)
     if anchored:
         try:

@@ -156,6 +156,25 @@ FIELD_TRANSFORMS = ("real", "imag", "abs", "phase", "logabs")
 FIELD_COLOR_LOW = "#3b6fd6"
 FIELD_COLOR_HIGH = "#d64b3b"
 
+#: The pseudo-component for the total electric-field magnitude, ``|E|`` (spec
+#: R15) — the browser's ``TOTAL_COMPONENT`` — and a detector's default one.
+TOTAL_COMPONENT = "|E|"
+
+
+def _default_component(params: dict[str, Any]) -> str | None:
+    """The component a detector is shaded with until one is picked (spec R15).
+
+    ``|E|`` when the detector records an E component — fdtdx records all six
+    unless ``components`` says otherwise — else its first recorded component.
+    """
+    components = params.get("components")
+    if components is None:
+        return TOTAL_COMPONENT
+    names = [str(c) for c in ([components] if isinstance(components, str) else components)]
+    if any(name.startswith("E") for name in names):
+        return TOTAL_COMPONENT
+    return names[0] if names else None
+
 
 @dataclass
 class ObjectSpec:
@@ -203,18 +222,23 @@ class ObjectSpec:
 
         Only a detector has these; a source returns an empty dict. Absent keys
         fall back to the defaults, so the browser always gets a complete set.
+        An unpicked component defaults to ``|E|`` (see
+        :func:`_default_component`); one set to None — "(none)" picked — stays
+        None. The outline defaults off.
         """
         if self.category != "detector":
             return {}
+        params = self.params
         return {
-            "field_component": self.params.get("field_component"),
+            "field_component": params["field_component"] if "field_component" in params
+            else _default_component(params),
             "field_transform": str(self.params.get("field_transform") or "abs"),
             "field_color_low": str(self.params.get("field_color_low") or FIELD_COLOR_LOW),
             "field_color_high": str(self.params.get("field_color_high") or FIELD_COLOR_HIGH),
             "field_opacity": _field_opacity(self.params.get("field_opacity", 1.0)),
             "field_visible": bool(self.params.get("field_visible", True)),
             "field_freq": int(self.params.get("field_freq", 0)),
-            "field_outline": bool(self.params.get("field_outline", True)),
+            "field_outline": bool(self.params.get("field_outline", False)),
             # the colour scale's fixed [min, max], in the transform's units; None
             # means the browser spans the whole recording (every frame)
             "field_range": _field_range(self.params.get("field_range")),

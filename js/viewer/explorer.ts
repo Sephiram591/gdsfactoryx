@@ -1217,8 +1217,8 @@ export class Explorer {
       },
     });
     // the outline toggle (spec R17): the border drawn around the plane while it
-    // is shaded, so the extent stays visible under a busy field
-    const outline = checkbox(true, (value) => this.setParam(id, "field_outline", value));
+    // is shaded, so the extent stays visible under a busy field; off by default
+    const outline = checkbox(false, (value) => this.setParam(id, "field_outline", value));
     controls.set("field_outline", {
       element: outline,
       write(value) {
