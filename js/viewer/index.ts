@@ -14,7 +14,7 @@ import { LevelMeshes } from "./mesh";
 import { Scene3D, CONTROL_KINDS, type ControlKind } from "./scene";
 import { Section2D } from "./section";
 import { buildTimeline, type Timeline } from "./timeline";
-import { encodeFrames, videoSupported } from "./video";
+import { encodeFrames, videoSupported, type EncodedVideo } from "./video";
 import type {
   FieldPayload,
   GeometryPayload,
@@ -31,6 +31,7 @@ interface AnyModel {
   //: a kernel `Widget.send(content, buffers)` arrives as "msg:custom"
   on(event: "msg:custom", handler: (content: Record<string, unknown>, buffers?: DataView[]) => void): void;
   on(event: string, handler: () => void): void;
+  off(event: string, handler?: unknown): void;
 }
 
 const PLANES = ["xy", "xz", "yz"] as const;
@@ -431,6 +432,11 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   //: detectors whose stopped-on frame was sent and not yet echoed back
   const awaitingEcho = new Set<string>();
   let playHandle = 0;
+  //: videos this view asked the kernel to send back for a download. A
+  //: `video_ready` message reaches every view of the widget (and any listener
+  //: an earlier render left behind), so only the view that asked downloads it,
+  //: once per request
+  let videosAwaited = 0;
   //: play all: every time-domain detector stepping one shared timeline
   let group: { timeline: Timeline; fps: number; last: number; index: number } | null = null;
   //: the shared timeline of the current fields payload, built once per payload
@@ -794,12 +800,7 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
       );
       const filename = `${field.name}-${settings.field_component}-${settings.field_transform}`
         .replace(/[^\w.-]+/g, "_");
-      showToast(video.codec === "h264" ? "writing the MP4…" : `writing the MP4 (from ${video.codec})…`);
-      model.send(
-        { event: "save_video", filename, codec: video.codec, fps, target: readSaveTarget() },
-        undefined,
-        [video.bytes.buffer as ArrayBuffer],
-      );
+      sendVideo(filename, video, fps);
     } catch (error) {
       showToast(`video export failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -810,6 +811,22 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
       section.setFrame(id, null);
       applyFields();
     }
+  }
+
+  /**
+   * Hands an encoded video to the kernel to wrap into an MP4: written under
+   * the save folder, or sent back to this view to download, per "Save to".
+   */
+  function sendVideo(filename: string, video: EncodedVideo, fps: number): void {
+    const target = readSaveTarget();
+    // only the view that asked downloads the returned video (see videosAwaited)
+    if (target === "browser") videosAwaited += 1;
+    showToast(video.codec === "h264" ? "writing the MP4…" : `writing the MP4 (from ${video.codec})…`);
+    model.send(
+      { event: "save_video", filename, codec: video.codec, fps, target },
+      undefined,
+      [video.bytes.buffer as ArrayBuffer],
+    );
   }
 
   // -- play / record all: every time-domain detector on one timeline ---------
@@ -904,13 +921,7 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
           if (index % 25 === 0 || index === count - 1) showToast(`encoding frame ${index + 1} of ${count}`);
         },
       );
-      showToast(video.codec === "h264" ? "writing the MP4…" : `writing the MP4 (from ${video.codec})…`);
-      model.send(
-        { event: "save_video", filename: "time-domain-detectors", codec: video.codec, fps,
-          target: readSaveTarget() },
-        undefined,
-        [video.bytes.buffer as ArrayBuffer],
-      );
+      sendVideo("time-domain-detectors", video, fps);
     } catch (error) {
       showToast(`video export failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -1123,6 +1134,8 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
       | { path?: string; folder?: string; error?: string }
       | undefined;
     if (!payload || Object.keys(payload).length === 0) return;
+    // a video the kernel could not make is not coming back to download
+    if (payload.error?.startsWith("video:") && videosAwaited > 0) videosAwaited -= 1;
     if (payload.error) showToast(`save failed: ${payload.error}`);
     else if (payload.folder) showToast(`save folder: ${payload.folder}`);
     else if (payload.path) showToast(`saved ${payload.path}`);
@@ -1151,9 +1164,12 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
     applyFields();
   };
 
-  // a video the kernel wrapped for a browser download (Save to: browser)
-  model.on("msg:custom", (content, buffers) => {
+  // a video the kernel wrapped for a browser download (Save to: browser). The
+  // message reaches every view, so only one that asked for a video downloads it
+  const onCustom = (content: Record<string, unknown>, buffers?: DataView[]): void => {
     if (content?.event !== "video_ready" || !buffers?.length) return;
+    if (videosAwaited === 0) return;
+    videosAwaited -= 1;
     const filename = String(content.filename ?? "detector.mp4");
     const view = buffers[0];
     const bytes = new Uint8Array(view.byteLength);
@@ -1165,7 +1181,8 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
     link.click();
     window.setTimeout(() => URL.revokeObjectURL(url), 10000);
     showToast(`downloaded ${filename}`);
-  });
+  };
+  model.on("msg:custom", onCustom);
 
   model.on("change:state", applyState);
   model.on("change:fields", applyNewFields);
@@ -1185,6 +1202,9 @@ function render({ model, el }: { model: AnyModel; el: HTMLElement }): () => void
   applySaveFolderVisibility();
 
   return () => {
+    // a re-render (a new bundle, a re-run cell) must not leave a second
+    // video_ready listener behind
+    model.off("msg:custom", onCustom);
     if (positionFrame !== 0) cancelAnimationFrame(positionFrame);
     if (playHandle !== 0) cancelAnimationFrame(playHandle);
     if (toastTimer !== 0) window.clearTimeout(toastTimer);

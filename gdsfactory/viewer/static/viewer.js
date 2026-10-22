@@ -36359,6 +36359,7 @@ function render({ model, el }) {
   const exporting = /* @__PURE__ */ new Set();
   const awaitingEcho = /* @__PURE__ */ new Set();
   let playHandle = 0;
+  let videosAwaited = 0;
   let group = null;
   let timelineCache = null;
   const disposeContent = () => {
@@ -36640,12 +36641,7 @@ function render({ model, el }) {
         }
       );
       const filename = `${field.name}-${settings2.field_component}-${settings2.field_transform}`.replace(/[^\w.-]+/g, "_");
-      showToast(video.codec === "h264" ? "writing the MP4\u2026" : `writing the MP4 (from ${video.codec})\u2026`);
-      model.send(
-        { event: "save_video", filename, codec: video.codec, fps, target: readSaveTarget() },
-        void 0,
-        [video.bytes.buffer]
-      );
+      sendVideo(filename, video, fps);
     } catch (error2) {
       showToast(`video export failed: ${error2 instanceof Error ? error2.message : String(error2)}`);
     } finally {
@@ -36655,6 +36651,16 @@ function render({ model, el }) {
       section.setFrame(id, null);
       applyFields();
     }
+  }
+  function sendVideo(filename, video, fps) {
+    const target = readSaveTarget();
+    if (target === "browser") videosAwaited += 1;
+    showToast(video.codec === "h264" ? "writing the MP4\u2026" : `writing the MP4 (from ${video.codec})\u2026`);
+    model.send(
+      { event: "save_video", filename, codec: video.codec, fps, target },
+      void 0,
+      [video.bytes.buffer]
+    );
   }
   function currentTimeline() {
     const fields = currentFields();
@@ -36726,18 +36732,7 @@ function render({ model, el }) {
           if (index % 25 === 0 || index === count - 1) showToast(`encoding frame ${index + 1} of ${count}`);
         }
       );
-      showToast(video.codec === "h264" ? "writing the MP4\u2026" : `writing the MP4 (from ${video.codec})\u2026`);
-      model.send(
-        {
-          event: "save_video",
-          filename: "time-domain-detectors",
-          codec: video.codec,
-          fps,
-          target: readSaveTarget()
-        },
-        void 0,
-        [video.bytes.buffer]
-      );
+      sendVideo("time-domain-detectors", video, fps);
     } catch (error2) {
       showToast(`video export failed: ${error2 instanceof Error ? error2.message : String(error2)}`);
     } finally {
@@ -36896,6 +36891,7 @@ function render({ model, el }) {
   const applySaveResult = () => {
     const payload = model.get("save_result");
     if (!payload || Object.keys(payload).length === 0) return;
+    if (payload.error?.startsWith("video:") && videosAwaited > 0) videosAwaited -= 1;
     if (payload.error) showToast(`save failed: ${payload.error}`);
     else if (payload.folder) showToast(`save folder: ${payload.folder}`);
     else if (payload.path) showToast(`saved ${payload.path}`);
@@ -36917,8 +36913,10 @@ function render({ model, el }) {
     explorer.showGroupTime("");
     applyFields();
   };
-  model.on("msg:custom", (content2, buffers) => {
+  const onCustom = (content2, buffers) => {
     if (content2?.event !== "video_ready" || !buffers?.length) return;
+    if (videosAwaited === 0) return;
+    videosAwaited -= 1;
     const filename = String(content2.filename ?? "detector.mp4");
     const view = buffers[0];
     const bytes = new Uint8Array(view.byteLength);
@@ -36930,7 +36928,8 @@ function render({ model, el }) {
     link.click();
     window.setTimeout(() => URL.revokeObjectURL(url), 1e4);
     showToast(`downloaded ${filename}`);
-  });
+  };
+  model.on("msg:custom", onCustom);
   model.on("change:state", applyState);
   model.on("change:fields", applyNewFields);
   model.on("change:progress", applyProgress);
@@ -36948,6 +36947,7 @@ function render({ model, el }) {
   applySaveDir();
   applySaveFolderVisibility();
   return () => {
+    model.off("msg:custom", onCustom);
     if (positionFrame !== 0) cancelAnimationFrame(positionFrame);
     if (playHandle !== 0) cancelAnimationFrame(playHandle);
     if (toastTimer !== 0) window.clearTimeout(toastTimer);
