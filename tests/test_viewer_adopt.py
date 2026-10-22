@@ -439,20 +439,20 @@ def test_field_freq_round_trips_through_the_patch_path() -> None:
     assert viewer.state["field_settings"][spec.id]["field_freq"] == 0
 
 
-def test_export_styles_halves_the_non_fill_levels() -> None:
-    """R17: a result's levels take the editor's styles, non-fill ones at half opacity."""
+def test_export_styles_scales_the_levels_alpha() -> None:
+    """R17: a result's levels take the editor's styles, alpha x1/3 (non-fill) or x2/3 (fill)."""
     editor = state.ViewerState(f1_stack())
     result = state.ViewerState(f1_stack())
     first = editor.levels[0].name
-    editor.apply_patch({"styles": {first: {"color": "#123456", "opacity": 0.8, "visible": False}}})
+    editor.apply_patch({"styles": {first: {"color": "#123456", "opacity": 0.9, "visible": False}}})
     state.export_styles(editor, result)
     for level in result.levels:
         source, style = editor.styles[level.name], result.styles[level.name]
         assert (style.color, style.visible) == (source.color, source.visible)
-        expected = source.opacity if level.fill else source.opacity * state.RESULT_LEVEL_OPACITY_SCALE
-        assert style.opacity == pytest.approx(expected)
-    if not editor.levels[0].fill:
-        assert result.styles[first].opacity == pytest.approx(0.4)
+        scale = 2 / 3 if level.fill else 1 / 3
+        assert style.opacity == pytest.approx(source.opacity * scale)
+    assert any(level.fill for level in result.levels), "F1 has a fill level to check"
+    assert result.styles[first].opacity == pytest.approx(0.9 * (2 / 3 if editor.levels[0].fill else 1 / 3))
     assert not result.styles[first].visible
 
 
@@ -467,7 +467,7 @@ def test_a_run_starts_the_result_tab_from_the_editors_layers() -> None:
     _run(viewer)
     result = viewer._result_state
     assert result.styles[name].color == "#123456"
-    assert result.styles[name].opacity == pytest.approx(0.4)
+    assert result.styles[name].opacity == pytest.approx(0.8 / 3)
     assert editor.styles == before, "the editor's own styles are untouched"
 
 

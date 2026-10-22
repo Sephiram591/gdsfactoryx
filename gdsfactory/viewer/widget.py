@@ -189,8 +189,9 @@ class Viewer(anywidget.AnyWidget):
         The result gets its own :class:`ViewerState` — built from ``stack``,
         holding the adopted specs and the Result tab's own styles — so the
         editor's setup and level styles are untouched. The Result tab's level
-        styles start from the editor's, with every non-fill level at half the
-        editor's opacity so the fields show through (:func:`export_styles`).
+        styles start from the editor's, with the opacity scaled — 1/3 for a
+        non-fill level, 2/3 for a fill level — so the fields show through
+        (:func:`export_styles`).
         Called by ``run``'s worker (the widget's own stack) and by
         ``load_result`` (a foreign one).
         """

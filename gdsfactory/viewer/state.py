@@ -50,10 +50,11 @@ __all__ = ["LayerStyle", "ViewerState", "export_styles", "rebox_stack", "spec_gl
 FILL_OPACITY = 0.15
 LEVEL_OPACITY = 0.9
 
-#: A result's layers start from the editor's (spec R17), every non-fill level
-#: at this fraction of the editor's opacity so the shaded fields show through
-#: the device; fill levels keep the editor's (already faint) opacity.
-RESULT_LEVEL_OPACITY_SCALE = 0.5
+#: A result's layers start from the editor's (spec R17), with the editor's
+#: opacity scaled so the shaded fields show through the device: a non-fill
+#: level by RESULT_LEVEL_OPACITY_SCALE, a fill level by RESULT_FILL_OPACITY_SCALE.
+RESULT_LEVEL_OPACITY_SCALE = 1 / 3
+RESULT_FILL_OPACITY_SCALE = 2 / 3
 
 #: Default plane fade as a fraction of the box size along the section's normal
 #: (spec R4). The 1/e distance is this fraction times that size.
@@ -570,17 +571,17 @@ def export_styles(editor: ViewerState, result: ViewerState) -> None:
     """Starts a result world's level styles from the editor's (spec R17).
 
     Each level the result shares with the editor (by name) takes the editor's
-    color and visibility; a non-fill level's opacity is scaled by
-    :data:`RESULT_LEVEL_OPACITY_SCALE`, so the Result tab's fields show through
-    the device, while a fill level keeps the editor's. A level the editor does
-    not have keeps its default style. The Result tab edits these freely; the
-    editor's own styles are untouched.
+    color and visibility, and the editor's opacity scaled so the Result tab's
+    fields show through the device: by :data:`RESULT_LEVEL_OPACITY_SCALE` (1/3)
+    for a non-fill level, :data:`RESULT_FILL_OPACITY_SCALE` (2/3) for a fill
+    level. A level the editor does not have keeps its default style. The
+    Result tab edits these freely; the editor's own styles are untouched.
     """
     for level in result.levels:
         style = editor.styles.get(level.name)
         if style is None:
             continue
-        scale = 1.0 if level.fill else RESULT_LEVEL_OPACITY_SCALE
+        scale = RESULT_FILL_OPACITY_SCALE if level.fill else RESULT_LEVEL_OPACITY_SCALE
         result.styles[level.name] = LayerStyle(
             color=style.color, opacity=style.opacity * scale, visible=style.visible,
         )
