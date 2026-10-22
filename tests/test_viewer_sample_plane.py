@@ -44,6 +44,26 @@ def test_sampled_coordinate_snaps_to_the_recorded_point() -> None:
     assert sim.sampled_coordinate(2, 0.03, 3.0, 0.04) == pytest.approx(0.04)
 
 
+@pytest.mark.parametrize(
+    ("type_name", "expected"),
+    [
+        ("ModeOverlapDetector", "own_positions=detector_plane_own_positions(1)"),
+        ("ModePlaneSource", "own_positions=(0, 0, 0)"),
+    ],
+)
+def test_launch_code_anchors_an_absolute_plane_like_the_run(type_name: str, expected: str) -> None:
+    """The exported tail places a detector plane the way the viewer's own run does."""
+    viewer = widget.view(f1_stack())
+    spec = sim.ObjectSpec(
+        type=type_name,
+        port="None",
+        params={"name": "plane", "axis": 1, "center": [7.5, 0.0, -0.1], "size": [18.0, 3.0]},
+    )
+    lines = sim._absolute_lines(spec, sim.TYPES[type_name], viewer.settings, [1.55], viewer.stack)
+    assert expected in "\n".join(lines)
+    assert "detector_plane_own_positions" in sim._LAUNCH_PRELUDE
+
+
 def _run(viewer: Any) -> Any:
     viewer.run()
     viewer._run_thread.join()

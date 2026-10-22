@@ -756,7 +756,9 @@ def _absolute_lines(spec: ObjectSpec, kind: ObjectType, settings: SimSettings,
         lines.append("    scaling_mode='pulse',")
     lines.append(")")
     lines.append(f"cons_{spec.name} = [{spec.name}.place_relative_to(")
-    lines.append("    stack, axes=(0, 1, 2), own_positions=(0, 0, 0), other_positions=(0, 0, 0),")
+    # a detector plane is anchored on its sampled point, as ``_create_absolute`` does
+    own = f"detector_plane_own_positions({axis})" if kind.plane and kind.category == "detector" else "(0, 0, 0)"
+    lines.append(f"    stack, axes=(0, 1, 2), own_positions={own}, other_positions=(0, 0, 0),")
     lines.append("    margins=(")
     lines.append(f"        ({_num(center[0])} - float(stack.center[0])) * 1e-6,")
     lines.append(f"        ({_num(center[1])} - float(stack.center[1])) * 1e-6,")
@@ -772,7 +774,7 @@ _LAUNCH_PRELUDE = """\
 import fdtdx
 import jax
 
-from gdsfactory.fdtdx_stack import apply_stack, init_stack_params
+from gdsfactory.fdtdx_stack import apply_stack, detector_plane_own_positions, init_stack_params
 
 
 def _wave(wavelength_um):
