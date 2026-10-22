@@ -50,6 +50,21 @@ def grid_bounds_um(
     return lo, hi
 
 
+def _sampled_center(
+    lo: list[float], hi: list[float], axis: int, category: str, plane: bool
+) -> list[float]:
+    """A placed object's center, with a detector plane moved onto its samples.
+
+    fdtdx records a detector's x and y samples on a cell's lower edge and z
+    samples at its centre, so along a plane's normal the cell's lower edge (x, y)
+    or middle (z) is where the field is, not the middle of the cell.
+    """
+    center = [0.5 * (l + h) for l, h in zip(lo, hi, strict=True)]
+    if plane and category == "detector" and axis in (0, 1):
+        center[axis] = lo[axis]
+    return center
+
+
 def glyph_from_grid(
     grid_slice: tuple[slice, slice, slice],
     resolution_m: float,
@@ -69,13 +84,13 @@ def glyph_from_grid(
     becomes a point glyph at its centroid.
     """
     lo, hi = grid_bounds_um(grid_slice, resolution_m, volume_grid_shape, origin_um)
-    center = [0.5 * (l + h) for l, h in zip(lo, hi, strict=True)]
     half = [0.5 * (h - l) for l, h in zip(lo, hi, strict=True)]
     widths = [int(grid_slice[i].stop - grid_slice[i].start) for i in range(3)]
     singletons = [i for i in range(3) if widths[i] == 1]
 
     u_half = v_half = 0.0
     axis = singletons[0] if len(singletons) == 1 else 2
+    center = _sampled_center(lo, hi, axis, category, len(singletons) == 1)
     if len(singletons) == 1:
         u_axis, v_axis = _IN_PLANE[axis]
         u_half, v_half = half[u_axis], half[v_axis]
@@ -113,13 +128,14 @@ def _absolute_params(
     resolution_m: float,
     volume_grid_shape: tuple[int, int, int],
     origin_um: tuple[float, float, float],
+    category: str = "source",
 ) -> dict[str, Any]:
     """The ``axis``/``center``/``size`` params describing a placement (R18)."""
     lo, hi = grid_bounds_um(grid_slice, resolution_m, volume_grid_shape, origin_um)
-    center = [0.5 * (l + h) for l, h in zip(lo, hi, strict=True)]
     widths = [int(grid_slice[i].stop - grid_slice[i].start) for i in range(3)]
     singletons = [i for i in range(3) if widths[i] == 1]
     axis = singletons[0] if len(singletons) == 1 else 2
+    center = _sampled_center(lo, hi, axis, category, len(singletons) == 1)
     u_axis, v_axis = _IN_PLANE[axis]
     return {
         "axis": axis,
@@ -195,7 +211,7 @@ def _adopt_object(
     if anchored:
         try:
             params.update(_absolute_params(
-                tuple(obj.grid_slice), resolution_m, volume_grid_shape, origin_um,
+                tuple(obj.grid_slice), resolution_m, volume_grid_shape, origin_um, category,
             ))
             spec.glyph = glyph_from_grid(
                 tuple(obj.grid_slice), resolution_m, volume_grid_shape, origin_um,

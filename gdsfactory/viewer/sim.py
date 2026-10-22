@@ -544,9 +544,14 @@ def _create_absolute(spec: ObjectSpec, settings: SimSettings,
 
     reference = (float(stack.center[0]), float(stack.center[1]), float(stack.z_center))
     margins = tuple((c - r) * 1e-6 for c, r in zip(center, reference, strict=True))
+    # a detector plane is anchored by the point fdtdx samples it at, like
+    # ``StackDevice._at_port`` does (see ``detector_plane_own_positions``)
+    from gdsfactory.fdtdx_stack import detector_plane_own_positions
+
+    own = detector_plane_own_positions(axis) if kind.plane and kind.category == "detector" else (0, 0, 0)
     cons = [
         obj.place_relative_to(
-            stack, axes=(0, 1, 2), own_positions=(0, 0, 0), other_positions=(0, 0, 0),
+            stack, axes=(0, 1, 2), own_positions=own, other_positions=(0, 0, 0),
             margins=margins,
         )
     ]
@@ -751,7 +756,9 @@ def _absolute_lines(spec: ObjectSpec, kind: ObjectType, settings: SimSettings,
         lines.append("    scaling_mode='pulse',")
     lines.append(")")
     lines.append(f"cons_{spec.name} = [{spec.name}.place_relative_to(")
-    lines.append("    stack, axes=(0, 1, 2), own_positions=(0, 0, 0), other_positions=(0, 0, 0),")
+    # a detector plane is anchored on its sampled point, as ``_create_absolute`` does
+    own = f"detector_plane_own_positions({axis})" if kind.plane and kind.category == "detector" else "(0, 0, 0)"
+    lines.append(f"    stack, axes=(0, 1, 2), own_positions={own}, other_positions=(0, 0, 0),")
     lines.append("    margins=(")
     lines.append(f"        ({_num(center[0])} - float(stack.center[0])) * 1e-6,")
     lines.append(f"        ({_num(center[1])} - float(stack.center[1])) * 1e-6,")
@@ -767,7 +774,7 @@ _LAUNCH_PRELUDE = """\
 import fdtdx
 import jax
 
-from gdsfactory.fdtdx_stack import apply_stack, init_stack_params
+from gdsfactory.fdtdx_stack import apply_stack, detector_plane_own_positions, init_stack_params
 
 
 def _wave(wavelength_um):
@@ -1035,6 +1042,47 @@ def run(
 _IN_PLANE = ((1, 2), (0, 2), (0, 1))
 
 
+def sampled_coordinate(axis: int, coord_um: float, box_um: float, resolution_um: float) -> float:
+    """Where a detector plane's samples fall along its normal axis, in µm.
+
+    fdtdx records x and y samples on a cell's lower edge and z samples at its
+    centre, and places a one-cell plane in the cell whose sampled point is
+    nearest the target (``detector_plane_own_positions``), the lower index
+    winning a tie. This replays that choice on the grid the box resolves to, so
+    a glyph drawn here sits where the field is recorded.
+
+    Args:
+        axis: the plane's normal axis (0 = x, 1 = y, 2 = z).
+        coord_um: the target along ``axis``, in µm from the box center.
+        box_um: the box extent along ``axis``, in µm.
+        resolution_um: the grid spacing, in µm.
+
+    Returns:
+        The sampled coordinate along ``axis``, in µm from the box center.
+    """
+    cells = max(1, math.ceil(box_um / resolution_um - 1e-6))
+    # in cells from the box's lower face; the nearest index, a tie going down
+    x = coord_um / resolution_um + cells / 2
+    if axis == 2:
+        index = math.ceil(x - 1.0 - 1e-9)  # cell centres sit at k + 1/2
+        index = min(max(index, 0), cells - 1)
+        return (index + 0.5 - cells / 2) * resolution_um
+    index = min(max(math.ceil(x - 0.5 - 1e-9), 0), cells - 1)  # lower edges sit at k
+    return (index - cells / 2) * resolution_um
+
+
+def _snap_to_samples(glyph: dict[str, Any], spec: ObjectSpec, stack: Any, settings: SimSettings) -> None:
+    """Moves a detector plane glyph's normal coordinate onto its sample point, in place."""
+    kind = TYPES[spec.type]
+    shape = getattr(stack, "partial_real_shape", None)
+    if not (kind.plane and kind.category == "detector") or shape is None or None in tuple(shape):
+        return
+    axis = glyph["axis"]
+    glyph["center"][axis] = sampled_coordinate(
+        axis, glyph["center"][axis], float(shape[axis]) * 1e6, float(settings.resolution_um)
+    )
+
+
 def _absolute_glyph(spec: ObjectSpec, origin: tuple[float, float, float]) -> dict[str, Any]:
     """The wire glyph of an absolutely-placed spec (spec R18).
 
@@ -1092,7 +1140,10 @@ def spec_glyph(stack: Any, spec: ObjectSpec, origin: tuple[float, float, float],
     """
     kind = TYPES[spec.type]
     if spec.absolute:
-        return _absolute_glyph(spec, origin)
+        glyph = _absolute_glyph(spec, origin)
+        if spec.glyph is None:  # an adopted spec's center is already a placed sample point
+            _snap_to_samples(glyph, spec, stack, settings)
+        return glyph
     if spec.glyph is not None:
         return {**spec.glyph}
     try:
@@ -1110,7 +1161,7 @@ def spec_glyph(stack: Any, spec: ObjectSpec, origin: tuple[float, float, float],
         u_half = v_half = 0.0
 
     ox, oy, oz = origin
-    return {
+    glyph = {
         "id": spec.id,
         "name": spec.name,
         "kind": spec.category,
@@ -1123,6 +1174,8 @@ def spec_glyph(stack: Any, spec: ObjectSpec, origin: tuple[float, float, float],
         "direction": spec.params.get("direction"),
         "visible": bool(spec.params.get("visible", True)),
     }
+    _snap_to_samples(glyph, spec, stack, settings)
+    return glyph
 
 
 def _empty_glyph(spec: ObjectSpec) -> dict[str, Any]:
