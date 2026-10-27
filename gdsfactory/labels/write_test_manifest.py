@@ -37,7 +37,8 @@ def write_test_manifest(
     """
     search_strings = search_strings or []
     search_strings = list(search_strings)
-    c = component
+    # KLayout's recursive instance iterator needs a concrete kfactory cell
+    c = component.to_kfactory() if isinstance(component, gf.Component) else component
 
     with open(csvpath, "w") as f:
         writer = csv.writer(f)

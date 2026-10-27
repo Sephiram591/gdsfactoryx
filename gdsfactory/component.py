@@ -204,6 +204,15 @@ class Box:
         dy = dx if dy is None else dy
         return Box(self.left - dx, self.bottom - dy, self.right + dx, self.top + dy)
 
+    def enlarge(self, dx: Any, dy: Any | None = None) -> Box:
+        """In-place version of `enlarged` (kdb.DBox compatibility); returns self."""
+        dy = dx if dy is None else dy
+        self.left = self.left - dx
+        self.bottom = self.bottom - dy
+        self.right = self.right + dx
+        self.top = self.top + dy
+        return self
+
     def __eq__(self, other: object) -> bool:
         if not all(hasattr(other, a) for a in ("left", "bottom", "right", "top")):
             return NotImplemented
@@ -940,6 +949,7 @@ class Instances:
 # Component
 # --------------------------------------------------------------------------
 _unnamed_counter = itertools.count()
+_cell_index_counter = itertools.count()
 _LIVE_COMPONENTS: weakref.WeakSet[Component] = weakref.WeakSet()
 
 
@@ -2064,10 +2074,87 @@ class Component(_BBoxMixin):
         return len({id(r.cell) for r in self.insts})
 
     def delete(self) -> None:
-        """Kept for kfactory compatibility (components are garbage collected)."""
+        """Deletes the cell: drops it from the cell caches and from its parents.
+
+        Like kfactory's ``delete_cell``, instances of this cell in other live
+        components are removed. The remaining memory is garbage collected.
+        """
+        from gdsfactory import _cell
+
+        for parent in live_components():
+            for ref in [r for r in parent.insts if r.cell is self]:
+                parent.insts.remove(ref)
+        for cache in _cell._CACHES:
+            for key in [k for k, v in cache.items() if v is self]:
+                del cache[key]
+        if _cell._BY_NAME.get(self.name) is self:
+            del _cell._BY_NAME[self.name]
+        _LIVE_COMPONENTS.discard(self)
         self.insts.clear()
         self.polygons = {}
         self.labels = []
+
+    def cell_index(self) -> int:
+        """Unique integer id of the cell (kfactory compatibility)."""
+        index = self.__dict__.get("_cell_index")
+        if index is None:
+            index = self._cell_index = next(_cell_index_counter)
+        return index
+
+    def draw_ports(self) -> None:
+        """Draws a marker triangle and the name of every port on the port's layer.
+
+        Markers are concrete geometry (not differentiable). Like in kfactory, a
+        locked cell is unlocked while drawing and locked again afterwards.
+        """
+        locked, self.locked = self.locked, False
+        try:
+            self._draw_ports()
+        finally:
+            self.locked = locked
+
+    def _draw_ports(self) -> None:
+        import klayout.db as kdb
+
+        dbu = 0.001
+        for port in self.ports:
+            w = round(to_float(port.width) / dbu)
+            marker = kdb.Region(
+                kdb.Polygon(
+                    [kdb.Point(0, -w // 2), kdb.Point(0, w // 2), kdb.Point(w // 2, 0)]
+                )
+            )
+            if w > 20:
+                marker -= kdb.Region(
+                    kdb.Polygon(
+                        [
+                            kdb.Point(w // 20, 0),
+                            kdb.Point(w // 20, -w // 2 + w * 5 // 40),
+                            kdb.Point(w // 2 - int(w * 1.41 / 20), 0),
+                        ]
+                    )
+                )
+            trans = kdb.DCplxTrans(
+                1.0,
+                to_float(port.orientation),
+                False,
+                to_float(port.center[0]),
+                to_float(port.center[1]),
+            )
+            for poly in marker.each():
+                dpoly = poly.to_dtype(dbu).transformed(trans)
+                self.add_polygon(
+                    [(pt.x, pt.y) for pt in dpoly.each_point_hull()], port.layer
+                )
+            if port.name:
+                self.add_label(port.name, port.center, layer=port.layer)
+
+    def connectivity_check(self, *args: Any, **kwargs: Any) -> Any:
+        """Connectivity check on the KLayout export; returns a ReportDatabase.
+
+        Takes the same arguments as kfactory's ``connectivity_check``.
+        """
+        return self.to_kfactory().connectivity_check(*args, **kwargs)
 
     def get_boxes(self, layer: LayerSpec, recursive: bool = True) -> list[Any]:
         """Axis-aligned rectangles on a layer as kdb.DBox (concrete)."""

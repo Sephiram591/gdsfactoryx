@@ -9,12 +9,12 @@ if __name__ == "__main__":
     ref1 = c << gf.components.text("1")
     ref2 = c << gf.components.text("2")
 
-    print("Cells before:", len(list(gf.kcl.each_cell())))
+    print("Cells before:", len(c.called_cells()))
 
-    # Delete a specific cell from the layout
-    gf.kcl.delete_cell(ref2.cell)
+    # Delete a specific cell: it is dropped from the cache and from its parents
+    ref2.cell.delete()
 
-    print("Cells after:", len(list(gf.kcl.each_cell())))
+    print("Cells after:", len(c.called_cells()))
     c.show()
 
     # Or clear the entire cache (all cells)
