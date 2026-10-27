@@ -170,14 +170,17 @@ class Slab:
     def phasors(self, stack_params=None):
         """(3, 2) complex (jax): rows trans, trans2, refl; columns Ex, Ey (plane averages)."""
         import fdtdx
+        import jax
         import jax.numpy as jnp
 
         from gdsfactory.fdtdx_stack import apply_stack
 
         params = self.params if stack_params is None else {**self.params, "stack": stack_params}
         arrays, objects, _ = apply_stack(self.arrays, self.objects, params, self.key)
-        _, state = fdtdx.run_fdtd(arrays=arrays, objects=objects, config=self.config, key=self.key,
-                                  show_progress=False)
+        # gdsfactory turns on x64; fdtdx 0.6.3's PML would then promote its float32 state inside the solve loop
+        with jax.enable_x64(False):
+            _, state = fdtdx.run_fdtd(arrays=arrays, objects=objects, config=self.config, key=self.key,
+                                      show_progress=False)
         rows = [jnp.reshape(state.detector_states[n]["phasor"], (-1,))[:2] for n in ("trans", "trans2", "refl")]
         return jnp.stack(rows)
 

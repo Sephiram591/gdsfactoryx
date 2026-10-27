@@ -117,7 +117,8 @@ def fdtdx_run(res_nm: float, kind: str | None, averaging: str, angle: float, off
     )
     params = {**params, **init_stack_params(objects)}
     arrays, objects, info = apply_stack(arrays, objects, params, key)
-    _, state = fdtdx.run_fdtd(arrays=arrays, objects=objects, config=config, key=key, show_progress=False)
+    with jax.enable_x64(False):  # gdsfactory turns on x64, which fdtdx 0.6.3's PML state does not survive
+        _, state = fdtdx.run_fdtd(arrays=arrays, objects=objects, config=config, key=key, show_progress=False)
     status = info.get("stack_status", {}).get("stack")
     if status:
         print("  status", {k: float(v) for k, v in status.items()}, flush=True)

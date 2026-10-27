@@ -118,7 +118,8 @@ def main() -> None:
     t0 = time.time()
     arrays, objects, info = apply_stack(arrays, objects, params, key)
     status = {k: float(v) for k, v in info["stack_status"].get("stack", {}).items()}
-    _, state = fdtdx.run_fdtd(arrays=arrays, objects=objects, config=config, key=key, show_progress=False)
+    with jax.enable_x64(False):  # gdsfactory turns on x64 (fdtdx 0.6.3's solve loop keeps float32 state)
+        _, state = fdtdx.run_fdtd(arrays=arrays, objects=objects, config=config, key=key, show_progress=False)
     energy = np.asarray(state.detector_states["energy"]["energy"]).reshape(-1)
     seconds = time.time() - t0
     recorded = list(range(0, steps, args.every))[: len(energy)]
