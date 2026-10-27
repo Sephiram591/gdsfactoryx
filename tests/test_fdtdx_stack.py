@@ -4087,10 +4087,13 @@ def test_subpixel_full_gradients_match_finite_differences() -> None:
     (moving a corner: junction voxels), its thickness and its sidewall angle: the reverse-mode gradient of the
     entries weighted by their own forward-mode derivative (``|J v|^2``, so no cancellation) matches central
     differences. The steps are small against the junction weight's transition (a corner entering a voxel
-    reaches the closure within about 0.03 cells) and the geometry is off coincidences with the grid."""
+    reaches the closure within about 0.03 cells) and the geometry is off coincidences with the grid: a surface
+    on a voxel face, or on a face of the closure's sub-cells (quarters of a voxel), is a kink, where the
+    derivative is one of the sides' (or their mean) and central differences are first order."""
     rect = _rotated(_rect(-0.8, -0.3, 0.8, 0.3), 30.0, np.asarray([0.0137, -0.0071]))
+    core = LayerLevel(layer=WG, zmin=0.0063, thickness=0.2071, material="si", mesh_order=1, sidewall_angle=10.0)
     objects, arrays, params = _placed(
-        _polygons(rect), _core(sidewall_angle=10.0), CORE_ONLY, (2.2, 1.6, 0.3), (0.0, 0.0), z_center=0.11,
+        _polygons(rect), LayerStack(layers={"core": core}), CORE_ONLY, (2.2, 1.6, 0.3), (0.0, 0.0), z_center=0.11,
         averaging="subpixel_full",
     )
     d = objects["s"]
@@ -4107,10 +4110,11 @@ def test_subpixel_full_gradients_match_finite_differences() -> None:
     key = "vertices/WG"
     directions = {
         key: jnp.zeros_like(p0[key]).at[2].set(jnp.asarray([0.6, 0.8])),  # one corner, obliquely
-        "thickness/core": jnp.asarray(1.0),
-        "sidewall_angle/core": jnp.asarray(1.0),
+        "thickness/core": jnp.ones_like(p0["thickness/core"]),
+        "sidewall_angle/core": jnp.ones_like(p0["sidewall_angle/core"]),
     }
-    steps = {key: 1e-4, "thickness/core": 1e-4, "sidewall_angle/core": 0.01}
+    # central differences of the vertex direction: -2.0 % at 1e-4 um, -0.12 % at 3e-5, -0.05 % at 1e-5
+    steps = {key: 2e-5, "thickness/core": 2e-5, "sidewall_angle/core": 0.005}
     for name, direction in directions.items():
         tangent = {k: jnp.zeros_like(v) for k, v in p0.items()}
         tangent[name] = direction
@@ -4121,4 +4125,4 @@ def test_subpixel_full_gradients_match_finite_differences() -> None:
         minus = {**p0, name: p0[name] - h * direction}
         fd = (float(loss(plus, weights)) - float(loss(minus, weights))) / (2 * h)
         assert ad > 0 and abs(ad - float(jnp.sum(weights**2))) <= 1e-3 * ad, (name, ad)  # reverse = forward
-        assert abs(ad - fd) <= 0.02 * abs(fd), (name, ad, fd)
+        assert abs(ad - fd) <= 0.01 * abs(fd), (name, ad, fd)

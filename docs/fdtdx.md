@@ -371,7 +371,12 @@ jax.grad(transmission)(2.5)
 `pack` requires the same polygon topology as the component the device was built
 from, meaning the same number of polygons and vertices per polygon on every
 layer. Thicknesses and sidewall angles are ordinary entries of the params dict
-and can be differentiated directly.
+and can be differentiated directly. Where a surface lies exactly on a voxel
+face (a thickness or `zmin` that is a whole number of cells from the box's
+bottom, at some Yee position), the voxel fractions have a kink: the
+derivative there is the mean of the two one-sided ones, half of the surface's
+movement in each of the two voxels, with every material's fraction changing
+consistently.
 
 The device also takes a few things from the vertices it is built with, once,
 and indexes later vertices with them by polygon and vertex: which corners lie
@@ -693,7 +698,10 @@ when it detects that combination.
   blend reaches the closure within about 0.03 cells of a corner entering a
   voxel, so derivatives with respect to the geometry are continuous but
   change quickly there: check them with finite-difference steps well below
-  that (1e-4 um at 20 nm cells, not 5e-4).
+  that (about 1e-3 cells; moving a corner's vertex on 20 nm cells, central
+  differences are 2 % off at 1e-4 um and 0.1 % at 3e-5 um). A surface on a
+  face of the closure's sub-cells (a quarter of a voxel) is a kink, like one
+  on a voxel face (see "Gradients through the simulation").
   Against an independent finite-element reference of the exact geometry
   (the voxel embedded in a 5 x 5 patch, on junction voxels of an L shape, a
   rotated square and an acute triangle), the closure's tensor is off by 5 %

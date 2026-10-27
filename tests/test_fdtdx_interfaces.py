@@ -230,3 +230,19 @@ def test_sub_square_seams_add_up_to_the_voxel() -> None:
         assert float(jnp.abs(subs.mean(axis=2) - voxel).max()) < 1e-6
         assert float(subs.min()) > -1e-9 and float(subs.max()) < 1 + 1e-9
         assert float(jnp.abs(subs.sum(axis=-1) - 1).max()) < 1e-12
+
+
+def test_a_surface_on_a_voxel_face_moves_the_sub_intervals_consistently() -> None:
+    """A top surface exactly on the face between voxel layers 12 and 13 (a tie): in each layer the sub-interval
+    lengths still add up to the layer (their derivatives add up to zero), and the level's coverage of the two
+    layers moves by one cell per cell of the surface, half in each (before, the layer's end sorted inside the
+    tie and the lengths of layer 12 grew with the surface)."""
+    with enable_x64():
+        def coverage(high, k):
+            _, _, length, present = _split_layer(jnp.asarray([2.0]), jnp.reshape(high, (1,)), jnp.asarray(k, float))
+            return jnp.sum(length), jnp.sum(length * present[..., 0])
+
+        for k in (12.0, 13.0):
+            d_total, d_level = jax.jacobian(lambda h, k=k: coverage(h, k))(13.0)
+            assert float(d_total) == 0.0
+            assert float(d_level) == pytest.approx(0.5)

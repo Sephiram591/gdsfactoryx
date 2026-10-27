@@ -3,7 +3,8 @@
 Writes, for a few devices (corners of every kind, sub-samples, the "subpixel" tensor), the material weights and
 the written inverse permittivity to an .npz; compare two runs with ``--compare a.npz b.npz``.
 
-Run: PYTHONPATH=<checkout> python -I benchmarks/fdtdx_subpixel/legacy_fingerprint.py out.npz
+Run: PYTHONPATH=<checkout> python benchmarks/fdtdx_subpixel/legacy_fingerprint.py out.npz (not python -I, which
+ignores PYTHONPATH; it prints which gdsfactory it imported)
 """
 
 from __future__ import annotations

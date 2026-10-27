@@ -1324,8 +1324,13 @@ def _split_layer(lows: Array, highs: Array, k: Array) -> tuple[Array, Array, Arr
     # membership of sub-interval m (between sorted points m and m+1) comes from
     # the ranks of each level's surfaces in a stable sort, not from midpoints:
     # with tied surfaces every level keeps the sub-interval on its own side,
-    # so moving a surface always changes that level's coverage
-    perm = jnp.argsort(jax.lax.stop_gradient(points), axis=-1, stable=True)
+    # so moving a surface always changes that level's coverage. The layer's
+    # ends sort outside any surface tied with them (k first, k + 1 last), so
+    # the lengths always add up to the constant k + 1 - k: a surface clipped
+    # onto the top end (its derivative half there) moves the sub-interval
+    # above it, not the layer's end
+    tie = jnp.asarray([0, 2] + [1] * (2 * num_levels), dtype=jnp.int32)
+    perm = jnp.lexsort((jnp.broadcast_to(tie, points.shape), jax.lax.stop_gradient(points)), axis=-1)
     bp = jnp.take_along_axis(points, perm, axis=-1)
     rank = jnp.argsort(perm, axis=-1, stable=True)
     r_lo = rank[..., 2 : 2 + num_levels]
