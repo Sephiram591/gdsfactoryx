@@ -4068,8 +4068,9 @@ def _corner_interfaces(
     # one sub-square at a time (a vmap over them made XLA fuse the whole painting into one kernel that took
     # minutes to compile)
     q_exact, q_moments, q_tensor, _ = jax.lax.map(
-        lambda c: _corner_square(cc, corner, present2, is_fill, half, cell, vectors, contrast2, c, sub), centers
-    )  # (Q, 2N, S, ...)
+        jax.checkpoint(lambda c: _corner_square(cc, corner, present2, is_fill, half, cell, vectors, contrast2, c, sub)),
+        centers,
+    )  # (Q, 2N, S, ...), each sub-square recomputed in the backward pass
     q_exact, q_moments, q_tensor = (jnp.moveaxis(mean(jnp.moveaxis(x, 0, 1)), 1, 2) for x in (q_exact, q_moments, q_tensor))
     # (N, S, Q, ...): the voxel's seams (its v per level, and its unions as their mean) and its certificate
     unions = jnp.cumsum(exact[..., :-1], axis=-1)[:, :, None, :]  # (N, S, 1, K)
@@ -4135,15 +4136,16 @@ def _interface_corner_pass(
     vec, con = np.asarray(vectors), np.asarray(contrast2)
     area = (2 * half * cell) ** 2
 
+    @jax.checkpoint  # recomputed in the backward pass: one voxel layer's corner model in memory at a time
+    def corner_model(*args: Array) -> tuple[Array, Array, Array, Array]:
+        return _corner_interfaces(corner, *args, planes, is_fill, half, cell, vec, con)
+
     def one_slice(inputs: tuple[Array, ...]) -> tuple[Array, Array, Array]:
         t_visible, t_tensor, t_moments, length, bp, present, shift, rates, slopes = inputs
         busy = jnp.any(present[..., polygons] & taken[:, None, None])
         f, d, m, w = jax.lax.cond(
             busy,
-            lambda _: _corner_interfaces(
-                corner, t_visible, t_tensor, t_moments, length, present, shift, rates, planes, is_fill, half, cell,
-                vec, con,
-            ),
+            lambda _: corner_model(t_visible, t_tensor, t_moments, length, present, shift, rates),
             lambda _: (t_visible, t_tensor, t_moments, jnp.ones(length.shape, dtype=length.dtype)),
             None,
         )
