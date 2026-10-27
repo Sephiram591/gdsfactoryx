@@ -58,7 +58,7 @@ def run_case(name, make_levels, kottke=None, sizes=(1, 3, 5), bcs=("periodic", "
         for bc in bcs:
             if bc == "mean" and size > 1:
                 continue  # the mean-field condition is defined on the voxel alone here
-            best, est, hist = converged_2d(regions, EPS, bc, n=n, levels=levels, size=size, window=window)
+            best, _, hist = converged_2d(regions, EPS, bc, n=n, levels=levels, size=size, window=window)
             row = dict(case=name, size=size, bc=bc, change=rel(hist[-1], hist[-2]),
                        xx=round(float(best[0, 0]), 4), yy=round(float(best[1, 1]), 4), xy=round(float(best[0, 1]), 4))
             if kottke is not None:

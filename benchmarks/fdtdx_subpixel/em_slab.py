@@ -276,8 +276,8 @@ def gradient_check(res: float, offset: float, step: float) -> dict:
     ref = (tmm(thickness + h) - tmm(thickness - h)) / (2 * h)
     out = dict(res_nm=res, offset=offset, step=step, value=np.asarray(value).tolist(), grad=grads,
                fd=fd.tolist(), tmm=ref.tolist(), tmm_value=tmm(thickness).tolist(), seconds=t_grad,
-               grad_vs_fd=[abs(g - f) / max(abs(f), 1e-12) for g, f in zip(grads, fd)],
-               grad_vs_tmm=[abs(g - f) / max(abs(f), 1e-12) for g, f in zip(grads, ref)])
+               grad_vs_fd=[abs(g - f) / max(abs(f), 1e-12) for g, f in zip(grads, fd, strict=True)],
+               grad_vs_tmm=[abs(g - f) / max(abs(f), 1e-12) for g, f in zip(grads, ref, strict=True)])
     print(json.dumps(out), flush=True)
     return out
 

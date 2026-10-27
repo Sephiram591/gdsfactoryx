@@ -79,7 +79,7 @@ def subcell_tensors(regions, n: int, kind: str) -> np.ndarray:
                 f[m] += r.intersection(sq).area
             f /= f.sum()
             d = np.zeros((3, 3))
-            for seg, a, b in faces:
+            for seg, _, _ in faces:
                 part = seg.intersection(sq)
                 for g in shapely.get_parts(part):
                     if g.geom_type != "LineString" or g.length < 1e-14:
@@ -89,7 +89,7 @@ def subcell_tensors(regions, n: int, kind: str) -> np.ndarray:
                     nrm = np.array([-t[1], t[0], 0.0])
                     d += g.length * np.outer(nrm, nrm)
             if kind == "kottke" and np.trace(d) > 0:
-                w, v = np.linalg.eigh(d)
+                _, v = np.linalg.eigh(d)
                 out[i, j, 0] = np.asarray(laminate(EPS, jnp.asarray(f), jnp.asarray(v[:, -1])))
             else:
                 out[i, j, 0] = np.einsum("m,mij->ij", f, EPS)

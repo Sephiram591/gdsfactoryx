@@ -235,6 +235,7 @@ _ON_LINE = 1e-6  # sides of the square: points on a line are looked at this far 
 _PARALLEL = 1e-6  # |sin| of the angle below which two lines are parallel
 _T_FAR = 8.0  # sides of the square: beyond every point of the squares a line is followed in
 _JUNCTION_CHUNK = 256  # junction voxels whose cell problems are solved together (bounds the memory)
+_CERTIFIED = 1e-6  # a corner column's voxel whose corner model's certificate is below 1 - this is uncertified
 # normwise backward error of a cell problem's solve above which it failed (a Cholesky solve of a few hundred
 # unknowns stays near 1e-6 in float32); NaN (a failed factorization) fails too
 _CLOSURE_RESIDUAL = 1e-4
@@ -2392,6 +2393,7 @@ def _interface_composite(
     Returns:
         fractions: (nx, ny, nz, K + 1).
         direction: (nx, ny, nz, 6) the direction tensor (xx, yy, zz, xy, xz, yz).
+        uncertified: () the corner columns' voxels whose corner model is not certified (0 without one).
     """
     point_slopes = _point_slopes(lows, surface_slopes)
     num_levels = lows.shape[-1]
@@ -2426,10 +2428,10 @@ def _interface_composite(
     ks = jnp.arange(nz, dtype=lows.dtype)
     if corner is None:
         fractions, direction = jax.lax.map(one_slice, ks)
-        return jnp.moveaxis(fractions, 0, 2), jnp.moveaxis(direction, 0, 2)
+        return jnp.moveaxis(fractions, 0, 2), jnp.moveaxis(direction, 0, 2), jnp.zeros((), dtype=jnp.int32)
     (fractions, direction), columns = jax.lax.map(one_slice, ks)
     cols = jnp.minimum(corner.cols, offsets.shape[0] * offsets.shape[1] - 1)
-    c_fractions, c_direction = _interface_corner_pass(
+    c_fractions, c_direction, uncertified = _interface_corner_pass(
         corner.layers,
         corner.taken,
         columns,
@@ -2443,13 +2445,14 @@ def _interface_composite(
         cell=float(cell),
         vectors=tuple(tuple(float(x) for x in row) for row in vectors),
         contrast2=tuple(tuple(float(x) for x in row) for row in contrast2),
-    )  # (nz, N, K + 1), (nz, N, 6)
+    )  # (nz, N, K + 1), (nz, N, 6), (nz,)
     fractions = fractions.reshape(nz, -1, num_levels + 1).at[:, corner.cols].set(c_fractions, mode="drop")
     direction = direction.reshape(nz, -1, 6).at[:, corner.cols].set(c_direction, mode="drop")
     shape = offsets.shape[:2]
     return (
         jnp.moveaxis(fractions.reshape(nz, *shape, num_levels + 1), 0, 2),
         jnp.moveaxis(direction.reshape(nz, *shape, 6), 0, 2),
+        jnp.sum(uncertified),
     )
 
 
@@ -2571,7 +2574,7 @@ def _junction_cells(
                 tq_gauss,
             ),
         )
-        visible, tensor, moments = (jnp.swapaxes(x, 1, 2) for x in out[3:])  # (N, Q, S, ...)
+        visible, tensor, moments = (jnp.swapaxes(x, 1, 2) for x in out[4:])  # (N, Q, S, ...)
     # the sub-cells along z: equal parts of the voxel layer, overlapping the sub-intervals
     z0 = layer[:, None] + jnp.arange(nzs, dtype=dtype)[None, :] / nzs  # (N, m)
     lo = jnp.maximum(bp[:, :-1, None], z0[:, None, :])
@@ -2686,6 +2689,9 @@ class _Interfaces(NamedTuple):
     voxel: _JunctionInputs | None
     #: () corner candidate columns that found no slot (summed over the sample squares)
     corner_dropped: Array | int = 0
+    #: () voxels of corner columns whose corner model is not certified, so that their fractions and faces are
+    #: partly the half-plane model's (one plane per level; summed over the sample squares)
+    corner_uncertified: Array | int = 0
 
 
 class _CornerPlan(NamedTuple):
@@ -3420,8 +3426,39 @@ def _corner_fill(
     return _blend(w, exact, dense, voxel_length, *((flux, flux_t, rate, rate_t) if with_n else ()))
 
 
+def _mean_shift(raw: Array, lower: Array, target: Array, iterations: int = 24) -> Array:
+    """The shift s (..., 1) with ``mean(clip(raw + s, lower, 1), axis=-1) = target`` (..., 1).
+
+    The mean is monotone in s: s is found by bisection (no derivative), then one Newton step from it gives
+    s the implicit derivative (``-d(mean - target) / d mean / ds``, zero where every value is clipped).
+    """
+    r, low_b, t = (jax.lax.stop_gradient(x) for x in (raw, lower, target))
+
+    def mean_at(s: Array, values: Array, bound: Array) -> Array:
+        return jnp.mean(jnp.clip(values + s, bound, 1.0), axis=-1, keepdims=True)
+
+    def step(_: int, interval: tuple[Array, Array]) -> tuple[Array, Array]:
+        a, b = interval
+        m = 0.5 * (a + b)
+        short = mean_at(m, r, low_b) < t
+        return jnp.where(short, m, a), jnp.where(short, b, m)
+
+    start = (jnp.min(low_b - r, axis=-1, keepdims=True), jnp.max(1.0 - r, axis=-1, keepdims=True))
+    a, b = jax.lax.fori_loop(0, iterations, step, start)
+    s = jax.lax.stop_gradient(0.5 * (a + b))
+    free = ((raw + s > lower) & (raw + s < 1.0)).astype(raw.dtype)
+    slope = jnp.mean(free, axis=-1, keepdims=True)
+    miss = mean_at(s, raw, lower) - target
+    return s - jnp.where(slope > 0, miss / jnp.where(slope > 0, slope, 1.0), 0.0)
+
+
 def _straight_seams(
-    exact: Array, dense: Array, gauss_t: Array, is_fill: Sequence[bool], given: Array | None = None
+    exact: Array,
+    dense: Array,
+    gauss_t: Array,
+    is_fill: Sequence[bool],
+    given: Array | None = None,
+    target: Array | None = None,
 ) -> tuple[Array, Array]:
     """E with the straight-edge seam T - T_g added level by level (see :func:`_corner_fill`).
 
@@ -3440,6 +3477,10 @@ def _straight_seams(
         gauss_t: (N, S, K + 1) T_g, the half-planes at the two heights (their mean).
         is_fill: (K,) static.
         given: (..., K) v to use (another square's, e.g. the voxel's for its sub-squares), or None.
+        target: with ``given``, (..., 1, K) the unions c_j of the square the last axis of ``exact``'s
+            batch tiles (the voxel's, for its sub-squares): every sub-square's c_j gets one shift before
+            it is clipped, so that their mean is the voxel's exactly (clipped one by one, their own seams
+            would not add up where some sub-squares clip and the voxel does not).
 
     Returns:
         The fractions (N, S, K + 1), and v (N, S, K) per level (1 where the union is straight).
@@ -3459,6 +3500,8 @@ def _straight_seams(
         # level keeps what the levels before it hold (where clipped, the
         # gradient is the bound's; at a tie, the union's own)
         c = sums[0] + v * seam
+        if target is not None:
+            c = c + _mean_shift(c, below, target[..., j])
         c = jnp.where(c > 1.0, 1.0, c)
         c = jnp.where(c < below, below, c)
         # level j: E_j plus what the seam added to c_j less what it added to
@@ -3886,7 +3929,8 @@ def _corner_interfaces(
 
     With ``squares``, sub-squares of the voxel (the junction closure's) are painted with the same model,
     each with its own tips, and blended with their own half-plane paintings by the voxel's certificate and
-    seams (so the sub-squares add up to the voxel, but where a seam is clipped to its bounds).
+    seams, their unions shifted together so that the sub-squares add up to the voxel exactly
+    (:func:`_straight_seams`).
 
     Args:
         corner: the corner columns (no indices).
@@ -3909,7 +3953,8 @@ def _corner_interfaces(
 
     Returns:
         The blended fractions (N, S, K + 1), lateral face tensor (N, S, 6) and material moments (N, S, 6, 3)
-        per sub-interval; with ``squares`` also the sub-squares' (N, S, Q, ...).
+        per sub-interval, and the certificate w (N, S) they were blended with (below 1: partly the half-plane
+        model); with ``squares`` also the sub-squares' fractions, face tensors and moments (N, S, Q, ...).
     """
     n0 = length.shape[0]
     dtype = length.dtype
@@ -3955,6 +4000,7 @@ def _corner_interfaces(
         wv * exact + (1 - wv) * t_visible,
         wv * tensor + (1 - wv) * t_tensor,
         wv[..., None] * moments + (1 - wv[..., None]) * t_moments,
+        w,
     )
     if squares is None:
         return out
@@ -3965,8 +4011,9 @@ def _corner_interfaces(
         lambda c: _corner_square(cc, corner, present2, is_fill, half, cell, vectors, contrast2, c, sub), centers
     )  # (Q, 2N, S, ...)
     q_exact, q_moments, q_tensor = (jnp.moveaxis(mean(jnp.moveaxis(x, 0, 1)), 1, 2) for x in (q_exact, q_moments, q_tensor))
-    # (N, S, Q, ...): the voxel's seams (its v per level) and its certificate
-    q_exact = _straight_seams(q_exact, tq_visible, tq_gauss, is_fill, straight[:, :, None])[0]
+    # (N, S, Q, ...): the voxel's seams (its v per level, and its unions as their mean) and its certificate
+    unions = jnp.cumsum(exact[..., :-1], axis=-1)[:, :, None, :]  # (N, S, 1, K)
+    q_exact = _straight_seams(q_exact, tq_visible, tq_gauss, is_fill, straight[:, :, None], unions)[0]
     mq = mix[:, :, None]
     q_tensor = mq[..., None] * tq_tensor + (1 - mq[..., None]) * q_tensor
     q_moments = mq[..., None, None] * tq_moments + (1 - mq[..., None, None]) * q_moments
@@ -4020,28 +4067,32 @@ def _interface_corner_pass(
         contrast2: (K + 1, K + 1) static squared contrasts (nested tuples).
 
     Returns:
-        (nz, N, K + 1) the columns' fractions and (nz, N, 6) their direction tensors.
+        (nz, N, K + 1) the columns' fractions, (nz, N, 6) their direction tensors and (nz,) the number of
+        the columns' voxels per layer that the corner model does not certify (blended toward half-planes).
     """
     corner = _CornerInputs(cols=None, taken=taken, layers=layers, trees=trees, literals=literals, lines=lines, sc=sc)
     polygons = np.logical_not(is_fill)
     vec, con = np.asarray(vectors), np.asarray(contrast2)
     area = (2 * half * cell) ** 2
 
-    def one_slice(inputs: tuple[Array, ...]) -> tuple[Array, Array]:
+    def one_slice(inputs: tuple[Array, ...]) -> tuple[Array, Array, Array]:
         t_visible, t_tensor, t_moments, length, bp, present, shift, rates, slopes = inputs
         busy = jnp.any(present[..., polygons] & taken[:, None, None])
-        f, d, m = jax.lax.cond(
+        f, d, m, w = jax.lax.cond(
             busy,
             lambda _: _corner_interfaces(
                 corner, t_visible, t_tensor, t_moments, length, present, shift, rates, planes, is_fill, half, cell,
                 vec, con,
             ),
-            lambda _: (t_visible, t_tensor, t_moments),
+            lambda _: (t_visible, t_tensor, t_moments, jnp.ones(length.shape, dtype=length.dtype)),
             None,
         )
         fractions = jnp.sum(length[..., None] * f, axis=-2)
         direction = jnp.sum(length[..., None] * d, axis=-2) + _vertical_tensor(length, bp, m, slopes) * area
-        return fractions, direction
+        # the columns' voxels whose polygon levels the corner model does not certify (partly half-planes)
+        drawn = jnp.any(present[..., polygons], axis=-1) & (length > 0)
+        uncertified = jnp.sum(taken & jnp.any(drawn & (w < 1.0 - _CERTIFIED), axis=-1), dtype=jnp.int32)
+        return fractions, direction, uncertified
 
     return jax.lax.map(one_slice, columns)
 
@@ -6858,6 +6909,7 @@ class StackDevice(StaticMultiMaterialObject):
         direction = 0.0
         fractions = 0.0
         dropped = jnp.zeros((), dtype=jnp.int32)
+        uncertified = jnp.zeros((), dtype=jnp.int32)
         planes = []
         for a, b, _kernel in _lateral_samples(n_sub, self.edge_width):
             grid = (shift[0] + a, shift[1] + b)
@@ -6867,12 +6919,13 @@ class StackDevice(StaticMultiMaterialObject):
                 dropped = dropped + jnp.sum(corner.dropped, dtype=jnp.int32)
             offsets, normals = half_planes(sdf)
             planes.append((offsets, normals))
-            f, d = _interface_composite(
+            f, d, u = _interface_composite(
                 offsets, normals, is_fill, *surfaces, lateral, nz, 0.5, knots, cell, vectors, contrast2,
                 surface_slopes, corner=corner,
             )
             fractions = fractions + f
             direction = direction + d
+            uncertified = uncertified + u
         if n_sub == 1:
             out = []
             for m in names:
@@ -6900,7 +6953,10 @@ class StackDevice(StaticMultiMaterialObject):
             cell=cell,
             corner=corner if n_sub == 1 else None,
         )
-        return _Interfaces(names=names, weights=w.astype(dtype), direction=direction, voxel=voxel, corner_dropped=dropped)
+        return _Interfaces(
+            names=names, weights=w.astype(dtype), direction=direction, voxel=voxel, corner_dropped=dropped,
+            corner_uncertified=uncertified,
+        )
 
     def _junction_capacity(self) -> int:
         """Static number of junction voxels per sample grid (``junction_voxels``, or a bound with a warning)."""
@@ -7105,6 +7161,14 @@ class StackDevice(StaticMultiMaterialObject):
         lap("pole_alignment")
         if placed.corner_lines > 0 and placed.corner_columns is None:
             placed = placed.aset("corner_columns", placed._corner_budget())
+        if placed.averaging == "subpixel_full" and placed.corner_lines == 0 and placed.diagnostics:
+            warnings.warn(
+                f"StackDevice {placed.name!r}: averaging='subpixel_full' with corner_lines=0 paints every "
+                "polygon corner with one half-plane per level, so its voxels get the laminate along one "
+                "normal; the junction closure resolves corners with the corner model (corner_lines > 0)",
+                StackDiagnosticWarning,
+                stacklevel=2,
+            )
         if placed.averaging == "subpixel_full" and placed.junction_voxels is None:
             placed = placed.aset("junction_voxels", placed._junction_budget())
         if placed.diagnostics:
@@ -7127,14 +7191,25 @@ class StackDevice(StaticMultiMaterialObject):
         keep = np.asarray([n > 1 for n in self.grid_shape], dtype=float)
 
         @partial(jax.jit, static_argnums=1)
-        def count(p: dict[str, Array], shift: tuple[float, float, float]) -> Array:
+        def count(p: dict[str, Array], shift: tuple[float, float, float]) -> tuple[Array, Array]:
             g = self._interfaces(p, None, True, shift)
             d = from_six(g.direction) * jnp.asarray(np.outer(keep, keep), dtype=g.direction.dtype)
             omega, _ = junction_weight(d, _JUNCTION_LOW, _JUNCTION_HIGH)
-            return jnp.sum(omega > 0, dtype=jnp.int32)
+            return jnp.sum(omega > 0, dtype=jnp.int32), jnp.asarray(g.corner_uncertified, dtype=jnp.int32)
 
         p = self.init_params()
-        most = max(int(count(p, tuple(float(x) for x in shift))) for shift in shifts)
+        counts = [count(p, tuple(float(x) for x in shift)) for shift in shifts]
+        most = max(int(c) for c, _ in counts)
+        uncertified = sum(int(u) for _, u in counts)
+        if self.diagnostics and uncertified:
+            warnings.warn(
+                f"StackDevice {self.name!r}: {uncertified} voxels of corner columns (summed over the Yee "
+                "positions) are painted partly with one half-plane per level, where the corner model is not "
+                "certified (more edges or tips than it resolves); their junction closure sees that model. "
+                "interface_status() reports the count for other parameters.",
+                StackDiagnosticWarning,
+                stacklevel=3,
+            )
         return min(nx * ny * nz, 64 * math.ceil((1.5 * most + 64) / 64))
 
     @timed("keep_reachable_levels")
@@ -7381,7 +7456,7 @@ class StackDevice(StaticMultiMaterialObject):
         as with the other averagings.
 
         Coverage failures (junction voxels beyond ``junction_voxels``, corner candidates beyond
-        ``corner_columns``, a cell problem solved with a relative residual above 1e-3) are never kept
+        ``corner_columns``, a cell problem solved with a relative residual above 1e-4) are never kept
         silently: with ``interface_failure="raise"`` they raise where the result is concrete, and make the
         box NaN under tracing (so the result cannot be accepted); with ``"warn"`` they warn and keep the
         laminate or half-plane result. The other averagings return an empty status.
@@ -7393,8 +7468,10 @@ class StackDevice(StaticMultiMaterialObject):
             apply_roughness: if False, the nominal geometry.
 
         Returns:
-            The arrays and the status: ``junctions``, ``junction_overflow`` and ``corner_dropped``
-            (counts, summed over the Yee positions), ``closure_residual`` (the largest) and ``failed``.
+            The arrays and the status: ``junctions``, ``junction_overflow``, ``corner_dropped`` and
+            ``corner_uncertified`` (counts, summed over the Yee positions; the last: voxels of corner columns
+            whose corner model is not certified, so partly one half-plane per level, reported but not a
+            failure), ``closure_residual`` (the largest) and ``failed``.
 
         Raises:
             ValueError: a coverage failure with ``interface_failure="raise"`` and concrete values.
@@ -7429,13 +7506,14 @@ class StackDevice(StaticMultiMaterialObject):
                 if sigma is not None and sigma.shape[1] == len(shifts):
                     cond.append(jnp.sum(w * sigma[:, c, None, None, None], axis=0))
                 inv6, status = self._complete_tensor(g, capacity)
-                statuses.append({**status, "corner_dropped": g.corner_dropped})
+                statuses.append({**status, "corner_dropped": g.corner_dropped, "corner_uncertified": g.corner_uncertified})
             entries += [inv6[..., e] for e in row_entries[c]]
             lap(f"E{'xyz'[c]}", inv6)
         status = {
             "junctions": sum(s["junctions"] for s in statuses),
             "junction_overflow": sum(s["junction_overflow"] for s in statuses),
             "corner_dropped": sum(s["corner_dropped"] for s in statuses),
+            "corner_uncertified": sum(s["corner_uncertified"] for s in statuses),
             "closure_residual": jnp.max(jnp.stack([s["closure_residual"] for s in statuses])),
         }
         failed = (status["junction_overflow"] > 0) | (status["corner_dropped"] > 0) | ~(
@@ -7483,18 +7561,21 @@ class StackDevice(StaticMultiMaterialObject):
 
         Computes every Yee position's interfaces (no arrays are written) and returns the counts of
         :meth:`write_with_status`: junction voxels, those beyond ``junction_voxels``, corner columns beyond
-        ``corner_columns``, and the closure's largest residual. Use it to check coverage before an
-        optimization, or after one at its final parameters.
+        ``corner_columns``, voxels of corner columns the corner model does not certify, and the closure's
+        largest residual. Use it to check coverage before an optimization, or after one at its final
+        parameters.
         """
         shifts = _YEE_E_SHIFTS if self.yee_staggered else ((0.0, 0.0, 0.0),)
         capacity = self._junction_capacity()
-        out = {"junctions": 0, "junction_overflow": 0, "corner_dropped": 0, "closure_residual": 0.0}
+        out = {"junctions": 0, "junction_overflow": 0, "corner_dropped": 0, "corner_uncertified": 0,
+               "closure_residual": 0.0}
         for shift in shifts:
             g = self._interfaces(params, noise_key, apply_roughness, shift)
             _, status = self._complete_tensor(g, capacity)
             out["junctions"] += int(status["junctions"])
             out["junction_overflow"] += int(status["junction_overflow"])
             out["corner_dropped"] += int(g.corner_dropped)
+            out["corner_uncertified"] += int(g.corner_uncertified)
             out["closure_residual"] = max(out["closure_residual"], float(status["closure_residual"]))
         out["junction_voxels"] = capacity
         return out

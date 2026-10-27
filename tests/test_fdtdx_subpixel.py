@@ -408,3 +408,22 @@ def test_principal_direction_and_junction_weight() -> None:
         small = d + 0.01 * jnp.diag(jnp.asarray([0.0, 1.0, 0.0]))
         omega_small = float(junction_weight(small, 0.001, 0.2)[0])
         assert 0.0 < omega_small < 0.05
+
+
+def test_no_interface_has_finite_zero_derivatives_in_float32() -> None:
+    """A voxel without interfaces (d = 0) gets e_z and omega 0, and the derivatives of its normal, and of a
+    laminate along it, are finite in float32 (the norm of the squared matrix must not vanish in the
+    backward pass: 0 * inf there would make every gradient through a homogeneous voxel NaN)."""
+    eps = jnp.asarray(np.stack([np.eye(3), 12.0 * np.eye(3)]), dtype=jnp.float32)
+    zero = jnp.zeros((3, 3), dtype=jnp.float32)
+    v, value = principal_direction(zero)
+    assert np.allclose(np.asarray(v), [0.0, 0.0, 1.0]) and float(value) == 0.0
+    jac = jax.jacobian(lambda d: junction_weight(d, 0.002, 0.02)[1])(zero)
+    assert np.all(np.isfinite(np.asarray(jac)))
+
+    def loss(d):
+        _, normal = junction_weight(d, 0.002, 0.02)
+        return jnp.sum(laminate(eps, jnp.asarray([1.0, 0.0], dtype=jnp.float32), normal))
+
+    grad = np.asarray(jax.grad(loss)(zero))
+    assert np.all(np.isfinite(grad)) and np.all(grad == 0.0)

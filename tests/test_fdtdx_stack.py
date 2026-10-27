@@ -4029,6 +4029,28 @@ def test_capacity_failures_raise_or_warn() -> None:
     assert bool(jnp.all(jnp.isfinite(out.inv_permittivities)))
 
 
+def test_uncertified_corner_columns_are_reported() -> None:
+    """Two corners closer than the corner model resolves (rectangles half a voxel apart): their columns are
+    painted partly with one half-plane per level. That is reported (interface_status, the write's status, a
+    diagnostic when placed), not a failure; a lone rotated rectangle has none."""
+    two = [_rect(-0.5, -0.3, 0.0137, 0.3), _rect(0.0237, -0.3, 0.5, 0.3)]
+    with pytest.warns(StackDiagnosticWarning, match="not certified"):
+        objects, arrays, params = _placed(
+            _polygons(*two), _core(), CORE_ONLY, (2.2, 1.6, 0.3), (0.0, 0.0), z_center=0.11,
+            averaging="subpixel_full",
+        )
+    d = objects["s"]
+    status = d.interface_status(params["s"])
+    assert status["corner_uncertified"] > 0 and status["junction_overflow"] == 0
+    _, written = d.write_with_status(arrays, params["s"])
+    assert int(written["corner_uncertified"]) == status["corner_uncertified"] and not bool(written["failed"])
+    rect = _rotated(_rect(-0.8, -0.3, 0.8, 0.3), 30.0, np.zeros(2))
+    objects, _, params = _placed(
+        _polygons(rect), _core(), CORE_ONLY, (2.2, 1.6, 0.3), (0.0, 0.0), z_center=0.11, averaging="subpixel_full",
+    )
+    assert objects["s"].interface_status(params["s"])["corner_uncertified"] == 0
+
+
 def test_subpixel_full_needs_nine_components() -> None:
     """Writing "subpixel_full" into 3-component arrays (a device built for "subpixel") is an error that says how to
     build it."""
@@ -4061,35 +4083,42 @@ def test_subpixel_full_couples_z_at_sloped_sidewalls() -> None:
 
 
 def test_subpixel_full_gradients_match_finite_differences() -> None:
-    """Directional derivatives of the written tensor (all nine entries, weighted) in a vertex of an oblique
-    rectangle (moving a corner: junction voxels), its thickness and its sidewall angle match central differences
-    (float32 device; steps in the stable region)."""
-    rect = _rotated(_rect(-0.8, -0.3, 0.8, 0.3), 30.0, np.zeros(2))
+    """Directional derivatives of the written tensor (all nine entries) in a vertex of an oblique rectangle
+    (moving a corner: junction voxels), its thickness and its sidewall angle: the reverse-mode gradient of the
+    entries weighted by their own forward-mode derivative (``|J v|^2``, so no cancellation) matches central
+    differences. The steps are small against the junction weight's transition (a corner entering a voxel
+    reaches the closure within about 0.03 cells) and the geometry is off coincidences with the grid."""
+    rect = _rotated(_rect(-0.8, -0.3, 0.8, 0.3), 30.0, np.asarray([0.0137, -0.0071]))
     objects, arrays, params = _placed(
         _polygons(rect), _core(sidewall_angle=10.0), CORE_ONLY, (2.2, 1.6, 0.3), (0.0, 0.0), z_center=0.11,
         averaging="subpixel_full",
     )
     d = objects["s"]
-    weights = jnp.asarray(np.random.default_rng(0).normal(size=(9, *d.grid_shape)), dtype=jnp.float32)
 
     @jax.jit
-    def loss(p):
-        a = d.write(arrays, p)
-        return jnp.sum(weights * a.inv_permittivities[:, *d.grid_slice])
+    def written(p):
+        return d.write(arrays, p).inv_permittivities[:, *d.grid_slice]
+
+    @jax.jit
+    def loss(p, weights):
+        return jnp.sum(weights * written(p))
 
     p0 = params["s"]
-    g = jax.grad(loss)(p0)
     key = "vertices/WG"
     directions = {
         key: jnp.zeros_like(p0[key]).at[2].set(jnp.asarray([0.6, 0.8])),  # one corner, obliquely
         "thickness/core": jnp.asarray(1.0),
         "sidewall_angle/core": jnp.asarray(1.0),
     }
-    steps = {key: 5e-4, "thickness/core": 5e-4, "sidewall_angle/core": 0.05}
+    steps = {key: 1e-4, "thickness/core": 1e-4, "sidewall_angle/core": 0.01}
     for name, direction in directions.items():
+        tangent = {k: jnp.zeros_like(v) for k, v in p0.items()}
+        tangent[name] = direction
+        weights = jax.jvp(written, (p0,), (tangent,))[1]
+        ad = float(jnp.sum(jax.grad(loss)(p0, weights)[name] * direction))
         h = steps[name]
         plus = {**p0, name: p0[name] + h * direction}
         minus = {**p0, name: p0[name] - h * direction}
-        fd = (float(loss(plus)) - float(loss(minus))) / (2 * h)
-        ad = float(jnp.sum(g[name] * direction))
-        assert abs(ad - fd) <= 0.03 * abs(fd) + 1e-3, (name, ad, fd)
+        fd = (float(loss(plus, weights)) - float(loss(minus, weights))) / (2 * h)
+        assert ad > 0 and abs(ad - float(jnp.sum(weights**2))) <= 1e-3 * ad, (name, ad)  # reverse = forward
+        assert abs(ad - fd) <= 0.02 * abs(fd), (name, ad, fd)

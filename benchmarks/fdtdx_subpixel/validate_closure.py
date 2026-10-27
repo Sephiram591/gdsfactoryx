@@ -44,16 +44,14 @@ def rotated_square(deg: float, half: float) -> list[tuple[float, float]]:
     return [tuple(float(v) for v in r @ np.array(p)) for p in [(-half, -half), (half, -half), (half, half), (-half, half)]]
 
 
-def shifted(polygon, dx: float = 0.0073, dy: float = 0.0041) -> list[tuple[float, float]]:
-    """Moves a polygon off the grid's lines (RES multiples), so its corners lie inside voxels."""
-    return [(x + dx, y + dy) for x, y in polygon]
-
-
 SHAPES = {
-    "L shape": shifted([(-0.5, -0.4), (0.5, -0.4), (0.5, -0.1), (-0.15, -0.1), (-0.15, 0.4), (-0.5, 0.4)]),
-    "rotated square 30": shifted(rotated_square(30.0, 0.3)),
-    "triangle acute": shifted([(-0.5, -0.3), (0.5, -0.3), (-0.1, 0.35)]),
+    "L shape": [(-0.5, -0.4), (0.5, -0.4), (0.5, -0.1), (-0.15, -0.1), (-0.15, 0.4), (-0.5, 0.4)],
+    "rotated square 30": rotated_square(30.0, 0.3),
+    "triangle acute": [(-0.5, -0.3), (0.5, -0.3), (-0.1, 0.35)],
 }
+# the box is built on the polygon's bounding box: shifted against it by a fraction of a cell, so that the
+# bounding box's corners (and the other vertices) lie inside voxels, not on their sides
+SHIFT = (0.0073, 0.0041)
 
 
 def device_junctions(polygon, corner_lines: int, picked=None):
@@ -76,7 +74,8 @@ def device_junctions(polygon, corner_lines: int, picked=None):
                                                 mesh_order=1)})
     d = StackDevice.from_layer_stack(
         c, ls, mats, background="air", name="s", included_layers=["core"],
-        boundary_offset=(0.1, -0.1, 0.1, -0.1, -0.1, 0.1), averaging="subpixel_full", corner_lines=corner_lines,
+        boundary_offset=(0.1 + SHIFT[0], -0.1 + SHIFT[0], 0.1 + SHIFT[1], -0.1 + SHIFT[1], -0.1, 0.1),
+        averaging="subpixel_full", corner_lines=corner_lines,
         diagnostics=False,
     )
     config = fdtdx.SimulationConfig(time=1e-15, grid=fdtdx.core.grid.UniformGrid(spacing=RES * 1e-6),

@@ -31,6 +31,9 @@ Array = jax.Array
 
 # full float32 precision in contractions (GPUs default to TF32 for them: 10 mantissa bits)
 _HIGHEST = jax.lax.Precision.HIGHEST
+# size of an interface direction tensor (its largest entry, its trace) below which it has no direction (a
+# full face weighs ~1); its square stays a normal float32, which the derivatives of ratios with it need
+_NO_DIRECTION = 1e-15
 
 #: largest |eps - eps^T| accepted, relative to the largest |eps| entry
 SYMMETRY_RTOL = 1e-6
@@ -406,15 +409,19 @@ def principal_direction(d: Array, squarings: int = 4) -> tuple[Array, Array]:
         squarings: number of squarings.
 
     Returns:
-        direction: (..., 3) unit vector (sign arbitrary); e_z where d = 0.
+        direction: (..., 3) unit vector (sign arbitrary); e_z where d vanishes (entries below 1e-15).
         value: (...,) its Rayleigh quotient.
     """
     scale = jnp.max(jnp.abs(d), axis=(-2, -1), keepdims=True)
-    ok = scale > 0
-    p = d / jnp.where(ok, scale, 1.0)
+    ok = scale > _NO_DIRECTION
+    # The direction does not depend on d's scale (it is homogeneous of degree 0), so the normalizations
+    # carry no derivative: differentiating them would only add terms that cancel, through d / m^2, whose
+    # m^2 underflows in float32 for small d and makes 0 * inf = NaN. Where d is (numerically) zero the
+    # identity is squared instead. For a symmetric p with largest entry 1, p p has a diagonal entry >= 1.
+    p = jnp.where(ok, d / jax.lax.stop_gradient(jnp.where(ok, scale, 1.0)), jnp.eye(3, dtype=d.dtype))
     for _ in range(squarings):
         p = jnp.matmul(p, p, precision=_HIGHEST)
-        p = p / jnp.maximum(jnp.max(jnp.abs(p), axis=(-2, -1), keepdims=True), jnp.finfo(d.dtype).tiny)
+        p = p / jax.lax.stop_gradient(jnp.max(jnp.abs(p), axis=(-2, -1), keepdims=True))
     norms = jnp.sum(p * p, axis=-2)  # (..., 3) squared column norms
     column = jnp.argmax(jax.lax.stop_gradient(norms), axis=-1)
     v = jnp.take_along_axis(p, column[..., None, None], axis=-1)[..., 0]
@@ -447,7 +454,7 @@ def junction_weight(d: Array, low: float, high: float) -> tuple[Array, Array]:
     """
     normal, value = principal_direction(d)
     trace = jnp.trace(d, axis1=-2, axis2=-1)
-    some = trace > 0
+    some = trace > _NO_DIRECTION
     r = jnp.where(some, 1.0 - value / jnp.where(some, trace, 1.0), 0.0)
     x = jnp.clip((r - low) / (high - low), 0.0, 1.0)
     omega = x * x * (3.0 - 2.0 * x)

@@ -298,7 +298,7 @@ third of the test time in that run), and no suite was run with a feature off.
 |---|---|---|
 | `corner_lines=2` (0: off) | exact fill at polygon corners and edge crossings: corner voxels off by up to 0.25 (convex) and 0.31 (rotated polygons) without, 1e-6 with | 5.7 min (`corner_pass` 176 s, `corner_inputs` 123 s, `corner_budget` 38 s, `corner_plan` 6 s) |
 | `averaging="subpixel"` (`"inverse"`) | Kottke averaging (the diagonal of the averaged tensor): second-order accurate at interfaces along the grid; first order at oblique ones (see below) | part of `composite` painting, at most 4.2 min with everything else painted there |
-| `averaging="subpixel_full"` (opt-in) | the full averaged tensor (its off-diagonal entries too): oblique interfaces converge like grid-aligned ones | 9-component arrays: fdtdx's fully anisotropic update in the whole simulation, ~4.9x per time step and ~1.8x GPU memory on a 33M-cell device |
+| `averaging="subpixel_full"` (opt-in) | complete tensors: anisotropic materials (full tensors), Kottke's anisotropic laminate at planar interfaces in every entry, a junction closure at corners (see below) | 9-component arrays: fdtdx's fully anisotropic update in the whole simulation, ~4.9x per time step and ~1.8x GPU memory on a 33M-cell device; the closure: COST_TODO |
 | `subpixel_normal="voxel"` (`"gradient"`) | the normal of each voxel's own model: exact at slanted walls (0.01 deg), where finite differences of the mean eps are 8-33 deg off | part of the same painting; per call about 1.7x write forward and 3.0x gradient over `"gradient"` (0.095 s / 0.59 s against 0.056 s / 0.20 s on the 130 x 90 x 45 test device) |
 | `yee_staggered=True` | each E component's own Yee position (first-order error without) | 1.1 min (`write.Ey`, `write.Ez`) plus the corner budget's extra grids |
 | `xy_subsamples=1` | (s > 1 refines tips and dense curves; cost ~ s^2) | 1.4 min for the tests that use 2 |
@@ -656,30 +656,74 @@ when it detects that combination.
   GPU, after compiling for about 40 s and 80 s.
   `averaging="inverse"` is fdtdx's inverse-permittivity average; it and
   `material_weights` cost nothing extra. Conductivity is averaged linearly.
-- **Full tensor (`averaging="subpixel_full"`).** `"subpixel"` writes only the
-  diagonal of the averaged inverse permittivity
-  `K = I/<ε> + (<1/ε> - 1/<ε>) n nᵀ`; where the normal is oblique to the grid,
-  the off-diagonal entries are dropped and the interface correction is only
-  first order. `"subpixel_full"` writes all nine entries into 9-component
-  arrays: row c at E_c's Yee position (fdtdx applies it there to the other
-  components averaged onto that position), from the same voxel model (the
-  signed products of the interface flux's components, the tilted vertical
-  profile, and signed central differences of the mean ε for the unexplained
-  variance). The diagonal is identical to `"subpixel"`. The entries coupling
-  z come from sloped sidewalls and rough surfaces. A 2D test (a periodic
-  grating of ε = 12 rectangles rotated 30° and 45°, in-plane E, zero-order
-  transmission t, |t| ≈ 0.6) shows the difference: at 20 nm the error of t is
-  about 5e-3 (30°) and 3e-2 (45°) with the full tensor, 0.25 and 0.36 with the
-  diagonal; at 5 nm 1e-3 and 4e-3 against 0.067 and 0.076. Both converge to
-  the same limit (the diagonal at first order). At 30° the full tensor and
-  meep's subpixel smoothing extrapolate to the same t (within 1.2e-4), and
-  the full tensor is closer than meep at every resolution. Out-of-plane E and
-  grid-aligned walls are unaffected. fdtdx's fully anisotropic update stayed
-  stable over 3e5 time steps at contrasts 12 and 40. The cost is the whole
-  simulation's: every voxel takes the 3 x 3 update (measured: 4.9x per time
-  step and 1.8x the GPU memory on the elevator coupler's 33M cells), so it is
-  opt-in. With 9-component arrays from another object, `"subpixel"` and
-  `"inverse"` write their diagonal and zero off-diagonal entries.
+- **Full tensors (`averaging="subpixel_full"`).** Materials may be
+  anisotropic: `fdtdx.Material(permittivity=...)` as a scalar, a diagonal
+  3-tuple, a nested 3 x 3 tuple or a row-major 9-tuple; it must be real,
+  finite, symmetric and positive definite (checked, relative to the tensor's
+  scale, when the device is built and placed). A crystal with principal
+  values `e1, e2, e3` along the columns of a rotation `R` is
+  `R @ diag(e1, e2, e3) @ R.T`. `"subpixel"` and `"inverse"` write each E
+  component's diagonal entry only, so they reject materials with off-diagonal
+  entries rather than drop them. `"subpixel_full"` writes, for every E
+  component c at its own Yee position, row c of the inverse of that
+  position's complete effective tensor (all three entries; fdtdx applies
+  them to the other components averaged onto that position), by what the
+  voxel holds there:
+  - one material: the exact inverse of its tensor;
+  - interfaces along one normal n (a wall, a sloped wall, a film of any
+    thickness, parallel multilayers, a rough surface): Kottke's anisotropic
+    laminate along n, `eps_eff = Q tau^-1(sum_m f_m tau(Q^T eps_m Q)) Q^T`,
+    exact for parallel layers of any number and order (with scalar
+    materials it is the usual `<1/eps> n n^T + (I - n n^T) / <eps>` for the
+    inverse);
+  - a junction (a corner, a wall meeting a surface, three materials): the
+    closure. The voxel's own model is cut into 4 x 4 x 4 sub-cells
+    (`junction_cells`), each the laminate of its own faces, and homogenized
+    by a periodic cell problem (trilinear finite elements, one Cholesky
+    factorization for the three fields, the energy of the computed fields).
+
+  A voxel is a junction where its interface direction tensor
+  `D = sum_faces (area contrast^2 fade) N N^T` spreads off its leading
+  direction: `r = 1 - lambda_1 / tr D`; the closure is blended in smoothly
+  between r = 0.002 and 0.02, so a corner entering a voxel changes the
+  tensor continuously. Every written tensor is symmetric positive definite
+  and between the harmonic and arithmetic means of the voxel's materials
+  (the sub-cells add up to the voxel's fractions exactly, also in corner
+  columns), and the closure's derivative is the solve's implicit one. The
+  blend reaches the closure within about 0.03 cells of a corner entering a
+  voxel, so derivatives with respect to the geometry are continuous but
+  change quickly there: check them with finite-difference steps well below
+  that (1e-4 um at 20 nm cells, not 5e-4).
+  Against an independent finite-element reference of the exact geometry
+  (the voxel embedded in a 5 x 5 patch, on junction voxels of an L shape, a
+  rotated square and an acute triangle), the closure's tensor is off by 5 %
+  (median; 15 % at the 90th percentile), where the laminate along the
+  faces' leading direction is off by 31 % (42 %); most of the closure's
+  error is its periodic boundary condition (the exact periodic tensor is
+  itself 5.6 % from the embedded one), its sub-cells add 2.2 %. Smooth
+  interfaces (planes, films, gentle curves) are second-order accurate; at
+  sharp corners the field is singular and no voxel tensor makes them so.
+
+  Junction voxels take slots of a static capacity per Yee position,
+  `junction_voxels`, sized when the device is placed (1.5 x the junctions at
+  the initial parameters, plus 64). Junctions beyond it, corner columns
+  beyond `corner_columns` and a closure residual above 1e-4 are coverage
+  failures, never a silent one-plane fallback: with
+  `interface_failure="raise"` (default) `write` raises where the values are
+  concrete and writes NaN under tracing; with `"warn"` it warns and keeps the
+  laminate or half-plane result there. Voxels of corner columns whose corner
+  model is not certified (more edges or tips than it resolves) are painted
+  partly with one half-plane per level; they are counted, not failed, and a
+  placed device with `diagnostics` warns about them (and about
+  `corner_lines=0`, which paints every corner that way). `apply_stack`
+  returns the counts in `info["stack_status"][name]`, and
+  `device.interface_status(params)` computes them without writing (check
+  them at the end of an optimization). The averaging applies to
+  `Material.permittivity` (eps_inf); conductivity and pole strengths are
+  mixed linearly, as with the other averagings. The cost is the whole
+  simulation's: every voxel takes fdtdx's 3 x 3 update (measured with the
+  earlier scalar version: 4.9x per time step and 1.8x the GPU memory on the
+  elevator coupler's 33M cells), so it is opt-in.
 
 ### Dispersive materials
 

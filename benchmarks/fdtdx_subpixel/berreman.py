@@ -90,14 +90,14 @@ def self_check() -> None:
     rot = np.array([[np.cos(phi), -np.sin(phi), 0], [np.sin(phi), np.cos(phi), 0], [0, 0, 1]])
     eps = rot @ np.diag([2.25, 4.0, 3.0]) @ rot.T
     r, t = jones([(eps, d)], n1, n1, lam)
-    ra, ta = _fabry_perot(n1, 1.5, n1, d, lam)
-    rb, tb = _fabry_perot(n1, 2.0, n1, d, lam)
+    _, ta = _fabry_perot(n1, 1.5, n1, d, lam)
+    _, tb = _fabry_perot(n1, 2.0, n1, d, lam)
     want = rot[:2, :2] @ np.diag([ta, tb]) @ rot[:2, :2].T
     assert np.abs(t - want).max() < 1e-12
     # z coupling (eps_xz) changes the effective e_xx only: compare with the reduced tensor
     eps_z = np.array([[4.0, 0.0, 0.5], [0.0, 3.0, 0.0], [0.5, 0.0, 2.0]])
-    r1, t1 = jones([(eps_z, d)], n1, n1, lam)
-    r2, t2 = jones([(np.diag([4.0 - 0.25 / 2.0, 3.0, 2.0]), d)], n1, n1, lam)
+    _, t1 = jones([(eps_z, d)], n1, n1, lam)
+    _, t2 = jones([(np.diag([4.0 - 0.25 / 2.0, 3.0, 2.0]), d)], n1, n1, lam)
     assert np.abs(t1 - t2).max() < 1e-12
     print("berreman self-check passed")
 

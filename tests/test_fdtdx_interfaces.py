@@ -20,9 +20,11 @@ from shapely.geometry import Polygon, box  # noqa: E402
 from gdsfactory.fdtdx_stack import (  # noqa: E402
     _interface_parts,
     _line_faces,
+    _mean_shift,
     _paint_levels,
     _paint_moments,
     _split_layer,
+    _straight_seams,
 )
 from gdsfactory.fdtdx_subpixel import from_six, junction_weight  # noqa: E402
 
@@ -173,12 +175,58 @@ def test_direction_tensor_is_rank_one_for_parallel_faces_and_spread_for_a_corner
         nrm = [math.cos(a), math.sin(a)]
         anti = [-math.cos(a), -math.sin(a)]
         # oxide on n.p > 0.1 first, then Si on n.p > -0.05: a Si film -0.05 < n.p < 0.1 between oxide and air
-        split, (visible, tensor, moments, _, _) = _parts([(anti, 0.1), (anti, -0.05)], [1, 0])
+        split, (visible, tensor, _, _, _) = _parts([(anti, 0.1), (anti, -0.05)], [1, 0])
         assert float(jnp.sum(split[2][:, None] * visible, axis=0)[1]) == pytest.approx(0.15, abs=0.02)
         d = jnp.sum(split[2][:, None] * tensor, axis=0)
         omega, normal = junction_weight(from_six(d), 0.002, 0.02)
         assert float(omega) == 0.0 and abs(abs(float(normal[0]) * nrm[0] + float(normal[1]) * nrm[1]) - 1) < 1e-12
         assert float(jnp.trace(from_six(d))) > 0
-        split, (visible, tensor, moments, _, _) = _parts([([1.0, 0.0], 0.1), ([0.0, 1.0], 0.1)], [0, 0])
+        split, (_, tensor, _, _, _) = _parts([([1.0, 0.0], 0.1), ([0.0, 1.0], 0.1)], [0, 0])
         d = jnp.sum(split[2][:, None] * tensor, axis=0)
         assert float(junction_weight(from_six(d), 0.002, 0.02)[0]) == 1.0
+
+
+def test_mean_shift_matches_the_target_with_its_implicit_derivative() -> None:
+    """One shift for all values, each clipped to [lower, 1]: their mean is the target, also where some clip,
+    and the shift's derivative is the implicit one (central differences of the bisection)."""
+    rng = np.random.default_rng(3)
+    with enable_x64():
+        raw = jnp.asarray(rng.uniform(-0.2, 1.2, size=(5, 16)))
+        lower = jnp.asarray(np.minimum(rng.uniform(0.0, 0.3, size=(5, 16)), 1.0))
+        target = jnp.asarray(rng.uniform(0.35, 0.8, size=(5, 1)))
+        s = _mean_shift(raw, lower, target, iterations=60)
+        mean = jnp.mean(jnp.clip(raw + s, lower, 1.0), axis=-1, keepdims=True)
+        assert float(jnp.abs(mean - target).max()) < 1e-12
+
+        def shift_of(t):
+            return jnp.sum(_mean_shift(raw + t * jnp.sin(raw), lower, target + 0.3 * t, iterations=60))
+
+        grad = float(jax.grad(shift_of)(0.0))
+        h = 1e-6
+        fd = float((shift_of(h) - shift_of(-h)) / (2 * h))
+        assert abs(grad - fd) < 1e-6 * max(1.0, abs(fd))
+
+
+def test_sub_square_seams_add_up_to_the_voxel() -> None:
+    """Sub-squares given the voxel's seams and unions: their fractions average to the voxel's exactly, also
+    where their own seams would clip (a corner model E near 1 with a positive seam), and stay in [0, 1]."""
+    rng = np.random.default_rng(4)
+    q, k = 16, 3
+    with enable_x64():
+        def fractions(size):
+            x = rng.uniform(0.0, 1.0, size=(*size, k + 1)) ** 3
+            return x / x.sum(axis=-1, keepdims=True)
+
+        e = fractions((2, 1, q))
+        t = np.clip(e + rng.normal(0.0, 0.02, size=e.shape), 0.0, None)
+        t /= t.sum(axis=-1, keepdims=True)
+        tg = np.clip(e + rng.normal(0.0, 0.02, size=e.shape), 0.0, None)
+        tg /= tg.sum(axis=-1, keepdims=True)
+        voxel, straight = _straight_seams(*(jnp.asarray(x.mean(axis=2)) for x in (e, t, tg)), (False,) * k)
+        unions = jnp.cumsum(voxel[..., :-1], axis=-1)[:, :, None, :]
+        subs, _ = _straight_seams(
+            *(jnp.asarray(x) for x in (e, t, tg)), (False,) * k, straight[:, :, None], unions
+        )
+        assert float(jnp.abs(subs.mean(axis=2) - voxel).max()) < 1e-6
+        assert float(subs.min()) > -1e-9 and float(subs.max()) < 1 + 1e-9
+        assert float(jnp.abs(subs.sum(axis=-1) - 1).max()) < 1e-12
