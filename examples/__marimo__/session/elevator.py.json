@@ -16,14 +16,7 @@
           }
         }
       ],
-      "console": [
-        {
-          "type": "stream",
-          "name": "stdout",
-          "text": "14:56:57 EDT WARNING: Using canonical configuration directory at                \n             '/home/floresh2/.config/tidy3d'. Found legacy directory at         \n             '/home/floresh2/.tidy3d', which will be ignored. Tidy3D            \n             configuration now uses '/home/floresh2/.config/tidy3d/config.toml'.\n",
-          "mimetype": "text/plain"
-        }
-      ]
+      "console": []
     },
     {
       "id": "MJUe",
