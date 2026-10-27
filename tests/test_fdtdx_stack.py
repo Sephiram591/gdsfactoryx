@@ -3954,11 +3954,14 @@ def test_films_thinner_than_a_voxel_are_laminates_of_their_three_materials() -> 
         np.testing.assert_allclose(full[list(ROW[c]), nx // 2, ny // 2, k], want, atol=3e-6)
 
 
-def test_junction_voxels_are_symmetric_positive_definite_and_within_the_wiener_bounds() -> None:
+@pytest.mark.parametrize("xy_subsamples", [1, 2])
+def test_junction_voxels_are_symmetric_positive_definite_and_within_the_wiener_bounds(xy_subsamples: int) -> None:
     """On a device with corners of every kind (derived etch, slab, sloped walls), every voxel's effective tensor at
     every Yee position is symmetric positive definite and between the harmonic and arithmetic means of its
-    materials (in the matrix sense); the junction voxels are the closure's, with a converged solve."""
-    d = build(averaging="subpixel_full")
+    materials (in the matrix sense); the junction voxels are the closure's, with a converged solve. Also with two
+    sample squares per voxel, whose junction sub-cells are painted with half-planes and made to hold the
+    voxel's materials."""
+    d = build(averaging="subpixel_full", xy_subsamples=xy_subsamples)
     objects, arrays, params = place(d)
     d = objects["stack"]
     from gdsfactory.fdtdx_subpixel import from_six

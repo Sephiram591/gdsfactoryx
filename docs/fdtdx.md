@@ -694,7 +694,10 @@ when it detects that combination.
   tensor continuously. Every written tensor is symmetric positive definite
   and between the harmonic and arithmetic means of the voxel's materials
   (the sub-cells add up to the voxel's fractions exactly, also in corner
-  columns), and the closure's derivative is the solve's implicit one. The
+  columns; with `xy_subsamples` > 1 they are painted with each sample's
+  half-planes and then made to hold the voxel's materials, which blend the
+  corner model in), and the closure's derivative is the solve's implicit
+  one. The
   blend reaches the closure within about 0.03 cells of a corner entering a
   voxel, so derivatives with respect to the geometry are continuous but
   change quickly there: check them with finite-difference steps well below

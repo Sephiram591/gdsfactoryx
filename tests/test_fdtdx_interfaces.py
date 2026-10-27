@@ -246,3 +246,26 @@ def test_a_surface_on_a_voxel_face_moves_the_sub_intervals_consistently() -> Non
             d_total, d_level = jax.jacobian(lambda h, k=k: coverage(h, k))(13.0)
             assert float(d_total) == 0.0
             assert float(d_level) == pytest.approx(0.5)
+
+
+def test_matched_sub_cells_hold_the_voxels_materials() -> None:
+    """Sub-cell fractions (two levels of one material, a third, the background) made to average to a voxel's
+    material fractions: exact means per material, still fractions (in [0, 1], summing to one), homogeneous
+    sub-cells of the leading level untouched where nothing is missing, and no change where they already agree."""
+    from gdsfactory.fdtdx_stack import _match_fractions
+
+    rng = np.random.default_rng(5)
+    level_material = (2, 2, 0, 1)  # levels 0 and 1 are material 2; the background is material 1
+    with enable_x64():
+        x = rng.uniform(0.0, 1.0, size=(3, 64, 4)) ** 4
+        f = jnp.asarray(x / x.sum(axis=-1, keepdims=True))
+        onehot = np.zeros((4, 3))
+        onehot[np.arange(4), level_material] = 1
+        own = np.asarray(f.mean(axis=1)) @ onehot
+        assert float(jnp.abs(_match_fractions(f, jnp.asarray(own), level_material) - f).max()) < 1e-9
+        target = np.clip(own + rng.normal(0.0, 0.03, size=own.shape), 0.01, None)
+        target /= target.sum(axis=-1, keepdims=True)
+        g = _match_fractions(f, jnp.asarray(target), level_material)
+        assert np.abs(np.asarray(g.mean(axis=1)) @ onehot - target).max() < 1e-9
+        assert float(g.min()) > -1e-12 and float(g.max()) < 1 + 1e-12
+        assert float(jnp.abs(g.sum(axis=-1) - 1).max()) < 1e-12

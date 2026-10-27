@@ -2480,6 +2480,8 @@ def _junction_cells(
     point_slopes: Array | None = None,
     corner: "_CornerInputs | None" = None,
     planes: tuple[Array, Array] | None = None,
+    target: Array | None = None,
+    level_material: Sequence[int] = (),
 ) -> tuple[Array, Array]:
     """The sub-cells of junction voxels for their closure: the voxel's own geometry, cell by cell.
 
@@ -2516,6 +2518,11 @@ def _junction_cells(
             column is not a corner column, which keeps its half-planes), or None. One sample square.
         planes: with ``corner``, (N, K) offsets and (N, K, 2) normals of the voxels' half-planes at their
             centers (sides of the square).
+        target: (N, M) the voxels' material fractions, or None. Given, the sub-cells' fractions are made to
+            add up to them exactly (:func:`_match_fractions`): with several sample squares per voxel the
+            sub-squares are painted with their samples' half-planes, while the voxel's fractions blend the
+            corner model in.
+        level_material: (K + 1,) with ``target``, the material of every level, then the background's.
 
     Returns:
         fractions: (N, n, n, m, K + 1) every sub-cell's fractions of the levels, then the background.
@@ -2586,6 +2593,9 @@ def _junction_cells(
     hi = jnp.minimum(bp[:, 1:, None], z0[:, None, :] + 1.0 / nzs)
     overlap = jnp.maximum(hi - lo, 0.0) * nzs  # (N, S, m): share of the sub-cell's height
     fractions = jnp.einsum("nsm,nqsl->nqml", overlap, visible, precision=_HIGHEST)  # (N, Q, m, K + 1)
+    if target is not None:
+        fractions = _match_fractions(fractions.reshape(fractions.shape[0], -1, fractions.shape[-1]), target,
+                                     level_material).reshape(fractions.shape)
     lateral_d = jnp.einsum("nsm,nqsv->nqmv", overlap, tensor, precision=_HIGHEST) / nzs
     # each sub-cell's own vertical variance: its sub-intervals' moments weighted by their share of it
     mean = jnp.einsum("nsm,nqsvc->nqmvc", overlap, moments, precision=_HIGHEST)
@@ -2614,6 +2624,49 @@ def _junction_cells(
     coefficients = laminate(level_eps, fractions, normal)  # (N, n n, m, 3, 3)
     shape = (offsets.shape[0], nxs, nys, nzs)
     return fractions.reshape(*shape, -1), coefficients.reshape(*shape, 3, 3)
+
+
+def _match_fractions(fractions: Array, target: Array, level_material: Sequence[int]) -> Array:
+    """Sub-cell fractions of the levels made to average to the voxel's material fractions exactly.
+
+    Each material's fraction of the voxel is split among its levels by their mean over the sub-cells (all to
+    its first level where they hold none of it); then, level by level in priority order, every sub-cell's
+    union of the levels up to it gets one shift, clipped to [its union below, 1] (:func:`_mean_shift`), so
+    that the unions' mean is the target's: the sub-cells stay fractions, keep their arrangement, and hold the
+    voxel's materials. Where they already add up to the voxel (one sample square per voxel) the shifts vanish.
+
+    Args:
+        fractions: (N, C, K + 1) the C sub-cells' fractions of the levels, then the background.
+        target: (N, M) the voxels' material fractions.
+        level_material: (K + 1,) static material of every level, then the background's.
+
+    Returns:
+        (N, C, K + 1) the matched fractions.
+    """
+    num = fractions.shape[-1]
+    onehot = np.zeros((num, target.shape[-1]))
+    onehot[np.arange(num), np.asarray(level_material)] = 1.0
+    first = np.zeros(num)
+    for m in set(level_material):
+        first[list(level_material).index(m)] = 1.0
+    onehot_j = jnp.asarray(onehot, dtype=fractions.dtype)
+    mean = jnp.mean(fractions, axis=1)  # (N, K + 1)
+    of_material = (mean @ onehot_j) @ onehot_j.T  # each level's material's mean
+    share = jnp.where(of_material > 0, mean / jnp.where(of_material > 0, of_material, 1.0), jnp.asarray(first, mean.dtype))
+    goal = (target @ onehot_j.T) * share  # (N, K + 1) the levels' targets
+    out = []
+    below = jnp.zeros_like(fractions[..., 0])
+    union, union_goal = 0.0, 0.0
+    for j in range(num - 1):
+        union = union + fractions[..., j]
+        union_goal = union_goal + goal[:, j : j + 1]
+        c = union + _mean_shift(union, below, union_goal)
+        c = jnp.where(c > 1.0, 1.0, c)
+        c = jnp.where(c < below, below, c)
+        out.append(c - below)
+        below = c
+    out.append(1.0 - below)
+    return jnp.stack(out, axis=-1)
 
 
 def _junction_tensor(*args: Any, **kwargs: Any) -> tuple[Array, Array]:
@@ -2679,6 +2732,8 @@ class _JunctionInputs(NamedTuple):
     cell: float
     #: the corner columns of the grid (one sample square per voxel only), or None
     corner: "_CornerInputs | None" = None
+    #: (K + 1,) the material (index in the grid's material names) of every level, then the background's
+    level_material: tuple[int, ...] = ()
 
 
 class _Interfaces(NamedTuple):
@@ -6957,6 +7012,7 @@ class StackDevice(StaticMultiMaterialObject):
             contrast2=contrast2,
             cell=cell,
             corner=corner if n_sub == 1 else None,
+            level_material=tuple(names.index(m) for m in (*level_materials, self.background)),
         )
         return _Interfaces(
             names=names, weights=w.astype(dtype), direction=direction, voxel=voxel, corner_dropped=dropped,
@@ -7020,6 +7076,8 @@ class StackDevice(StaticMultiMaterialObject):
             "lows": gather(v.lows),
             "highs": gather(v.highs),
             "layer": layer,
+            # the voxels' material fractions, which their sub-cells are made to add up to
+            "target": jnp.moveaxis(g.weights, 0, -1).reshape(-1, g.weights.shape[0])[voxels],
         }
         if v.point_slopes is not None:
             inputs["point_slopes"] = gather(v.point_slopes)
@@ -7045,7 +7103,7 @@ class StackDevice(StaticMultiMaterialObject):
             return _junction_cells(
                 args["offsets"], args["normals"], centers, v.is_fill, args["lows"], args["highs"], args["layer"],
                 v.lateral, sub, v.knots, v.cell, v.vectors, v.contrast2, v.level_eps, cells,
-                args.get("point_slopes"), corner_j, args.get("planes"),
+                args.get("point_slopes"), corner_j, args.get("planes"), args["target"], v.level_material,
             )
 
         return inputs, cells_of
