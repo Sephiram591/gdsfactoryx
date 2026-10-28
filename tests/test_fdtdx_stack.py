@@ -3789,88 +3789,269 @@ def test_mode_objects_on_a_stack_see_the_stack_permittivity() -> None:
     np.testing.assert_array_equal(np.asarray(src._inv_permittivity), np.asarray(arrays4.inv_permittivities[:, *src.grid_slice]))
 
 
-# ---------------------------------------------------------------- averaging="subpixel_full" (9-component tensor)
+# ---------------------------------------------------------------- averaging="subpixel_full" (complete tensors)
 
 
-def _full_and_diagonal(polygon, degrees=0.0, **level):
-    """inverse permittivity of a rectangle-like polygon in the box, written with "subpixel" and "subpixel_full"."""
-    out = {}
-    for averaging in ("subpixel", "subpixel_full"):
-        objects, arrays, params = _placed(
-            _polygons(polygon), _core(**level), CORE_ONLY, (2.2, 1.6, 0.3), (0.0, 0.0), z_center=0.11,
-            averaging=averaging,
+def _rotation_z(degrees: float) -> np.ndarray:
+    a = math.radians(degrees)
+    return np.array([[math.cos(a), -math.sin(a), 0.0], [math.sin(a), math.cos(a), 0.0], [0.0, 0.0, 1.0]])
+
+
+def _tensor_material(eps: np.ndarray) -> fdtdx.Material:
+    return fdtdx.Material(permittivity=tuple(tuple(float(x) for x in row) for row in eps))
+
+
+# anisotropic test materials: a rotated uniaxial crystal (full tensor) and a diagonal one
+ANISO = _rotation_z(25.0) @ np.diag([9.0, 12.0, 14.0]) @ _rotation_z(25.0).T
+ANISO[0, 2] = ANISO[2, 0] = 0.8  # also coupling z
+DIAG = np.diag([2.1, 2.6, 3.2])
+ANISO_MATERIALS = {"air": _tensor_material(DIAG), "si": _tensor_material(ANISO)}
+
+
+def _full(polygon, materials=CORE_ONLY, size=(2.2, 1.6, 0.3), z_center=0.11, **kwargs):
+    """A placed "subpixel_full" device of a polygon on the core: device, written box (9, nx, ny, nz), arrays, params."""
+    objects, arrays, params = _placed(
+        _polygons(polygon), _core(), materials, size, (0.0, 0.0), z_center=z_center, averaging="subpixel_full", **kwargs
+    )
+    written = np.asarray(_box(_apply(objects, arrays, params), objects["s"], "inv_permittivities"))
+    return objects["s"], written, arrays, params
+
+
+def _laminate64(eps: np.ndarray, f: np.ndarray, n: np.ndarray) -> np.ndarray:
+    from gdsfactory.fdtdx_subpixel import laminate
+
+    with jax.enable_x64(True):
+        return np.asarray(laminate(np.asarray(eps), jnp.asarray(f, jnp.float64), jnp.asarray(n, jnp.float64)))
+
+
+def _yee_point(d, c, i, j, k):
+    """Stack point (um) of E_c of voxel (i, j, k)."""
+    nx, ny, nz = d.grid_shape
+    sx, sy, sz = _YEE_E_SHIFTS[c]
+    return (
+        d.center[0] + (i + 0.5 - nx / 2 + sx) * RES,
+        d.center[1] + (j + 0.5 - ny / 2 + sy) * RES,
+        d.z_center + (k + 0.5 - nz / 2 + sz) * RES,
+    )
+
+
+ROW = ((0, 1, 2), (3, 4, 5), (6, 7, 8))  # fdtdx's row-major entries of each E component's row
+
+
+def test_homogeneous_anisotropic_box_writes_fdtdxs_own_inverse() -> None:
+    """A box of one fully anisotropic material (rotated principal axes, off-diagonal entries coupling z) gets, at
+    every Yee position, the rows of the material's inverse: fdtdx's own (its volume of the same material, inverted
+    in float32 by fdtdx) and numpy's float64 inverse, in fdtdx's row-major order."""
+    mats = {"air": _tensor_material(ANISO), "si": _tensor_material(ANISO)}
+    objects, arrays, params = _placed(
+        _polygons(_rect(-0.5, -0.3, 0.5, 0.3)), _core(), mats, (1.2, 0.8, 0.3), (0.0, 0.0), z_center=0.11,
+        averaging="subpixel_full",
+    )
+    d = objects["s"]
+    assert arrays.inv_permittivities.shape[0] == 9
+    written = np.asarray(_box(_apply(objects, arrays, params), d, "inv_permittivities"))
+    want = np.linalg.inv(ANISO).reshape(9)
+    np.testing.assert_allclose(written.reshape(9, -1).T, np.broadcast_to(want, (written[0].size, 9)), rtol=2e-6, atol=1e-7)
+    # fdtdx's own inverse of the same material: place_objects painted the box with it (its dominant material)
+    fdtdx_inv = np.asarray(_box(arrays, d, "inv_permittivities"))
+    np.testing.assert_allclose(written, fdtdx_inv, rtol=2e-6, atol=1e-7)
+
+
+def test_material_contract_rejects_what_it_cannot_write() -> None:
+    """Off-diagonal tensors need "subpixel_full" (the other averagings would drop them); non-symmetric, indefinite
+    and non-finite tensors, and the reserved placeholder name, are rejected when the device is built."""
+    poly = _polygons(_rect(-0.5, -0.3, 0.5, 0.3))
+    with pytest.raises(ValueError, match="subpixel_full"):
+        StackDevice.from_layer_stack(poly, _core(), ANISO_MATERIALS, background="air", included_layers=["core"])
+    bad = np.diag([2.0, 3.0, 4.0])
+    bad[0, 1] = 0.5
+    with pytest.raises(ValueError, match="non-symmetric"):
+        StackDevice.from_layer_stack(
+            poly, _core(), {"air": fdtdx.Material(), "si": fdtdx.Material(permittivity=tuple(map(tuple, bad)))},
+            background="air", included_layers=["core"], averaging="subpixel_full",
         )
-        out[averaging] = np.asarray(_box(_apply(objects, arrays, params), objects["s"], "inv_permittivities"))
-    return objects["s"], out["subpixel"], out["subpixel_full"]
+    with pytest.raises(ValueError, match="reserved"):
+        StackDevice.from_layer_stack(
+            poly, _core(), {**CORE_ONLY, "__diagonal_anisotropy__": fdtdx.Material()}, background="air",
+            included_layers=["core"],
+        )
+    # diagonal anisotropy stays allowed with "subpixel" (each E component takes its diagonal entry)
+    StackDevice.from_layer_stack(
+        poly, _core(), {"air": fdtdx.Material(), "si": fdtdx.Material(permittivity=(11.0, 12.0, 13.0))},
+        background="air", included_layers=["core"],
+    )
 
 
-@pytest.mark.parametrize("degrees", [0.0, 30.0])
-def test_subpixel_full_keeps_the_diagonal(degrees: float) -> None:
-    """averaging="subpixel_full" writes 9 components whose diagonal is exactly the "subpixel" result. At vertical
-    walls the entries coupling z vanish; the xy entry vanishes along walls on the grid (away from corners, where a
-    voxel holding both edges gets the mixed normal tensor of both) and not at oblique ones."""
-    rect = _rotated(_rect(-0.8, -0.3, 0.8, 0.3), degrees, np.zeros(2))
-    d, diag, full = _full_and_diagonal(rect)
-    assert full.shape[0] == 9 and diag.shape[0] == 3
-    np.testing.assert_array_equal(full[[0, 4, 8]], diag)
-    assert float(np.abs(full[[2, 5, 6, 7]]).max()) < 1e-5
-    xy = np.abs(full[[1, 3]])
-    if degrees == 0.0:
-        i0, i1 = cell(d, -0.6, 0, 0)[0], cell(d, 0.6, 0, 0)[0]
-        j0, j1 = cell(d, 0, -0.15, 0)[1], cell(d, 0, 0.15, 0)[1]
-        assert float(xy[:, i0:i1].max()) < 1e-5 and float(xy[:, :, j0:j1].max()) < 1e-5
-    else:
-        assert float(xy.max()) > 0.1
+PLANAR_FULL_TOL = 3e-6  # float32: measured 1.2e-6 on scalar materials
 
 
-PLANAR_FRACTIONS = (0.02, 0.98)  # voxels checked against the planar formula
-PLANAR_TOL = 1e-4  # measured: 2.8e-5 (float32)
-
-
-def test_subpixel_full_matches_the_planar_interface_tensor() -> None:
-    """At an Ex position on a straight wall at 30 degrees, K_xy = (<1/eps> - 1/<eps>) n_x n_y with the exact fill
-    fraction of the voxel square and the wall's normal (Kottke averaging of a planar interface); the diagonal entry
-    K_xx = 1/<eps> + (<1/eps> - 1/<eps>) n_x^2 too."""
+@pytest.mark.parametrize(("materials", "degrees"), [(CORE_ONLY, 30.0), (ANISO_MATERIALS, 30.0), (ANISO_MATERIALS, 0.0)])
+def test_planar_walls_get_kottkes_anisotropic_laminate_in_every_entry(materials, degrees: float) -> None:
+    """At every Yee position on a straight wall (away from corners and from the core's top and bottom), each E
+    component's row is the row of the inverse of Kottke's laminate of the two materials' full tensors along the
+    wall's normal, with the exact fill fraction of the voxel square: all three entries, for isotropic, diagonal
+    and fully anisotropic materials, oblique and on the grid."""
     shapely = pytest.importorskip("shapely")
-    from gdsfactory.fdtdx_stack import _YEE_E_SHIFTS
-
-    th = math.radians(30.0)
-    c, s = math.cos(th), math.sin(th)
-    rect = _rotated(_rect(-0.8, -0.3, 0.8, 0.3), 30.0, np.zeros(2))
-    d, _, full = _full_and_diagonal(rect)
-    # the polygon as drawn (gdsfactory snaps the vertices to its 1 nm grid)
+    rect = _rotated(_rect(-0.8, -0.3, 0.8, 0.3), degrees, np.zeros(2))
+    d, full, _, _ = _full(rect, materials)
     poly = shapely.Polygon(next(iter(_polygons(rect).get_polygons_points().values()))[0])
-    eps = float(np.asarray(CORE_ONLY["si"].permittivity).ravel()[0])
-    nx, ny, _ = d.grid_shape
+    from gdsfactory.fdtdx_subpixel import material_tensor
+
+    eps = np.stack([material_tensor(materials["air"]), material_tensor(materials["si"])])
+    th = math.radians(degrees)
+    c_, s_ = math.cos(th), math.sin(th)
+    nx, ny, nz = d.grid_shape
     k = cell(d, 0, 0, 0.11)[2]
     errors = []
-    for i in range(nx):
-        for j in range(ny):
-            x = d.center[0] + (i + 0.5 - nx / 2 + _YEE_E_SHIFTS[0][0]) * RES
-            y = d.center[1] + (j + 0.5 - ny / 2 + _YEE_E_SHIFTS[0][1]) * RES
-            f = poly.intersection(shapely.box(x - RES / 2, y - RES / 2, x + RES / 2, y + RES / 2)).area / RES**2
-            if not PLANAR_FRACTIONS[0] < f < PLANAR_FRACTIONS[1] or abs(x * c + y * s) > 0.65:
-                continue
-            n = (-s, c) if -x * s + y * c > 0 else (s, -c)
-            mean, inv_mean = f * eps + 1 - f, f / eps + 1 - f
-            errors.append(abs(full[1, i, j, k] - (inv_mean - 1 / mean) * n[0] * n[1]))
-            errors.append(abs(full[0, i, j, k] - 1 / mean - (inv_mean - 1 / mean) * n[0] ** 2))
-    assert len(errors) > 80
-    assert max(errors) < PLANAR_TOL, max(errors)
+    for c in range(3):
+        for i in range(nx):
+            for j in range(ny):
+                x, y, z = _yee_point(d, c, i, j, k)
+                f = poly.intersection(shapely.box(x - RES / 2, y - RES / 2, x + RES / 2, y + RES / 2)).area / RES**2
+                if not 1e-3 < f < 1 - 1e-3:
+                    continue
+                u, v = x * c_ + y * s_, -x * s_ + y * c_
+                if abs(u) > 0.65 and abs(v) > 0.15 or abs(u) <= 0.65 and abs(v) <= 0.2:
+                    continue  # near a corner, or not near a wall
+                n = np.array([c_, s_, 0.0]) if abs(u) > 0.65 else np.array([-s_, c_, 0.0])
+                want = np.linalg.inv(_laminate64(eps, np.array([1 - f, f]), n))[c]
+                errors.append(float(np.abs(full[list(ROW[c]), i, j, k] - want).max()))
+    assert len(errors) > 150
+    assert max(errors) < PLANAR_FULL_TOL, max(errors)
 
 
-def test_subpixel_full_couples_z_at_sloped_sidewalls() -> None:
-    """A 10 degree sidewall tilts the wall's normal out of the plane: the xz entries are nonzero along walls normal to
-    x (and the yz entries along walls normal to y), with the sign of n_x n_z."""
-    d, diag, full = _full_and_diagonal(_rect(-0.8, -0.3, 0.8, 0.3), sidewall_angle=10.0)
-    np.testing.assert_array_equal(full[[0, 4, 8]], diag)
-    k = cell(d, 0, 0, 0.11)[2]
-    j = cell(d, 0, 0, 0)[1]
-    i_left, i_right = cell(d, -0.8, 0, 0)[0], cell(d, 0.8, 0, 0)[0]
-    left = full[2, i_left - 1 : i_left + 2, j, k]
-    right = full[2, i_right - 1 : i_right + 2, j, k]
-    assert float(np.abs(left).max()) > 1e-3 and float(np.abs(right).max()) > 1e-3
-    assert np.sign(left[np.argmax(np.abs(left))]) == -np.sign(right[np.argmax(np.abs(right))])
+def test_films_thinner_than_a_voxel_are_laminates_of_their_three_materials() -> None:
+    """Horizontal layers of three materials, one an 8 nm film inside a voxel (two opposing faces, each seen):
+    the voxel's tensor is the laminate along z of its exact fractions (Ez, Ex rows; fully anisotropic materials)."""
+    eps_c = _rotation_z(-40.0) @ np.diag([4.0, 5.0, 7.0]) @ _rotation_z(-40.0).T
+    mats = {**ANISO_MATERIALS, "c": _tensor_material(eps_c)}
+    # the film [0.111, 0.119] lies inside one voxel at the Ez positions ([0.11, 0.13]) and the Ex ones ([0.10, 0.12])
+    layers = {
+        "a": LayerLevel(layer=WAFER, zmin=-0.1, thickness=0.211, material="air", mesh_order=3),
+        "film": LayerLevel(layer=WAFER, zmin=0.111, thickness=0.008, material="c", mesh_order=1),
+        "b": LayerLevel(layer=WAFER, zmin=0.119, thickness=0.2, material="si", mesh_order=2),
+    }
+    ls = LayerStack(layers=layers)
+    objects, arrays, params = _placed(
+        _polygons(_rect(-0.3, -0.3, 0.3, 0.3)), ls, mats, (0.4, 0.4, 0.2), (0.0, 0.0), z_center=0.11,
+        averaging="subpixel_full",
+    )
+    d = objects["s"]
+    full = np.asarray(_box(_apply(objects, arrays, params), d, "inv_permittivities"))
+    from gdsfactory.fdtdx_subpixel import material_tensor
+
+    eps = np.stack([material_tensor(mats[m]) for m in ("air", "c", "si")])
+    nx, ny, nz = d.grid_shape
+    for c in (0, 2):
+        z0 = _yee_point(d, c, 0, 0, 0)[2] - RES / 2
+        k = int(math.floor((0.115 - z0) / RES))  # the voxel holding the film
+        lo, hi = z0 + k * RES, z0 + (k + 1) * RES
+        f = np.array([
+            max(0.0, min(0.111, hi) - lo), max(0.0, min(0.119, hi) - max(0.111, lo)), max(0.0, hi - max(0.119, lo))
+        ]) / RES
+        assert f[1] == pytest.approx(0.4, abs=1e-6)
+        want = np.linalg.inv(_laminate64(eps, f, np.array([0.0, 0.0, 1.0])))[c]
+        np.testing.assert_allclose(full[list(ROW[c]), nx // 2, ny // 2, k], want, atol=3e-6)
+
+
+@pytest.mark.parametrize("xy_subsamples", [1, 2])
+def test_junction_voxels_are_symmetric_positive_definite_and_within_the_wiener_bounds(xy_subsamples: int) -> None:
+    """On a device with corners of every kind (derived etch, slab, sloped walls), every voxel's effective tensor at
+    every Yee position is symmetric positive definite and between the harmonic and arithmetic means of its
+    materials (in the matrix sense); the junction voxels are the closure's, with a converged solve. Also with two
+    sample squares per voxel, whose junction sub-cells are painted with half-planes and made to hold the
+    voxel's materials."""
+    d = build(averaging="subpixel_full", xy_subsamples=xy_subsamples)
+    objects, arrays, params = place(d)
+    d = objects["stack"]
+    from gdsfactory.fdtdx_subpixel import from_six
+
+    names, eps = d._material_table()
+    inv_eps = np.linalg.inv(eps)
+    worst = 0.0
+    for shift in _YEE_E_SHIFTS:
+        g = d._interfaces(params["stack"], None, True, shift)
+        inv6, status = d._complete_tensor(g, d.junction_voxels)
+        assert int(status["junctions"]) > 50 and int(status["junction_overflow"]) == 0
+        assert float(status["closure_residual"]) < 1e-5
+        inv = np.asarray(from_six(inv6)).reshape(-1, 3, 3)
+        w = np.moveaxis(np.asarray(g.weights), 0, -1).reshape(-1, len(names))
+        mixed = w.max(axis=1) < 1 - 1e-6
+        e = np.linalg.inv(inv[mixed].astype(np.float64))
+        arithmetic = np.einsum("vm,mij->vij", w[mixed], eps)
+        harmonic = np.linalg.inv(np.einsum("vm,mij->vij", w[mixed], inv_eps))
+        scale = np.abs(arithmetic).max(axis=(1, 2))
+        assert np.linalg.eigvalsh(e).min() > 0
+        worst = max(
+            worst,
+            float((-np.linalg.eigvalsh(arithmetic - e).min(axis=1) / scale).max()),
+            float((-np.linalg.eigvalsh(e - harmonic).min(axis=1) / scale).max()),
+        )
+    assert worst < 1e-5, worst
+
+
+def test_a_corner_entering_a_voxel_changes_its_tensor_continuously() -> None:
+    """A rectangle's corner moved across a voxel's side in shrinking steps: the written entries change by
+    amounts that shrink with the step (no jump where the second face appears, nor where the closure takes over
+    from the laminate)."""
+    x_side = 0.3  # a voxel side (an integer number of cells from the box center)
+
+    def rect(x1: float) -> list:
+        return _rect(-0.8 + 0.01, -0.3 + 0.01, x1, 0.3 + 0.01)
+
+    objects, arrays, params = _placed(
+        _polygons(rect(x_side + 0.004)), _core(), CORE_ONLY, (2.2, 1.6, 0.3), (0.0, 0.0), z_center=0.11,
+        averaging="subpixel_full",
+    )
+    d = objects["s"]
+    written = jax.jit(lambda p: d.write(arrays, p).inv_permittivities[:, *d.grid_slice])
+    changes = []
+    for step in (4e-3, 4e-4, 4e-5):
+        values = [np.asarray(written({**params["s"], **d.pack(_polygons(rect(x_side + dx)))})) for dx in (-step, step)]
+        changes.append(float(np.abs(values[1] - values[0]).max()))
+    assert changes[1] < 0.3 * changes[0] and changes[2] < 0.3 * changes[1], changes
+
+
+def test_capacity_failures_raise_or_warn() -> None:
+    """Junction voxels beyond junction_voxels are a coverage failure: an error where the result is concrete,
+    NaN under jit (so it cannot be accepted), or, with interface_failure="warn", a warning and the laminate."""
+    rect = _rotated(_rect(-0.8, -0.3, 0.8, 0.3), 30.0, np.zeros(2))
+    objects, arrays, params = _placed(
+        _polygons(rect), _core(), CORE_ONLY, (2.2, 1.6, 0.3), (0.0, 0.0), z_center=0.11, averaging="subpixel_full",
+    )
+    d = objects["s"].aset("junction_voxels", 8)
+    status = d.interface_status(params["s"])
+    assert status["junction_overflow"] > 0 and status["junction_voxels"] == 8
+    with pytest.raises(ValueError, match="junction_voxels"):
+        d.write(arrays, params["s"])
+    nan = jax.jit(lambda p: d.write(arrays, p).inv_permittivities[:, *d.grid_slice])(params["s"])
+    assert bool(jnp.all(jnp.isnan(nan)))
+    lenient = d.aset("interface_failure", "warn")
+    with pytest.warns(StackDiagnosticWarning, match="junction_voxels"):
+        out = lenient.write(arrays, params["s"])
+    assert bool(jnp.all(jnp.isfinite(out.inv_permittivities)))
+
+
+def test_uncertified_corner_columns_are_reported() -> None:
+    """Two corners closer than the corner model resolves (rectangles half a voxel apart): their columns are
+    painted partly with one half-plane per level. That is reported (interface_status, the write's status, a
+    diagnostic when placed), not a failure; a lone rotated rectangle has none."""
+    two = [_rect(-0.5, -0.3, 0.0137, 0.3), _rect(0.0237, -0.3, 0.5, 0.3)]
+    with pytest.warns(StackDiagnosticWarning, match="not certified"):
+        objects, arrays, params = _placed(
+            _polygons(*two), _core(), CORE_ONLY, (2.2, 1.6, 0.3), (0.0, 0.0), z_center=0.11,
+            averaging="subpixel_full",
+        )
+    d = objects["s"]
+    status = d.interface_status(params["s"])
+    assert status["corner_uncertified"] > 0 and status["junction_overflow"] == 0
+    _, written = d.write_with_status(arrays, params["s"])
+    assert int(written["corner_uncertified"]) == status["corner_uncertified"] and not bool(written["failed"])
+    rect = _rotated(_rect(-0.8, -0.3, 0.8, 0.3), 30.0, np.zeros(2))
+    objects, _, params = _placed(
+        _polygons(rect), _core(), CORE_ONLY, (2.2, 1.6, 0.3), (0.0, 0.0), z_center=0.11, averaging="subpixel_full",
+    )
+    assert objects["s"].interface_status(params["s"])["corner_uncertified"] == 0
 
 
 def test_subpixel_full_needs_nine_components() -> None:
@@ -3884,20 +4065,67 @@ def test_subpixel_full_needs_nine_components() -> None:
         d.write(arrays, params["s"])
 
 
-def test_subpixel_full_gradients_are_finite() -> None:
-    """The off-diagonal entries are differentiable in the vertices and the thickness."""
-    rect = _rotated(_rect(-0.8, -0.3, 0.8, 0.3), 30.0, np.zeros(2))
+def test_subpixel_full_couples_z_at_sloped_sidewalls() -> None:
+    """A 10 degree sidewall tilts the wall's normal out of the plane: the xz entries are nonzero along walls normal
+    to x, with the sign of n_x n_z (opposite on the two sides)."""
+    d, full, _, _ = _full(_rect(-0.8, -0.3, 0.8, 0.3), size=(2.2, 1.6, 0.3))
+    assert float(np.abs(full[[2, 6]]).max()) < 1e-6  # vertical walls: no z coupling
     objects, arrays, params = _placed(
-        _polygons(rect), _core(sidewall_angle=10.0), CORE_ONLY, (2.2, 1.6, 0.3), (0.0, 0.0), z_center=0.11,
+        _polygons(_rect(-0.8, -0.3, 0.8, 0.3)), _core(sidewall_angle=10.0), CORE_ONLY, (2.2, 1.6, 0.3), (0.0, 0.0),
+        z_center=0.11, averaging="subpixel_full",
+    )
+    d = objects["s"]
+    full = np.asarray(_box(_apply(objects, arrays, params), d, "inv_permittivities"))
+    k = cell(d, 0, 0, 0.11)[2]
+    j = cell(d, 0, 0, 0)[1]
+    i_left, i_right = cell(d, -0.8, 0, 0)[0], cell(d, 0.8, 0, 0)[0]
+    left = full[2, i_left - 1 : i_left + 2, j, k]
+    right = full[2, i_right - 1 : i_right + 2, j, k]
+    assert float(np.abs(left).max()) > 1e-3 and float(np.abs(right).max()) > 1e-3
+    assert np.sign(left[np.argmax(np.abs(left))]) == -np.sign(right[np.argmax(np.abs(right))])
+
+
+def test_subpixel_full_gradients_match_finite_differences() -> None:
+    """Directional derivatives of the written tensor (all nine entries) in a vertex of an oblique rectangle
+    (moving a corner: junction voxels), its thickness and its sidewall angle: the reverse-mode gradient of the
+    entries weighted by their own forward-mode derivative (``|J v|^2``, so no cancellation) matches central
+    differences. The steps are small against the junction weight's transition (a corner entering a voxel
+    reaches the closure within about 0.03 cells) and the geometry is off coincidences with the grid: a surface
+    on a voxel face, or on a face of the closure's sub-cells (quarters of a voxel), is a kink, where the
+    derivative is one of the sides' (or their mean) and central differences are first order."""
+    rect = _rotated(_rect(-0.8, -0.3, 0.8, 0.3), 30.0, np.asarray([0.0137, -0.0071]))
+    core = LayerLevel(layer=WG, zmin=0.0063, thickness=0.2071, material="si", mesh_order=1, sidewall_angle=10.0)
+    objects, arrays, params = _placed(
+        _polygons(rect), LayerStack(layers={"core": core}), CORE_ONLY, (2.2, 1.6, 0.3), (0.0, 0.0), z_center=0.11,
         averaging="subpixel_full",
     )
     d = objects["s"]
 
-    def offdiag(p):
-        a = d.write(arrays, p)
-        return jnp.sum(a.inv_permittivities[jnp.asarray([1, 2, 3, 5, 6, 7]), *d.grid_slice] ** 2)
+    @jax.jit
+    def written(p):
+        return d.write(arrays, p).inv_permittivities[:, *d.grid_slice]
 
-    g = jax.grad(offdiag)(params["s"])
-    for key in ("vertices/WG", "thickness/core"):
-        leaf = np.asarray(g[key])
-        assert np.all(np.isfinite(leaf)) and float(np.abs(leaf).max()) > 0, key
+    @jax.jit
+    def loss(p, weights):
+        return jnp.sum(weights * written(p))
+
+    p0 = params["s"]
+    key = "vertices/WG"
+    directions = {
+        key: jnp.zeros_like(p0[key]).at[2].set(jnp.asarray([0.6, 0.8])),  # one corner, obliquely
+        "thickness/core": jnp.ones_like(p0["thickness/core"]),
+        "sidewall_angle/core": jnp.ones_like(p0["sidewall_angle/core"]),
+    }
+    # central differences of the vertex direction: -2.0 % at 1e-4 um, -0.12 % at 3e-5, -0.05 % at 1e-5
+    steps = {key: 2e-5, "thickness/core": 2e-5, "sidewall_angle/core": 0.005}
+    for name, direction in directions.items():
+        tangent = {k: jnp.zeros_like(v) for k, v in p0.items()}
+        tangent[name] = direction
+        weights = jax.jvp(written, (p0,), (tangent,))[1]
+        ad = float(jnp.sum(jax.grad(loss)(p0, weights)[name] * direction))
+        h = steps[name]
+        plus = {**p0, name: p0[name] + h * direction}
+        minus = {**p0, name: p0[name] - h * direction}
+        fd = (float(loss(plus, weights)) - float(loss(minus, weights))) / (2 * h)
+        assert ad > 0 and abs(ad - float(jnp.sum(weights**2))) <= 1e-3 * ad, (name, ad)  # reverse = forward
+        assert abs(ad - fd) <= 0.01 * abs(fd), (name, ad, fd)

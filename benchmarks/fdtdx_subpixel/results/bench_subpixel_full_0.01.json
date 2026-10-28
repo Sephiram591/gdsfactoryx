@@ -1,0 +1,25 @@
+[
+ {
+  "res_um": 0.01,
+  "grid": [
+   260,
+   180,
+   90
+  ],
+  "averaging": "subpixel_full",
+  "place_s": 81.053863320034,
+  "write_first_s": 62.72277272678912,
+  "write_s": 0.8477796567603946,
+  "grad_first_s": 271.1013907827437,
+  "grad_s": 5.339904124848545,
+  "peak_bytes": 17059787264,
+  "status": {
+   "junctions": 3049,
+   "junction_overflow": 0,
+   "corner_dropped": 0,
+   "corner_uncertified": 0,
+   "closure_residual": 2.493912099055251e-08,
+   "junction_voxels": 2752
+  }
+ }
+]
