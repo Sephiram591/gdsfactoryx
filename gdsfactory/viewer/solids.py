@@ -401,7 +401,7 @@ def _port_level(device: Any, layer: int) -> Any | None:
     from gdsfactory.fdtdx_stack import _expr_layers
 
     for level in device.levels:
-        if layer in _expr_layers(level.expr):
+        if layer in _expr_layers(level.expr) or layer == getattr(level, "fill_layer", None):
             return level
     return None
 

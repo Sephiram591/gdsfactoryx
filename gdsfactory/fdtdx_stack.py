@@ -250,6 +250,7 @@ class _Level(NamedTuple):
     z_to_bias: tuple[tuple[float, ...], tuple[float, ...]] | None
     mesh_order: int
     material: str
+    fill_layer: int | None = None  # declared layer when the expression cannot name it
 
 
 class _Port(NamedTuple):
@@ -3990,7 +3991,9 @@ class StackDevice(StaticMultiMaterialObject):
                 width, gets a rectangle as wide as that stretch, so a rib
                 waveguide continues with its slab and an etch over the port
                 continues too. On the port's own layer, a port without polygons
-                at its face gets a rectangle of the port's width. The extensions
+                at its face gets a rectangle of the port's width, unless that
+                layer is a fill layer: it already covers the plane, so only the
+                other layers reaching the face are extended. The extensions
                 are polygons like the others: every level draws them with its
                 thickness, sidewall angle and bias, and they follow the port and
                 the polygons' edges when the component's parameters change.
@@ -4018,7 +4021,8 @@ class StackDevice(StaticMultiMaterialObject):
             KeyError: unknown level or port names, or a level in the box (or the
                 background) whose material is not in ``materials``.
             ValueError: invalid offsets or extensions (no orientation or width,
-                length <= 0, a port layer no level draws), an empty box, a
+                length <= 0, a port layer no level draws and that is not a fill
+                layer), an empty box, a
                 negative ``topology_tol``, or a component without polygons.
             TypeError: a box field passed in ``kwargs``.
         """
@@ -4083,7 +4087,7 @@ class StackDevice(StaticMultiMaterialObject):
             p = by_name[name]
             if p.orientation is None or p.width <= 0 or not float(length) > 0:
                 raise ValueError(f"Cannot extend port {name!r}: needs an orientation, a width and a length > 0")
-            if p.layer not in stack_layers:
+            if p.layer not in stack_layers and p.layer not in fills:
                 raise ValueError(f"Port {name!r} is on layer {p.layer}, which no level of the stack draws")
             layers = sorted(stack_layers)
             if only:
@@ -4140,6 +4144,14 @@ class StackDevice(StaticMultiMaterialObject):
             z_to_bias = None
             if level.z_to_bias is not None:
                 z_to_bias = tuple(tuple(float(v) for v in vs) for vs in level.z_to_bias)
+            fill_layer = None
+            if expr[0] == "fill" and not level.background:
+                try:
+                    declared = _expr_positive_layers(_compile_layer(level.layer, set()))
+                except (KeyError, TypeError, ValueError):
+                    declared = set()
+                if len(declared) == 1:
+                    fill_layer = declared.pop()
             compiled.append(
                 _Level(
                     name=name,
@@ -4152,6 +4164,7 @@ class StackDevice(StaticMultiMaterialObject):
                     z_to_bias=z_to_bias,
                     mesh_order=int(level.mesh_order),
                     material=level.material,
+                    fill_layer=fill_layer,
                 )
             )
         level_names = {lv.name for lv in compiled}
@@ -4161,8 +4174,11 @@ class StackDevice(StaticMultiMaterialObject):
 
         layer_ids = sorted(set().union(*(_expr_layers(lv.expr) for lv in compiled)))
         # extensions on layers no level in the box draws are dropped with them,
-        # but the port's own layer must be drawn
-        missing = [n for n, *_ in extend_ports if by_name[n].layer not in layer_ids]
+        # but the port's own layer must be drawn, or fill the plane
+        missing = [
+            n for n, *_ in extend_ports
+            if by_name[n].layer not in layer_ids and by_name[n].layer not in fills
+        ]
         if missing:
             raise ValueError(f"No level in the box draws the layer of the extended ports {missing}")
         sources, verts, sizes, exts = [], [], [], []
@@ -6036,7 +6052,10 @@ class StackDevice(StaticMultiMaterialObject):
             if not match:
                 raise KeyError(f"Level {level!r} is not in {self.name!r}: {[lv.name for lv in self.levels]}")
         else:
-            match = [lv for lv in self.levels if p.layer in _expr_positive_layers(lv.expr)]
+            match = [
+                lv for lv in self.levels
+                if p.layer in _expr_positive_layers(lv.expr) or p.layer == lv.fill_layer
+            ]
             if not match:
                 raise ValueError(f"No level of {self.name!r} draws the layer of port {port!r}; pass level=...")
         spans = [_span(lv) for lv in match]
