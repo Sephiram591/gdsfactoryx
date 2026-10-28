@@ -298,7 +298,7 @@ third of the test time in that run), and no suite was run with a feature off.
 |---|---|---|
 | `corner_lines=2` (0: off) | exact fill at polygon corners and edge crossings: corner voxels off by up to 0.25 (convex) and 0.31 (rotated polygons) without, 1e-6 with | 5.7 min (`corner_pass` 176 s, `corner_inputs` 123 s, `corner_budget` 38 s, `corner_plan` 6 s) |
 | `averaging="subpixel"` (`"inverse"`) | Kottke averaging (the diagonal of the averaged tensor): second-order accurate at interfaces along the grid; first order at oblique ones (see below) | part of `composite` painting, at most 4.2 min with everything else painted there |
-| `averaging="subpixel_full"` (opt-in) | complete tensors: anisotropic materials (full tensors), Kottke's anisotropic laminate at planar interfaces in every entry, a junction closure at corners (see below) | 9-component arrays: fdtdx's fully anisotropic update in the whole simulation, ~4.9x per time step and ~1.8x GPU memory on a 33M-cell device; the closure: COST_TODO |
+| `averaging="subpixel_full"` (opt-in) | complete tensors: anisotropic materials (full tensors), Kottke's anisotropic laminate at planar interfaces in every entry, a junction closure at corners (see below) | 9-component arrays: fdtdx's fully anisotropic update in the whole simulation, ~4.9x per time step and ~1.8x GPU memory on a 33M-cell device; writing (L40S, 130 x 90 x 45 test device, 1514 junction voxels over the Yee positions): 0.21 s forward and 0.96 s gradient against 0.096 s and 0.70 s, peak memory 2.5 GB against 1.3 GB (260 x 180 x 90: 0.85 s, 5.3 s, 17 GB against 1.4 s, 7.9 s, 5.2 GB); compiling the write takes about 60 s and its gradient 270 s, once per device shape |
 | `subpixel_normal="voxel"` (`"gradient"`) | the normal of each voxel's own model: exact at slanted walls (0.01 deg), where finite differences of the mean eps are 8-33 deg off | part of the same painting; per call about 1.7x write forward and 3.0x gradient over `"gradient"` (0.095 s / 0.59 s against 0.056 s / 0.20 s on the 130 x 90 x 45 test device) |
 | `yee_staggered=True` | each E component's own Yee position (first-order error without) | 1.1 min (`write.Ey`, `write.Ez`) plus the corner budget's extra grids |
 | `xy_subsamples=1` | (s > 1 refines tips and dense curves; cost ~ s^2) | 1.4 min for the tests that use 2 |
@@ -377,6 +377,18 @@ bottom, at some Yee position), the voxel fractions have a kink: the
 derivative there is the mean of the two one-sided ones, half of the surface's
 movement in each of the two voxels, with every material's fraction changing
 consistently.
+
+These are the derivatives of the discretized simulation (through a whole
+fdtdx solve they agree with its finite differences to 1e-3), not those of the
+physical device. Averaging puts an interface's material into the voxel it
+crosses, so a response is piecewise smooth in an interface's position, with a
+kink where the interface crosses a sample voxel's side, and at high contrast
+its slope inside one voxel can be far from the physical one while its values
+and its slope over a voxel follow them. In the anisotropic slab test
+(`benchmarks/fdtdx_subpixel/em_slab.py --grad`, contrast about 9),
+d|t|^2/d(thickness) is 0.13 at 20 nm and 0.59 at 10 nm, against 0.82 from
+the transfer matrix, while |t|^2 is within 0.6 %. Refine the grid where the
+optimum depends on a gradient with respect to an interface's position.
 
 The device also takes a few things from the vertices it is built with, once,
 and indexes later vertices with them by polygon and vertex: which corners lie
@@ -697,10 +709,9 @@ when it detects that combination.
   columns; with `xy_subsamples` > 1 they are painted with each sample's
   half-planes and then made to hold the voxel's materials, which blend the
   corner model in), and the closure's derivative is the solve's implicit
-  one. The
-  blend reaches the closure within about 0.03 cells of a corner entering a
-  voxel, so derivatives with respect to the geometry are continuous but
-  change quickly there: check them with finite-difference steps well below
+  one. The blend reaches the closure within about 0.03 cells of a corner
+  entering a voxel, so derivatives with respect to the geometry are
+  continuous but change quickly there: check them with finite-difference steps well below
   that (about 1e-3 cells; moving a corner's vertex on 20 nm cells, central
   differences are 2 % off at 1e-4 um and 0.1 % at 3e-5 um). A surface on a
   face of the closure's sub-cells (a quarter of a voxel) is a kink, like one
@@ -711,9 +722,38 @@ when it detects that combination.
   (median; 15 % at the 90th percentile), where the laminate along the
   faces' leading direction is off by 31 % (42 %); most of the closure's
   error is its periodic boundary condition (the exact periodic tensor is
-  itself 5.6 % from the embedded one), its sub-cells add 2.2 %. Smooth
-  interfaces (planes, films, gentle curves) are second-order accurate; at
-  sharp corners the field is singular and no voxel tensor makes them so.
+  itself 5.6 % from the embedded one), its sub-cells add 2.2 %. Planar
+  interfaces (walls, films, multilayers) converge at second order (below);
+  at sharp corners the field is singular and no voxel tensor makes them so.
+  In fdtdx, a 137 nm slab of a uniaxial crystal (9, 12, 14) rotated by 25
+  degrees about z, with an xz entry of 0.8, in air at 1.55 um, at normal
+  incidence, against the Berreman transfer matrix
+  (`benchmarks/fdtdx_subpixel/em_slab.py`): the error of its Jones
+  transmission (polarization conversion |t_yx| = 0.035 included) is
+  1.3e-2, 5.0e-3, 9.9e-4 and 1.9e-4 at 40, 20, 10 and 5 nm (second order;
+  the worst of three positions of the slab against the grid), where the
+  same slab snapped to the cells (what voxel-center sampling paints) is off
+  by 0.12, 3.6e-2, 1.7e-2 and 9.2e-3 (first order). |r|^2 + |t|^2 = 1
+  within 2e-5, the Jones matrix is symmetric within 6e-8 and the wave sent
+  the other way gets its transpose within 4e-6 (reciprocity). For a
+  diagonal tensor the result is that of `"subpixel"` (same errors), and
+  `"inverse"` converges at first order. At corners
+  (`benchmarks/fdtdx_subpixel/em_grating.py`: a grating of 0.3 x 0.2 um
+  rods rotated by 30 degrees, period 0.6 um, in-plane E, zeroth-order
+  transmission against meep's subpixel smoothing extrapolated from 50 to 800
+  pixels/um, itself uncertain to about 2e-3), the error is 3.2e-3, 1.6e-3,
+  7.7e-4 and 6.5e-4 at 40, 20, 10 and 5 nm for eps = 12 rods, against
+  7.5e-3, 4.4e-3, 2.0e-3 and 7.4e-4 for the previous `"subpixel_full"`
+  (one averaged normal per voxel), 2.7e-2 to 5.0e-3 for `"subpixel"` and
+  9.4e-2 to 1.7e-2 for `"inverse"`. For rods of the rotated uniaxial crystal
+  above (polarization conversion 0.04), the error is 4.2e-3, 1.8e-3,
+  3.8e-4 and 4.2e-4, and the two codes' extrapolations agree within 3e-4.
+  fdtdx's fully anisotropic update stays stable with these tensors: in a
+  closed periodic box (a waveguide with sloped walls, slab, etch, a rotated
+  pillar and a pad, every material a different full tensor; 2555 junction
+  voxels), the total energy after a dipole pulse stays within 1 % for 52450
+  time steps (2 ps), without growth
+  (`benchmarks/fdtdx_subpixel/em_stability.py`).
 
   Junction voxels take slots of a static capacity per Yee position,
   `junction_voxels`, sized when the device is placed (1.5 x the junctions at

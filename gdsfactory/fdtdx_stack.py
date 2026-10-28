@@ -2651,9 +2651,11 @@ def _match_fractions(fractions: Array, target: Array, level_material: Sequence[i
         first[list(level_material).index(m)] = 1.0
     onehot_j = jnp.asarray(onehot, dtype=fractions.dtype)
     mean = jnp.mean(fractions, axis=1)  # (N, K + 1)
-    of_material = (mean @ onehot_j) @ onehot_j.T  # each level's material's mean
+    # full float32 sums (a default-precision GPU matmul rounds the fractions to TF32: 1e-3)
+    per_material = jnp.einsum("nl,lm->nm", mean, onehot_j, precision=_HIGHEST)
+    of_material = jnp.einsum("nm,lm->nl", per_material, onehot_j, precision=_HIGHEST)  # each level's material's
     share = jnp.where(of_material > 0, mean / jnp.where(of_material > 0, of_material, 1.0), jnp.asarray(first, mean.dtype))
-    goal = (target @ onehot_j.T) * share  # (N, K + 1) the levels' targets
+    goal = jnp.einsum("nm,lm->nl", target, onehot_j, precision=_HIGHEST) * share  # (N, K + 1) the levels' targets
     out = []
     below = jnp.zeros_like(fractions[..., 0])
     union, union_goal = 0.0, 0.0
