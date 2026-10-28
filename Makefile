@@ -18,13 +18,8 @@ UV_INSTALLED := $(shell command -v uv)
 	build \
 	upload-devpi \
 	upload-twine \
-	viewer-js \
 	lint \
-	nbdocs \
-	docs \
-	docs-serve \
 	git-rm-merged \
-	notebooks \
 	clean \
 	help
 
@@ -94,39 +89,12 @@ upload-devpi: ## Upload package to devpi
 upload-twine: build ## Upload package to PyPI using twine
 	uv tool run twine upload dist/*
 
-viewer-js: ## Rebuild the committed viewer bundle from js/ (spec D6)
-	cd js && npm install && npm run build && npm run typecheck
-
 lint: ## Run linting and formatting checks
 	uv run pre-commit run --all-files
-
-nbdocs: ## Convert Jupytext Python notebooks to markdown
-	rm -rf docs/notebooks/*.md
-	find docs/notebooks -maxdepth 1 -name "*.py" | sort | \
-		xargs -P4 -I{} uv run --extra docs jupytext --to ipynb {}
-	find docs/notebooks -maxdepth 1 -name "*.ipynb" | sort | \
-		xargs -P4 -I{} uv run --extra docs jupyter nbconvert \
-			--execute --to markdown --embed-images \
-			--ExecutePreprocessor.timeout=600 \
-			--ExecutePreprocessor.allow_errors=True \
-			{} --output-dir docs/notebooks
-	rm -f docs/notebooks/*.ipynb
-	uv run python docs/hooks.py docs/notebooks/*.md
-
-docs: ## Build documentation
-	uv run --extra docs --extra fdtdx zensical build --strict -f docs/zensical.yml
-	# docs_dir is docs/, so drop upstream's notebooks and build files copied as static files
-	rm -rf docs/_build/html/notebooks docs/_build/html/hooks.py docs/_build/html/zensical.yml
-
-docs-serve: ## Serve documentation locally
-	uv run --extra docs --extra fdtdx zensical serve -f docs/zensical.yml -a localhost:8080
 
 git-rm-merged: ## Delete merged git branches
 	git fetch --prune
 	git branch --merged origin/main | grep -v '^\*' | grep -v 'main' | xargs -n 1 git branch -d
-
-notebooks: ## Convert python scripts to Jupyter notebooks
-	jupytext docs/notebooks/*.py --to ipynb
 
 clean: ## Remove build, cache and temporary files
 	rm -rf .venv

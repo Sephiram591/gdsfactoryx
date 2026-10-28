@@ -58,8 +58,6 @@ version = "9.51.0"
 [project.optional-dependencies]
 bench = ["asv>=0.6,<1"]
 cad = ["kweb>=1.1.9,<2.1"]
-fdtdx = ["fdtdx>=0.6.3"]
-gui = ["anywidget>=0.9", "manifold3d>=3.0"]
 dev = [
   "hypothesis",
   "ipykernel",
@@ -77,14 +75,6 @@ dev = [
   "pytest-randomly",
   "pytest-xdist",
   "ty"
-]
-docs = [
-  "jupyter",
-  "jupytext",
-  "nbconvert",
-  "mkdocstrings[python]>=1.0.4",
-  "plotly",
-  "zensical>=0.0.46,<0.1.0"
 ]
 full = [
   "gplugins[devsim,femwell,gmsh,meow,sax,schematic,tidy3d]>=1.1,<3.0",

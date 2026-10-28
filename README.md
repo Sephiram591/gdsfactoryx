@@ -1,18 +1,17 @@
 # gdsfactoryx
 
-[![docs](https://github.com/Sephiram591/gdsfactoryx/actions/workflows/pages.yml/badge.svg)](https://sephiram591.github.io/gdsfactoryx/)
 [![tests](https://github.com/Sephiram591/gdsfactoryx/actions/workflows/test_code.yml/badge.svg)](https://github.com/Sephiram591/gdsfactoryx/actions/workflows/test_code.yml)
 [![MIT](https://img.shields.io/github/license/Sephiram591/gdsfactoryx)](https://choosealicense.com/licenses/mit/)
 
 **gdsfactoryx** is a port of [GDSFactory](https://github.com/gdsfactory/gdsfactory) (9.51.0) with a differentiable
 [JAX](https://jax.readthedocs.io) geometry backend: polygons, ports, references and routes are float64 JAX-compatible
 arrays, so any scalar computed from a layout can be differentiated with `jax.grad` with respect to the parameters of
-the cell functions. KLayout is kept for GDS I/O, viewing and boolean operations. Components and their `LayerStack`
-can be simulated directly in [fdtdx](https://github.com/ymahlau/fdtdx) with `gdsfactory.fdtdx_stack.StackDevice`,
-with gradients flowing from the simulation back to the layout.
+the cell functions. KLayout is kept for GDS I/O, viewing and boolean operations. The API is gdsfactory's: you still
+`import gdsfactory as gf`.
 
-- **gdsfactoryx docs** (the port, differentiability, fdtdx): https://sephiram591.github.io/gdsfactoryx/
-- **gdsfactory docs** (everything else): https://gdsfactory.github.io/gdsfactory/
+- **Documentation**: gdsfactoryx has no docs of its own. Use the gdsfactory docs: https://gdsfactory.github.io/gdsfactory/
+- **FDTD simulation** of components and layer stacks (fdtdx), and the 3D viewer, live in
+  [bifrost](https://github.com/Sephiram591/bifrost).
 
 ```python
 import jax
@@ -28,8 +27,44 @@ gdsfactoryx is not on PyPI. The distribution is still named `gdsfactory`, so it 
 installed in the same environment:
 
 ```bash
-pip install "gdsfactory[fdtdx] @ git+https://github.com/Sephiram591/gdsfactoryx.git"
+pip install "gdsfactory @ git+https://github.com/Sephiram591/gdsfactoryx.git"
 ```
+
+## Differentiability
+
+Reverse mode (`jax.grad`, `jax.vjp`) and forward mode (`jax.jvp`, `jax.jacfwd`) work. Differentiation is **eager**: wrap
+the objective in `jax.grad` but not in `jax.jit`. Without tracers, geometry runs at numpy speed.
+
+| Quantity | How |
+| --- | --- |
+| polygon vertices | `component.get_polygons_points()` returns `(N, 2)` arrays |
+| ports | `port.x`, `port.y`, `port.center_array`, `port.width`, `port.orientation` |
+| references | `ref.transform`, `ref.move/rotate/mirror/connect`, `ref.xmin = ...` |
+| bounding boxes and areas | `component.dbbox()`, `xmin/xmax/ymin/ymax/xsize/ysize/center`, `component.area(layer)` |
+| paths and extrusion | `gf.path.arc/euler/straight/smooth/spiral_archimedean`, `Path.length()`, `gf.path.extrude` |
+| routes | `route_single`, `route_bundle`, `route_bundle_all_angle`, `route_dubins`: `route.length`, element positions |
+| rasterization | `gf.rasterize.rasterize(component, layer, resolution)` |
+
+Notes:
+
+- Discrete choices (number of points, `if` branches, cell names, routing topology) use concrete primal values, so the
+  gradient is exact for the chosen topology and zero across a discrete switch.
+- 1 nm grid snapping uses straight-through rounding (value snapped, gradient identity). Set
+  `gf.snap.SNAP_ENABLED = False` to compare with finite differences.
+- `@gf.cell` calls with tracer arguments bypass the cache.
+- KLayout is used only for discrete operations (I/O, `show`/`plot`, booleans, sizing, DRC fixes, fill, merged areas);
+  gradients stop there. `gf.boolean`, `offset`, `over_under`, `fix_width`, `fix_spacing`, `trim`, `fill`,
+  `get_polygons(merge=True)` and A* routing are not differentiable.
+- `component.area(layer)` is the merged area as upstream; its derivative is that of the summed polygon areas, exact for
+  non-overlapping polygons.
+
+### Differences from upstream API
+
+- `Component` and `ComponentReference` are gdsfactoryx classes, not kfactory `DKCell`/`DInstance`; use
+  `component.to_kfactory()` for a (concrete) kfactory cell.
+- `component.get_polygons()` returns KLayout polygons as upstream; `get_polygons_points()` returns differentiable arrays.
+- `port.center` is an `(x, y)` tuple; use `port.center_array` (or `port.xy`) for array math.
+- Routes are `gdsfactory.routing.ManhattanRoute` objects with kfactory's attributes plus `backbone_um` (differentiable).
 
 ---
 

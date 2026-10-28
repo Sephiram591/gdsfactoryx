@@ -1,6 +1,8 @@
 # [Changelog](https://keepachangelog.com/en/1.0.0/)
 ## [Unreleased](https://github.com/gdsfactory/gdsfactory/compare/v9.51.0...main)
 
+- Moved the fdtdx integration (`gdsfactory.fdtdx_*`) and the viewer (`gdsfactory.viewer`) to [bifrost](https://github.com/Sephiram591/bifrost) (`import bifrost as bf`); removed the docs site, use the gdsfactory docs.
+
 <!-- towncrier release notes start -->
 
 ## [9.51.0](https://github.com/gdsfactory/gdsfactory/releases/tag/v9.51.0) - 2026-09-14
