@@ -1,16 +1,63 @@
 name: Publish to PyPI
 
-# Runs only when a version tag (v*) is pushed. The publish job waits for approval
+# Publishes to PyPI when a push to main changes the project version in pyproject.toml.
+# Dev versions (containing "dev") are never published. The publish job waits for approval
 # on the "pypi" environment, so nothing is uploaded until a required reviewer approves.
+# A manual run (from main only) publishes the version currently in pyproject.toml.
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
+    paths:
+      - pyproject.toml
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  check-version:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: check
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          ver() { python3 -c 'import sys, tomllib; print(tomllib.load(sys.stdin.buffer)["project"]["version"])'; }
+          new=$(ver < pyproject.toml)
+          echo "version now: $new"
+          case "$new" in
+            *dev*)
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+              echo "::notice file=pyproject.toml::$new is a dev version; not publishing to PyPI"
+              exit 0
+              ;;
+          esac
+          # Manual runs, new branches and force-pushes (no usable "before" commit): publish the current version
+          if [ "$EVENT" != "push" ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          old=$(git show "$BEFORE:pyproject.toml" | ver)
+          echo "version before: $old"
+          if [ "$old" = "$new" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice file=pyproject.toml::version unchanged ($new); not publishing to PyPI"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: check-version
+    if: needs.check-version.outputs.changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -20,23 +67,6 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-
-      - name: Check tag matches project version
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          version=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
-          echo "tag: $TAG, pyproject.toml version: $version"
-          if [ "$TAG" != "v$version" ]; then
-            echo "::error file=pyproject.toml::tag $TAG does not match project version v$version"
-            exit 1
-          fi
-          case "$version" in
-            *dev*)
-              echo "::error file=pyproject.toml::refusing to publish dev release $version to PyPI"
-              exit 1
-              ;;
-          esac
 
       - name: Install build tools
         run: python -m pip install --upgrade build twine
