@@ -50,10 +50,10 @@ dependencies = [
 description = "python library to generate GDS layouts"
 keywords = ["eda", "photonics", "python"]
 license = {file = "LICENSE"}
-name = "gdsfactory"
+name = "gdsfactoryx"
 readme = "README.md"
 requires-python = ">=3.12,<3.15"
-version = "9.51.0"
+version = "9.51.0.dev1"
 
 [project.optional-dependencies]
 bench = ["asv>=0.6,<1"]
@@ -97,6 +97,9 @@ gf = "gdsfactory.cli:app"
 
 [tool.codespell]
 ignore-words-list = "te, te/tm, te, ba, fpr, fpr_spacing, ro, nd, donot, schem"
+
+[tool.flit.module]
+name = "gdsfactory"
 
 [tool.gdsfactoryplus.pdk]
 name = "gpdk"
