@@ -1,13 +1,50 @@
 name: Publish to TestPyPI
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - pyproject.toml
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: check
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          # Manual runs, new branches and force-pushes (no usable "before" commit): always publish
+          if [ "$EVENT" != "push" ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          ver() { python3 -c 'import sys, tomllib; print(tomllib.load(sys.stdin.buffer)["project"]["version"])'; }
+          old=$(git show "$BEFORE:pyproject.toml" | ver)
+          new=$(ver < pyproject.toml)
+          echo "version: $old -> $new"
+          if [ "$old" = "$new" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice file=pyproject.toml::version unchanged ($new); skipping publish"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: check-version
+    if: needs.check-version.outputs.changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
