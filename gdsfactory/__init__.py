@@ -4,6 +4,7 @@
 # isort: skip_file
 
 from __future__ import annotations
+from gdsfactory import _dist_conflict  # noqa: F401  (must run first: errors if upstream gdsfactory is also installed)
 import sys
 import warnings
 from functools import partial

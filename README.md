@@ -23,12 +23,26 @@ jax.grad(lambda r: gf.components.ring_single(radius=r).dxsize)(10.0)
 
 ## Installation
 
-gdsfactoryx is not on PyPI. The distribution is still named `gdsfactory`, so it replaces an upstream gdsfactory
-installed in the same environment:
+gdsfactoryx installs the same top-level `gdsfactory` package as upstream
+[gdsfactory](https://github.com/gdsfactory/gdsfactory), so the two cannot share an environment. Remove upstream
+first, then install:
 
 ```bash
-pip install "gdsfactory @ git+https://github.com/Sephiram591/gdsfactoryx.git"
+pip uninstall -y gdsfactory
+pip install gdsfactoryx
 ```
+
+To install the latest development version from GitHub instead:
+
+```bash
+pip install "gdsfactoryx @ git+https://github.com/Sephiram591/gdsfactoryx.git"
+```
+
+If both distributions end up installed, `import gdsfactory` raises an `ImportError` that says so. Fix it with
+`pip uninstall -y gdsfactory gdsfactoryx && pip install gdsfactoryx`.
+
+Packages that depend on upstream `gdsfactory` (for example `gplugins`) will install it again. Install such packages
+with `pip install --no-deps` and add their other dependencies yourself, so they use gdsfactoryx.
 
 ## Differentiability
 
