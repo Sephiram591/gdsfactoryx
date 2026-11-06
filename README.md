@@ -46,8 +46,14 @@ with `pip install --no-deps` and add their other dependencies yourself, so they 
 
 ## Differentiability
 
-Reverse mode (`jax.grad`, `jax.vjp`) and forward mode (`jax.jvp`, `jax.jacfwd`) work. Differentiation is **eager**: wrap
-the objective in `jax.grad` but not in `jax.jit`. Without tracers, geometry runs at numpy speed.
+Reverse mode (`jax.grad`, `jax.vjp`) and forward mode (`jax.jvp`, `jax.jacfwd`) work. Differentiation runs **eagerly**
+by default: wrap the objective in `jax.grad`, and component functions keep their ordinary Python control flow on concrete
+values. Without tracers, geometry runs at numpy speed.
+
+`jax.jit` also works when the geometry's structure does not depend on the traced values: polygons with a fixed number
+of vertices, ports and reference transforms, grid snapping included, give the same results as eagerly. Discrete choices
+(number of points, `if` on a value, routing topology) and KLayout operations need concrete values and raise a
+`TypeError` inside `jax.jit`; use the eager mode for them.
 
 | Quantity | How |
 | --- | --- |
@@ -64,7 +70,8 @@ Notes:
 - Discrete choices (number of points, `if` branches, cell names, routing topology) use concrete primal values, so the
   gradient is exact for the chosen topology and zero across a discrete switch.
 - 1 nm grid snapping uses straight-through rounding (value snapped, gradient identity). Set
-  `gf.snap.SNAP_ENABLED = False` to compare with finite differences.
+  `gf.snap.SNAP_ENABLED = False` to compare with finite differences. Inside `jax.jit` the flag is read when the
+  function is traced: changing it does not affect a function that is already compiled.
 - `@gf.cell` calls with tracer arguments bypass the cache.
 - KLayout is used only for discrete operations (I/O, `show`/`plot`, booleans, sizing, DRC fixes, fill, merged areas);
   gradients stop there. `gf.boolean`, `offset`, `over_under`, `fix_width`, `fix_spacing`, `trim`, `fill`,

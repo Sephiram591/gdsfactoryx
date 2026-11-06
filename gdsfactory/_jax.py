@@ -10,6 +10,11 @@ Differentiation is supported in *eager* mode (``jax.grad`` / ``jax.jvp`` /
 Python control flow, which needs the primal values to be concrete.
 Non-differentiable operations (boolean, offset, GDS export, ...) operate on the
 concrete primal values and stop gradients.
+
+Geometry whose structure does not depend on the traced values (polygons with a
+fixed number of vertices, ports, reference transforms; grid snapping included)
+also works inside ``jax.jit``, with the same results as eager. Operations that
+need concrete values (discrete choices, KLayout operations) raise there.
 """
 
 from __future__ import annotations
@@ -147,7 +152,10 @@ def primal(x: Any) -> Any:
             except Exception as e:  # pragma: no cover
                 raise TypeError(
                     f"Cannot get a concrete value from {type(x).__name__}. "
-                    "gdsfactoryx supports eager jax.grad/jvp/vjp, not jax.jit."
+                    "This operation needs concrete values (a discrete choice such as a "
+                    "number of points or an `if` on a value, or a KLayout operation). "
+                    "Under jax.jit, gdsfactoryx supports geometry whose structure does "
+                    "not depend on the traced values; use eager jax.grad/jvp/vjp otherwise."
                 ) from e
     return x
 
@@ -254,7 +262,9 @@ def snap_dbu(x: Any) -> Any:
     KLayout converts um to dbu by multiplying with 1/dbu and rounds half away
     from zero; the floating point arithmetic is reproduced so that values on
     half-dbu boundaries round the same way as upstream.
-    Straight-through for traced values (value snapped, gradient identity).
+    Straight-through for jax values (value snapped, gradient identity). jax
+    values are snapped with jax.numpy, in float64, by the same operations as
+    numpy values, so this also works on abstract tracers (inside ``jax.jit``).
     Disabled when ``gdsfactory.snap.SNAP_ENABLED`` is False.
     """
     from gdsfactory import snap
@@ -263,9 +273,10 @@ def snap_dbu(x: Any) -> Any:
         return x
     inv = 1.0 / DBU
     if _is_jax(x):
-        v = np.asarray(primal(x), dtype=np.float64) * inv
-        snapped = np.sign(v) * np.floor(np.abs(v) + 0.5) * DBU
-        return x + jax.lax.stop_gradient(jnp.asarray(snapped) - x)
+        xa = jnp.asarray(x, dtype=jnp.float64)
+        v = jax.lax.stop_gradient(xa) * inv
+        snapped = jnp.sign(v) * jnp.floor(jnp.abs(v) + 0.5) * DBU
+        return xa + jax.lax.stop_gradient(snapped - xa)
     if isinstance(x, int | float):
         v = x * inv
         return float(np.sign(v) * np.floor(abs(v) + 0.5) * DBU)
