@@ -30,6 +30,10 @@ def activate_generic_pdk() -> None:
     CONF.on_placer_error = "warning"
     CONF.on_collision = "warning"
 
+    # The GDS references are upstream gdsfactory's: XOR differences that vanish when
+    # shrunk by one database unit (1 nm floating point rounding) are not regressions.
+    CONF.difftest_ignore_sliver_differences = True
+
     return
 
 
