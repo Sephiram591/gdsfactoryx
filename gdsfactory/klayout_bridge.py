@@ -31,11 +31,15 @@ def _kdb() -> Any:
 
 
 def array_to_kpolygon(points: Any) -> kdb.Polygon:
-    """(N, 2) um array -> integer kdb.Polygon (rounded to 1 nm)."""
+    """(N, 2) um array -> integer kdb.Polygon (rounded to 1 nm).
+
+    Built as upstream inserts shapes (a ``kdb.DPolygon`` converted to the 1 nm grid): KLayout normalizes the float
+    polygon before rounding it, so points that only become collinear on the grid are kept. Normalizing an integer
+    polygon after rounding would drop them, and the GDS writer then splits large polygons at other places.
+    """
     kdb = _kdb()
-    v = to_numpy(points) * (1.0 / DBU)
-    pts = (np.sign(v) * np.floor(np.abs(v) + 0.5)).astype(np.int64)  # KLayout rounding
-    return kdb.Polygon([kdb.Point(int(x), int(y)) for x, y in pts])
+    pts = to_numpy(points)
+    return kdb.DPolygon([kdb.DPoint(float(x), float(y)) for x, y in pts]).to_itype(DBU)
 
 
 def array_to_kdpolygon(points: Any) -> kdb.DPolygon:
