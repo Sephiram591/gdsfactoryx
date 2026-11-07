@@ -110,8 +110,10 @@ class Section(BaseModel):
             +offset
     """
 
-    width: JFloat = 0.0
-    offset: JFloat = 0.0
+    # int defaults, as upstream: pydantic does not validate defaults, so a default prints
+    # as 0 in str(section), and str() is what cross-section names hash (CrossSection.name)
+    width: JFloat = 0
+    offset: JFloat = 0
     insets: tuple[JFloat, JFloat] | None = None
     layer: typings.LayerSpec
     port_names: tuple[str | None, str | None] = (None, None)
