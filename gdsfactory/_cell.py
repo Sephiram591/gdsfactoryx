@@ -157,6 +157,20 @@ def cached_cells() -> list[Any]:
     return [c for cache in _CACHES for c in cache.values()]
 
 
+def _check_ports(c: Component) -> None:
+    """Raises on duplicate port names, as kfactory's ``@cell`` does (``check_ports=False`` allows them)."""
+    counts: dict[str | None, int] = {}
+    for port in c.ports:
+        counts[port.name] = counts.get(port.name, 0) + 1
+    duplicates = [(name, n) for name, n in counts.items() if n > 1]
+    if duplicates:
+        raise ValueError(
+            "Found duplicate port names: "
+            + ", ".join(f"{name}: {n}" for name, n in duplicates)
+            + " If this intentional, please pass `check_ports=False` to the @cell decorator"
+        )
+
+
 def cell(
     _func: Callable[..., Any] | None = None,
     /,
@@ -235,6 +249,8 @@ def cell(
             if c.locked:
                 # returned a cached cell from another factory: wrap a copy
                 c = c.copy()
+            if check_ports:
+                _check_ports(c)
 
             function_name = func.__name__
             if set_name:

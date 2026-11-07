@@ -158,7 +158,11 @@ class Box:
 
     @classmethod
     def empty_box(cls) -> Box:
-        return cls(0.0, 0.0, 0.0, 0.0)
+        """The box of nothing, as KLayout's empty ``kdb.DBox()``: (1, 1; -1, -1).
+
+        :meth:`empty` is True for it, and its width, height and center are KLayout's (-2, -2, (0, 0)).
+        """
+        return cls(1.0, 1.0, -1.0, -1.0)
 
     def empty(self) -> bool:
         return to_float(self.right) < to_float(self.left)
