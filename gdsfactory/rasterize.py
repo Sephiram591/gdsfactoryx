@@ -28,7 +28,7 @@ Example:
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import jax
 import numpy as np
@@ -149,7 +149,12 @@ def rasterize(
     if x is None or y is None:
         if bbox is None:
             b = component.dbbox(layer)
-            bbox = (to_float(b.left), to_float(b.bottom), to_float(b.right), to_float(b.top))
+            bbox = (
+                to_float(b.left),
+                to_float(b.bottom),
+                to_float(b.right),
+                to_float(b.top),
+            )
         xmin, ymin, xmax, ymax = (to_float(v) for v in bbox)
         xmin -= padding
         ymin -= padding

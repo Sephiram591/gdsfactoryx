@@ -199,9 +199,7 @@ class _XY:
     __slots__ = ("_x", "_y")
 
     def __init__(self, x: Any = 0, y: Any = 0) -> None:
-        if isinstance(x, _XY) and y == 0:
-            x, y = x.x, x.y
-        elif isinstance(x, kdb.Point | kdb.Vector):
+        if (isinstance(x, _XY) and y == 0) or isinstance(x, kdb.Point | kdb.Vector):
             x, y = x.x, x.y
         self._x = DNum.of(x)
         self._y = DNum.of(y)
@@ -409,7 +407,9 @@ class Trans:
         return cls(t.angle, t.is_mirror(), t.disp.x, t.disp.y)
 
     def to_kdb(self) -> kdb.Trans:
-        return kdb.Trans(self._rot, self._mirror, int(self._disp.x.v), int(self._disp.y.v))
+        return kdb.Trans(
+            self._rot, self._mirror, int(self._disp.x.v), int(self._disp.y.v)
+        )
 
     # ------------------------------------------------------ properties
     @property
@@ -447,7 +447,11 @@ class Trans:
         return Trans(self._rot, self._mirror, self._disp.x, self._disp.y)
 
     def assign(self, other: Trans) -> None:
-        self._rot, self._mirror, self._disp = other._rot, other._mirror, other._disp.dup()
+        self._rot, self._mirror, self._disp = (
+            other._rot,
+            other._mirror,
+            other._disp.dup(),
+        )
 
     # --------------------------------------------------------- algebra
     def _apply(self, x: DNum, y: DNum) -> tuple[DNum, DNum]:
@@ -635,12 +639,24 @@ class Box:
     def center(self) -> Point:
         c = self.to_kdb().center()  # KLayout's integer rounding
         return Point(
-            DNum.traced((self._l.tv() + self._r.tv()) / 2 if (self._l.is_traced or self._r.is_traced) else None, c.x),
-            DNum.traced((self._b.tv() + self._t.tv()) / 2 if (self._b.is_traced or self._t.is_traced) else None, c.y),
+            DNum.traced(
+                (self._l.tv() + self._r.tv()) / 2
+                if (self._l.is_traced or self._r.is_traced)
+                else None,
+                c.x,
+            ),
+            DNum.traced(
+                (self._b.tv() + self._t.tv()) / 2
+                if (self._b.is_traced or self._t.is_traced)
+                else None,
+                c.y,
+            ),
         )
 
     def contains(self, p: Any) -> bool:
-        return self.to_kdb().contains(_concrete(p) if not isinstance(p, kdb.Point) else p)
+        return self.to_kdb().contains(
+            _concrete(p) if not isinstance(p, kdb.Point) else p
+        )
 
     def inside(self, other: Any) -> bool:
         return self.to_kdb().inside(_concrete(other))
@@ -656,7 +672,9 @@ class Box:
         if isinstance(other, kdb.Box):
             other = Box(other)
         if isinstance(other, Point | kdb.Point):
-            other = Box._from(DNum.of(other.x), DNum.of(other.y), DNum.of(other.x), DNum.of(other.y))
+            other = Box._from(
+                DNum.of(other.x), DNum.of(other.y), DNum.of(other.x), DNum.of(other.y)
+            )
         if isinstance(other, kdb.DBox):
             raise TypeError("cannot add DBox to an integer Box")
         if other.empty():

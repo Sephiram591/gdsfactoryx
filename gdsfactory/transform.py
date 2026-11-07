@@ -17,11 +17,10 @@ from gdsfactory._jax import (
     Array,
     asarray,
     cos_deg,
-    jnp,
-    xp,
     maybe_float,
     sin_deg,
     to_float,
+    xp,
 )
 
 
@@ -198,4 +197,3 @@ __all__ = [
     "rotate_points",
     "rotation_matrix",
 ]
-

@@ -61,7 +61,9 @@ def coordinates() -> np.ndarray:
     near = ties + rng.choice([-1.0, 1.0], size=500) * np.spacing(ties)
     rand = rng.uniform(-1e4, 1e4, size=2000)
     small = rng.uniform(-2e-3, 2e-3, size=500)
-    special = np.array([0.0, -0.0, DBU, -DBU, 0.5 * DBU, -0.5 * DBU, 1.5 * DBU, -1.5 * DBU, 1e5, -1e5])
+    special = np.array(
+        [0.0, -0.0, DBU, -DBU, 0.5 * DBU, -0.5 * DBU, 1.5 * DBU, -1.5 * DBU, 1e5, -1e5]
+    )
     return np.concatenate([ties, near, rand, small, special]).reshape(-1, 2)
 
 
@@ -73,14 +75,18 @@ def test_snap_jit_matches_eager_bitwise(device: Any) -> None:
     primal_out, tangent = jax.jvp(snap_dbu, (x,), (jnp.ones_like(x),))
     np.testing.assert_array_equal(bits(primal_out), expected)
     np.testing.assert_array_equal(np.asarray(tangent), 1.0)
-    jit_primal, jit_tangent = jax.jit(lambda v: jax.jvp(snap_dbu, (v,), (jnp.ones_like(v),)))(x)
+    jit_primal, jit_tangent = jax.jit(
+        lambda v: jax.jvp(snap_dbu, (v,), (jnp.ones_like(v),))
+    )(x)
     np.testing.assert_array_equal(bits(jit_primal), expected)
     np.testing.assert_array_equal(np.asarray(jit_tangent), 1.0)
 
 
 def test_snap_gradient_is_identity_under_jit(device: Any) -> None:
     x = jax.device_put(jnp.asarray(coordinates()), device)
-    w = jax.device_put(jnp.asarray(np.random.default_rng(1).normal(size=x.shape)), device)
+    w = jax.device_put(
+        jnp.asarray(np.random.default_rng(1).normal(size=x.shape)), device
+    )
     grad = jax.jit(jax.grad(lambda v: jnp.sum(w * snap_dbu(v))))(x)
     np.testing.assert_array_equal(np.asarray(grad), np.asarray(w))
 
@@ -99,7 +105,9 @@ def test_snap_python_and_numpy_values_unchanged() -> None:
     np.testing.assert_array_equal(bits(snap_dbu(values)), bits(expected))
     for v in values.ravel()[:50]:
         assert isinstance(snap_dbu(float(v)), float)
-        assert snap_dbu(float(v)) == float(np.sign(v * inv) * np.floor(abs(v * inv) + 0.5) * DBU)
+        assert snap_dbu(float(v)) == float(
+            np.sign(v * inv) * np.floor(abs(v * inv) + 0.5) * DBU
+        )
 
 
 def test_snap_disabled_returns_input_under_jit(device: Any) -> None:
@@ -116,9 +124,17 @@ def build(p: Any) -> tuple[list[Any], list[Any], list[Any]]:
     child.add_polygon(jnp.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]) * h, layer=(2, 0))
     c = gf.Component()
     xs = jnp.array([0.0, 10.0, 10.0, 0.0]) + jnp.array([0.0, dx, dx, 0.0])
-    c.add_polygon(jnp.stack([xs, jnp.stack([-w / 2, -w / 2, w / 2, w / 2])], axis=1), layer=(1, 0))
+    c.add_polygon(
+        jnp.stack([xs, jnp.stack([-w / 2, -w / 2, w / 2, w / 2])], axis=1), layer=(1, 0)
+    )
     c.add_port(name="o1", center=(0.0, 0.0), width=w, orientation=180, layer=(1, 0))
-    c.add_port(name="o2", center=jnp.stack([10.0 + dx, 0.0 * dx]), width=w, orientation=0, layer=(1, 0))
+    c.add_port(
+        name="o2",
+        center=jnp.stack([10.0 + dx, 0.0 * dx]),
+        width=w,
+        orientation=0,
+        layer=(1, 0),
+    )
     c.add_ref(child).move((dx, 2.0 * dx))
     polys = c.get_polygons_points()
     return (
@@ -140,19 +156,31 @@ def test_component_under_jit_matches_eager_bitwise(device: Any) -> None:
 def test_component_gradient_under_jit_matches_eager(device: Any) -> None:
     def scalar(p: Any) -> Any:
         polys, centers, widths = build(p)
-        return sum(jnp.sum(q * q) for q in polys) + sum(jnp.sum(c) for c in centers) + sum(widths)
+        return (
+            sum(jnp.sum(q * q) for q in polys)
+            + sum(jnp.sum(c) for c in centers)
+            + sum(widths)
+        )
 
     p = jax.device_put(jnp.array([0.5004999, 0.12345, 1.9876543]), device)
     np.testing.assert_allclose(
-        np.asarray(jax.jit(jax.grad(scalar))(p)), np.asarray(jax.grad(scalar)(p)), rtol=1e-12, atol=0
+        np.asarray(jax.jit(jax.grad(scalar))(p)),
+        np.asarray(jax.grad(scalar)(p)),
+        rtol=1e-12,
+        atol=0,
     )
 
 
 def test_klayout_operation_still_raises_under_jit() -> None:
     def merged_area(w: Any) -> Any:
         c = gf.Component()
-        c.add_polygon(jnp.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]) * w, layer=(1, 0))
-        return sum(jnp.sum(q) for q in c.get_polygons_points(merge=True)[gf.get_layer((1, 0))])
+        c.add_polygon(
+            jnp.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]) * w,
+            layer=(1, 0),
+        )
+        return sum(
+            jnp.sum(q) for q in c.get_polygons_points(merge=True)[gf.get_layer((1, 0))]
+        )
 
     with pytest.raises(TypeError):
         jax.jit(merged_area)(jnp.asarray(1.5))

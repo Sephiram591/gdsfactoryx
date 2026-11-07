@@ -3,16 +3,16 @@
 https://quentinwach.com/blog/2024/02/15/dubins-paths-for-waveguide-routing.html
 """
 
-from typing import Any, Literal
+from typing import Any
 
 import jax.numpy as m
 
 import gdsfactory as gf
 from gdsfactory._jax import to_float
 from gdsfactory.component import Component, ComponentReference
-from gdsfactory.routing._kf_router import ManhattanRoute
 from gdsfactory.components.bends import bend_circular_all_angle
 from gdsfactory.components.waveguides import straight_all_angle
+from gdsfactory.routing._kf_router import ManhattanRoute
 from gdsfactory.typings import CrossSectionSpec, Port
 
 

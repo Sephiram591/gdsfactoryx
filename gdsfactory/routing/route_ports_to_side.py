@@ -4,12 +4,11 @@ from typing import Any, Literal, cast
 
 import kfactory as kf
 import numpy as np
-from gdsfactory.routing._kf_router import ManhattanRoute
 
-import gdsfactory as gf
 from gdsfactory import typings
 from gdsfactory.component import Component
 from gdsfactory.port import flipped
+from gdsfactory.routing._kf_router import ManhattanRoute
 from gdsfactory.routing.route_bundle import route_bundle
 from gdsfactory.typings import CrossSectionSpec, Ports
 

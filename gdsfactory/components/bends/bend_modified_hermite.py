@@ -2,7 +2,6 @@ import warnings
 from functools import partial
 from typing import Literal, overload
 
-
 import gdsfactory as gf
 from gdsfactory._jax import maybe_float, to_float, xp
 from gdsfactory.component import Component, ComponentAllAngle

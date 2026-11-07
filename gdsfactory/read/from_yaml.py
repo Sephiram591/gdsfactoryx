@@ -64,7 +64,6 @@ import yaml
 from gdsfactory import typings
 from gdsfactory.add_pins import add_instance_label
 from gdsfactory.component import Component, ComponentAllAngle, ComponentReference
-from gdsfactory.transform import Transform
 from gdsfactory.schematic import (
     Bundle,
     GridArray,
@@ -73,6 +72,7 @@ from gdsfactory.schematic import (
     Placement,
 )
 from gdsfactory.schematic import Instance as NetlistInstance
+from gdsfactory.transform import Transform
 from gdsfactory.typings import InstanceOrVInstance, LayerSpec, Route, RoutingStrategies
 
 if TYPE_CHECKING:

@@ -188,7 +188,11 @@ def asarray(x: Any) -> Any:
     """
     if _is_jax(x) or (isinstance(x, list | tuple) and _any_jax(x, {})):
         if isinstance(x, list | tuple) and not _is_jax(x):
-            return jnp.stack([jnp.asarray(v, dtype=jnp.float64) for v in x]) if x else jnp.zeros((0,))
+            return (
+                jnp.stack([jnp.asarray(v, dtype=jnp.float64) for v in x])
+                if x
+                else jnp.zeros((0,))
+            )
         return jnp.asarray(x, dtype=jnp.float64)
     arr = np.array(x, dtype=np.float64)
     arr.flags.writeable = False
@@ -203,7 +207,15 @@ def points_array(points: Any) -> Array:
         pts = list(points)
         if pts and any(_is_jax(c) for p in pts for c in _iter_coords(p)):
             arr = jnp.stack(
-                [jnp.stack([jnp.asarray(p[0], dtype=jnp.float64), jnp.asarray(p[1], dtype=jnp.float64)]) for p in pts]
+                [
+                    jnp.stack(
+                        [
+                            jnp.asarray(p[0], dtype=jnp.float64),
+                            jnp.asarray(p[1], dtype=jnp.float64),
+                        ]
+                    )
+                    for p in pts
+                ]
             )
         else:
             arr = asarray([[to_float(p[0]), to_float(p[1])] for p in pts])
@@ -241,8 +253,10 @@ def round_st(x: Any, decimals: int = 0, step: float | None = None) -> Any:
     """
     if not is_tracer(x) and not isinstance(x, jax.Array):
         if step is not None:
-            return np.round(np.asarray(x) / step) * step if np.ndim(x) else float(
-                np.round(x / step) * step
+            return (
+                np.round(np.asarray(x) / step) * step
+                if np.ndim(x)
+                else float(np.round(x / step) * step)
             )
         return np.round(x, decimals) if np.ndim(x) else float(np.round(x, decimals))
     xa = asarray(x)

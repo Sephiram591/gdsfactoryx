@@ -7,7 +7,6 @@ __all__ = [
 
 from typing import Any
 
-
 import gdsfactory as gf
 from gdsfactory._jax import xp
 from gdsfactory.component import Component

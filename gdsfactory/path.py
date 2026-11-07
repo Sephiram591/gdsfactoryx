@@ -30,12 +30,12 @@ from gdsfactory._jax import (
     asarray,
     is_tracer,
     jnp,
-    xp,
-    xset,
     round_st,
     stop_gradient,
     to_float,
     to_numpy,
+    xp,
+    xset,
 )
 from gdsfactory.component import Box, Component, ComponentAllAngle
 from gdsfactory.cross_section import (
@@ -456,10 +456,14 @@ class Path:
         magic_offset = 0.17048614
         final_hash = hashlib.sha1()
         adjusted_points = (
-            ((to_numpy(self.points) / precision) + magic_offset).round().astype(np.int64)
+            ((to_numpy(self.points) / precision) + magic_offset)
+            .round()
+            .astype(np.int64)
         )
         final_hash.update(adjusted_points.tobytes())
-        adjusted_angles = np.array([to_float(self.start_angle), to_float(self.end_angle)])
+        adjusted_angles = np.array(
+            [to_float(self.start_angle), to_float(self.end_angle)]
+        )
         adjusted_angles = (
             ((adjusted_angles / precision) + magic_offset).round().astype(np.int64)
         )
@@ -569,7 +573,7 @@ def _cumulative_lengths(points: Array) -> Array:
 
 
 def _gradient(f: Array, x: Array, edge_order: int = 1) -> Array:
-    """jnp version of np.gradient(f, x) for non-uniform 1D spacing."""
+    """Jnp version of np.gradient(f, x) for non-uniform 1D spacing."""
     n = f.shape[0]
     if n < 2:
         return xp.full_like(f, xp.inf)
@@ -827,9 +831,9 @@ def along_path(
         unit_vector = segment_vector / segment_length
         angle = xp.rad2deg(xp.arctan2(segment_vector[1], segment_vector[0]))
 
-        while to_float(next_component) <= to_float(cum_dist + segment_length) and to_float(
-            next_component
-        ) <= to_float(stop):
+        while to_float(next_component) <= to_float(
+            cum_dist + segment_length
+        ) and to_float(next_component) <= to_float(stop):
             added_dist = next_component - cum_dist
             offset = added_dist * unit_vector
             component_ref = c << component
@@ -1072,7 +1076,9 @@ def _inset_path(p_sec: Path, insets: tuple[Any, Any]) -> Path | None:
     start_inset_remainder = fwd[start_diff_idx] - insets[0]
     stop_inset_remainder = rev[reversed_stop_diff_idx] - insets[1]
 
-    new_start_point = v_start_direction * start_inset_remainder + p_pts[start_diff_idx + 1]
+    new_start_point = (
+        v_start_direction * start_inset_remainder + p_pts[start_diff_idx + 1]
+    )
     new_stop_point = v_stop_direction * stop_inset_remainder + p_pts[stop_diff_idx]
 
     trimmed = xp.concatenate(
@@ -1387,7 +1393,9 @@ def _cut_path_with_ray(
                     raise ValueError(
                         f"Expected intersection to be a point, but got {intersection}"
                     )
-                _, intersection = shapely.ops.nearest_points(sg.Point(point), intersection)
+                _, intersection = shapely.ops.nearest_points(
+                    sg.Point(point), intersection
+                )
             intersections[i] = intersection
         else:
             intersection = intersections[i]
@@ -1445,7 +1453,9 @@ def arc(
     if angular_step is not None:
         npoints = math.ceil(abs(angle_f / to_float(angular_step))) + 1
     elif not npoints:
-        npoints = int(abs(angle_f) / 360 * to_float(radius) / PDK.bend_points_distance / 2)
+        npoints = int(
+            abs(angle_f) / 360 * to_float(radius) / PDK.bend_points_distance / 2
+        )
         npoints = max(npoints, _bend_npoints_floor(angle_f), 2)
     else:
         npoints = max(int(npoints), 2)
@@ -1468,7 +1478,9 @@ _SQRT_HALF_PI: float = float(np.sqrt(np.pi / 2))
 _SQRT_2_OVER_PI: float = float(np.sqrt(2 / np.pi))
 
 
-def _scipy_fresnel(z: npt.NDArray[np.float64]) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+def _scipy_fresnel(
+    z: npt.NDArray[np.float64],
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
     from scipy.special import fresnel
 
     s, c = fresnel(np.asarray(z, dtype=np.float64))
@@ -1479,7 +1491,9 @@ def _scipy_fresnel(z: npt.NDArray[np.float64]) -> tuple[npt.NDArray[np.float64],
 def fresnel(z: Array) -> tuple[Array, Array]:
     """Differentiable Fresnel integrals (S(z), C(z)) = scipy.special.fresnel(z)."""
     shape = jax.ShapeDtypeStruct(jnp.shape(z), jnp.float64)
-    return jax.pure_callback(_scipy_fresnel, (shape, shape), z, vmap_method="expand_dims")
+    return jax.pure_callback(
+        _scipy_fresnel, (shape, shape), z, vmap_method="expand_dims"
+    )
 
 
 @fresnel.defjvp
@@ -1587,7 +1601,9 @@ def euler(
         npoints = 2 * num_pts_euler + num_pts_arc - 2
     else:
         if not npoints:
-            npoints = abs(int(angle_f / 360 * to_float(radius) / pdk.bend_points_distance / 2))
+            npoints = abs(
+                int(angle_f / 360 * to_float(radius) / pdk.bend_points_distance / 2)
+            )
             npoints = max(npoints, _bend_npoints_floor(angle_f), 2)
         else:
             npoints = max(int(npoints), 2)

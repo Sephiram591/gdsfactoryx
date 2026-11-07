@@ -108,9 +108,7 @@ def _bend_topic(
 
     c.info["radius"] = radius
     c.info["length"] = maybe_float(round_st(path.length(), 3))
-    c.info["dy"] = maybe_float(
-        round_st(abs(path.points[0][1] - path.points[-1][1]), 3)
-    )
+    c.info["dy"] = maybe_float(round_st(abs(path.points[0][1] - path.points[-1][1]), 3))
     c.info["width"] = maybe_float(width or x.width)
 
     if not allow_min_radius_violation:

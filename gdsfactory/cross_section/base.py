@@ -22,9 +22,8 @@ from pydantic import (
     model_validator,
 )
 
-from gdsfactory._jax import float_or_array, to_float, xp
-
 from gdsfactory import typings
+from gdsfactory._jax import float_or_array, to_float, xp
 from gdsfactory.component import Component
 from gdsfactory.config import CONF, ErrorType
 
@@ -512,9 +511,4 @@ class TransitionAsymmetric(BaseModel, arbitrary_types_allowed=True):
 
 
 type CrossSectionFactory = Callable[..., "CrossSection"]
-type CrossSectionSpec = (
-    CrossSection
-    | str
-    | dict[str, Any]
-    | CrossSectionFactory
-)
+type CrossSectionSpec = CrossSection | str | dict[str, Any] | CrossSectionFactory

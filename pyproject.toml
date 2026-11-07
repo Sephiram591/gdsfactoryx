@@ -5,7 +5,7 @@ build-backend = "flit_core.buildapi"
 requires = ["flit_core>=3.2,<5"]
 
 [project]
-authors = [{name = "gdsfactory community"}]
+authors = [{ name = "gdsfactory community" }]
 classifiers = [
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
@@ -49,18 +49,12 @@ dependencies = [
 ]
 description = "python library to generate GDS layouts"
 keywords = ["eda", "photonics", "python"]
-license = {file = "LICENSE"}
-maintainers = [{name = "sephiram591"}]
+license = { file = "LICENSE" }
+maintainers = [{ name = "sephiram591" }]
 name = "gdsfactoryx"
 readme = "README.md"
 requires-python = ">=3.12,<3.15"
 version = "9.51.0.post1"
-
-[project.urls]
-Homepage = "https://github.com/Sephiram591/gdsfactoryx"
-Issues = "https://github.com/Sephiram591/gdsfactoryx/issues"
-"Upstream documentation" = "https://gdsfactory.github.io/gdsfactory/"
-"Upstream project" = "https://github.com/gdsfactory/gdsfactory"
 
 [project.optional-dependencies]
 bench = ["asv>=0.6,<1"]
@@ -101,6 +95,12 @@ maintainer = [
 
 [project.scripts]
 gf = "gdsfactory.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/Sephiram591/gdsfactoryx"
+Issues = "https://github.com/Sephiram591/gdsfactoryx/issues"
+"Upstream documentation" = "https://gdsfactory.github.io/gdsfactory/"
+"Upstream project" = "https://github.com/gdsfactory/gdsfactory"
 
 [tool.codespell]
 ignore-words-list = "te, te/tm, te, ba, fpr, fpr_spacing, ro, nd, donot, schem"

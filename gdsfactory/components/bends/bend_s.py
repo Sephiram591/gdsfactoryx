@@ -11,7 +11,14 @@ import numpy as np
 import numpy.typing as npt
 
 import gdsfactory as gf
-from gdsfactory._jax import has_tracers, is_tracer, maybe_float, stop_gradient, to_float, xp
+from gdsfactory._jax import (
+    has_tracers,
+    is_tracer,
+    maybe_float,
+    stop_gradient,
+    to_float,
+    xp,
+)
 from gdsfactory.component import Component
 from gdsfactory.config import ErrorType
 from gdsfactory.functions import angles_deg, curvature, snap_angle
@@ -86,9 +93,7 @@ def bezier(
     if to_float(xp.max(xp.abs(curv))) == 0:
         min_bend_radius = np.inf
     else:
-        min_bend_radius = maybe_float(
-            gf.snap.snap_to_grid(1 / xp.max(xp.abs(curv)))
-        )
+        min_bend_radius = maybe_float(gf.snap.snap_to_grid(1 / xp.max(xp.abs(curv))))
 
     c.info["length"] = maybe_float(length)
     c.info["min_bend_radius"] = min_bend_radius

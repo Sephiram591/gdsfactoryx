@@ -2,12 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-import kfactory as kf
-from gdsfactory.routing._kf_router import ManhattanRoute
-
 import gdsfactory as gf
 from gdsfactory._jax import to_float
 from gdsfactory.component import Component
+from gdsfactory.routing._kf_router import ManhattanRoute
 from gdsfactory.routing.auto_taper import add_auto_tapers
 from gdsfactory.routing.route_single_sbend import add_straight
 from gdsfactory.routing.sort_ports import sort_ports as sort_ports_function
@@ -90,7 +88,9 @@ def route_bundle_sbend(
     routes = []
 
     for p1, p2 in zip(list(ports1), list(ports2), strict=False):
-        orthogonality_error = abs(abs(to_float(p1.orientation) - to_float(p2.orientation)) - 180)
+        orthogonality_error = abs(
+            abs(to_float(p1.orientation) - to_float(p2.orientation)) - 180
+        )
         if orthogonality_error > 0.1:
             raise ValueError(
                 f"Ports need to have orthogonal orientation {orthogonality_error}\n"

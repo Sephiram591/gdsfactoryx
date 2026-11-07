@@ -120,7 +120,12 @@ def grating_coupler_rectangular_arbitrary(
 
     if layer_slab:
         slab_xmin = length_taper - slab_offset
-        slab_xmax = length_taper + xp.sum(xp.asarray(widths)) + xp.sum(xp.asarray(gaps)) + slab_offset
+        slab_xmax = (
+            length_taper
+            + xp.sum(xp.asarray(widths))
+            + xp.sum(xp.asarray(gaps))
+            + slab_offset
+        )
         slab_ysize = width_grating + 2 * slab_offset
         yslab = slab_ysize / 2
         c.add_polygon(

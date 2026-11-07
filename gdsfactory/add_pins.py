@@ -23,8 +23,8 @@ import yaml
 
 import gdsfactory as gf
 from gdsfactory import typings
-from gdsfactory.component import Component, ComponentReference, container
 from gdsfactory._jax import cos_deg, sin_deg, to_float, xp
+from gdsfactory.component import Component, ComponentReference, container
 from gdsfactory.config import CONF
 from gdsfactory.port import select_ports
 from gdsfactory.typings import InstanceOrVInstance

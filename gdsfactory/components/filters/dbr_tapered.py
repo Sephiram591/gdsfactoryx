@@ -5,8 +5,8 @@ __all__ = ["dbr_tapered"]
 from typing import cast
 
 import gdsfactory as gf
-from gdsfactory._jax import to_float, xp
 from gdsfactory import Component
+from gdsfactory._jax import to_float, xp
 from gdsfactory.snap import snap_to_grid2x
 from gdsfactory.typings import CrossSectionSpec, Size
 
@@ -133,7 +133,9 @@ def dbr_tapered(
     output_taper.connect("o1", straight.ports["o2"])
     num = to_float(2 * taper_length + length) // to_float(period)
 
-    size = cast("tuple[float, float]", tuple(snap_to_grid2x(xp.stack([period * dc, w2]))))
+    size = cast(
+        "tuple[float, float]", tuple(snap_to_grid2x(xp.stack([period * dc, w2])))
+    )
     assert xs.layer is not None
     teeth = gf.components.rectangle(size=size, layer=xs.layer, port_type=None)
 

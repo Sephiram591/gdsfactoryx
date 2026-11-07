@@ -11,13 +11,13 @@ import networkx as nx
 import numpy as np
 import numpy.typing as npt
 from kfactory.routing.aa.optical import OpticalAllAngleRoute
-from gdsfactory.routing._kf_router import ManhattanRoute
 from klayout.dbcore import DPoint
 from shapely.geometry import LineString
 
 import gdsfactory as gf
 from gdsfactory._jax import to_float
 from gdsfactory.component import Component
+from gdsfactory.routing._kf_router import ManhattanRoute
 from gdsfactory.typings import (
     ComponentSpec,
     Coordinate,

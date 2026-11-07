@@ -5,8 +5,8 @@ __all__ = ["disk", "disk_heater"]
 import math
 
 import gdsfactory as gf
-from gdsfactory._jax import to_float, xp
 from gdsfactory import Component
+from gdsfactory._jax import to_float, xp
 from gdsfactory.component import ComponentReference
 from gdsfactory.cross_section import CrossSection
 from gdsfactory.typings import (

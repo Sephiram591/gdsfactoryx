@@ -120,7 +120,9 @@ def test_route_bundle_gradients(name: str) -> None:
         kwargs[name] = v
         c = gf.Component()
         p1 = [
-            gf.Port(f"t{i}", center=(10.0 * i, 0.0), width=0.5, orientation=90, layer=(1, 0))
+            gf.Port(
+                f"t{i}", center=(10.0 * i, 0.0), width=0.5, orientation=90, layer=(1, 0)
+            )
             for i in range(4)
         ]
         p2 = [

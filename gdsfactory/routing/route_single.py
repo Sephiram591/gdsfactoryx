@@ -36,8 +36,8 @@ import kfactory as kf
 import gdsfactory as gf
 from gdsfactory._jax import to_float
 from gdsfactory.component import Component
-from gdsfactory.routing._kf_router import ManhattanRoute, route_bundle_kf
 from gdsfactory.config import CONF
+from gdsfactory.routing._kf_router import ManhattanRoute, route_bundle_kf
 from gdsfactory.routing.auto_taper import add_auto_tapers
 from gdsfactory.typings import (
     STEP_DIRECTIVES,
@@ -296,7 +296,12 @@ def route_single(
 
 
 def _show_placer_error(
-    component: Component, p1: Port, p2: Port, pts: Sequence[Any], width: Any, e: Exception
+    component: Component,
+    p1: Port,
+    p2: Port,
+    pts: Sequence[Any],
+    width: Any,
+    e: Exception,
 ) -> None:
     """Shows the failed route in KLayout's marker database (like upstream)."""
     import klayout.db as kdb
@@ -328,10 +333,17 @@ def _error_path(
     path = Path(pts_arr)
     w = asarray(width)
     q1 = path.centerpoint_offset_curve(pts_arr, w / 2, path.start_angle, path.end_angle)
-    q2 = path.centerpoint_offset_curve(pts_arr, -w / 2, path.start_angle, path.end_angle)
-    component.add_polygon(jnp.concatenate([q1, q2[::-1]]), layer=gf.CONF.layer_error_path)
+    q2 = path.centerpoint_offset_curve(
+        pts_arr, -w / 2, path.start_angle, path.end_angle
+    )
+    component.add_polygon(
+        jnp.concatenate([q1, q2[::-1]]), layer=gf.CONF.layer_error_path
+    )
     return ManhattanRoute(
-        backbone=[kdb.Point(round(to_float(a) * 1000), round(to_float(b) * 1000)) for a, b in pts],
+        backbone=[
+            kdb.Point(round(to_float(a) * 1000), round(to_float(b) * 1000))
+            for a, b in pts
+        ],
         backbone_um=pts_arr,
         start_port=p1,
         end_port=p2,

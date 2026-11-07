@@ -18,14 +18,22 @@ and straights are then placed with traced geometry.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from typing import Any
 
 import jax
 import numpy as np
 
 import gdsfactory as gf
-from gdsfactory._jax import asarray, has_tracers, is_tracer, stop_gradient, to_float, to_numpy, xp
+from gdsfactory._jax import (
+    asarray,
+    has_tracers,
+    is_tracer,
+    stop_gradient,
+    to_float,
+    to_numpy,
+    xp,
+)
 from gdsfactory.component import Component, ComponentReference
 from gdsfactory.routing._kf_router import ManhattanRoute
 from gdsfactory.typings import (
@@ -170,9 +178,9 @@ def place_all_angle_route(
             bend = bend_func(width=width, angle=xp.abs(a))
             p1, p2 = (bend.ports[_p] for _p in bend_ports)
             effective_radius = _effective_radius(p1, p2)
-            if to_float(xp.linalg.norm(pt - old_pt) - effective_radius - start_offset) < -(
-                dbu * tolerance
-            ):
+            if to_float(
+                xp.linalg.norm(pt - old_pt) - effective_radius - start_offset
+            ) < -(dbu * tolerance):
                 raise ValueError(
                     f"Not enough space to place bends at points {[to_numpy(old_pt), to_numpy(pt)]}."
                 )
@@ -229,7 +237,9 @@ def _kf_port(cell: Any, m: Any, p: _P, name: str, layer: Any) -> Any:
 
     return cell.create_port(
         name=name,
-        dcplx_trans=kdb.DCplxTrans(1, to_float(p.a), False, to_float(p.c[0]), to_float(p.c[1])),
+        dcplx_trans=kdb.DCplxTrans(
+            1, to_float(p.a), False, to_float(p.c[0]), to_float(p.c[1])
+        ),
         width=round(to_float(p.w) * 1000) / 1000,
         layer=m.layer(layer),
         port_type="optical",
@@ -240,7 +250,11 @@ class _Router:
     """Runs kfactory's all-angle backbone algorithm and its traced port side by side."""
 
     def __init__(
-        self, cell: Any, bend_func: Callable[..., Component], bend_ports: tuple[str, str], layer: Any
+        self,
+        cell: Any,
+        bend_func: Callable[..., Component],
+        bend_ports: tuple[str, str],
+        layer: Any,
     ) -> None:
         from gdsfactory.routing._kf_router import mirror
 
@@ -282,7 +296,7 @@ class _Router:
         return rp, xe, r2
 
     def optimal_angle(self, kps: Any, kpe: Any, ps: _P, pe: _P) -> Any:
-        """kfactory's optimized angle (value) with its implicit derivative."""
+        """Kfactory's optimized angle (value) with its implicit derivative."""
         import kfactory.routing.aa.optical as aa
         import klayout.db as kdb
         from scipy.optimize import minimize_scalar
@@ -348,11 +362,15 @@ class _Router:
             _p1=p1,
         )
         if xe is None or not isinstance(kv, tuple):
-            raise RuntimeError(f"Cannot find an automatic route from {kps} to bundle port {kpe}")
+            raise RuntimeError(
+                f"Cannot find an automatic route from {kps} to bundle port {kpe}"
+            )
         return [ps.c, rp, xe, *backbone[1:]]
 
 
-def _backbone2bundle(backbone: list[Any], widths: list[Any], spacings: list[Any]) -> list[list[Any]]:
+def _backbone2bundle(
+    backbone: list[Any], widths: list[Any], spacings: list[Any]
+) -> list[list[Any]]:
     """Traced kfactory ``backbone2bundle``."""
     edges = list(zip(backbone[:-1], backbone[1:], strict=True))
     width = sum(widths) + sum(spacings)
@@ -414,25 +432,43 @@ def _backbones(
                 v_end = pts[-1] - pts[-2]
                 psb = ps.copy()
                 psb.dcplx_trans = kdb.DCplxTrans(
-                    1, float(np.rad2deg(np.arctan2(v_start.y, v_start.x))), False, pts[0].to_v()
+                    1,
+                    float(np.rad2deg(np.arctan2(v_start.y, v_start.x))),
+                    False,
+                    pts[0].to_v(),
                 )
                 peb = pe.copy()
                 peb.dcplx_trans = kdb.DCplxTrans(
-                    1, float(np.rad2deg(np.arctan2(v_end.y, v_end.x))), False, pts[-1].to_v()
+                    1,
+                    float(np.rad2deg(np.arctan2(v_end.y, v_end.x))),
+                    False,
+                    pts[-1].to_v(),
                 )
                 pts_ = aa._get_connection_between_ports(
-                    port_start=ps, port_end=psb, bend_factory=r.kf_bend, bend_ports=bend_ports, backbone=pts
+                    port_start=ps,
+                    port_end=psb,
+                    bend_factory=r.kf_bend,
+                    bend_ports=bend_ports,
+                    backbone=pts,
                 )
                 pts_.reverse()
                 pts_ = aa._get_connection_between_ports(
-                    port_start=pe, port_end=peb, bend_factory=r.kf_bend, backbone=pts_, bend_ports=bend_ports
+                    port_start=pe,
+                    port_end=peb,
+                    bend_factory=r.kf_bend,
+                    backbone=pts_,
+                    bend_ports=bend_ports,
                 )
                 pts_.reverse()
                 kf_routes.append(np.array([[p.x, p.y] for p in pts_]))
         else:
             for ps, pe in zip(sps, eps, strict=False):
                 pts_ = aa._get_connection_between_ports(
-                    port_start=ps, port_end=pe, bend_factory=r.kf_bend, bend_ports=bend_ports, backbone=[]
+                    port_start=ps,
+                    port_end=pe,
+                    bend_factory=r.kf_bend,
+                    bend_ports=bend_ports,
+                    backbone=[],
                 )
                 pts_.append(pe.dcplx_trans.disp.to_p())
                 kf_routes.append(np.array([[p.x, p.y] for p in pts_]))
@@ -457,7 +493,6 @@ def _backbones(
                 pts_ = r.connection(ps, pe, [])
                 pts_.append(pe.c)
                 traced_routes.append(pts_)
-
 
     out = []
     for i, (tr, kr) in enumerate(zip(traced_routes, kf_routes, strict=True)):

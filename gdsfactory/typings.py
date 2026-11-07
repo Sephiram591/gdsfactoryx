@@ -27,14 +27,14 @@ from enum import IntEnum
 from functools import partial
 from typing import Any, Literal, ParamSpec, Protocol, TypedDict, TypeVar
 
-import kfactory as kf
 import klayout.db as kdb
 import numpy as np
 import numpy.typing as npt
 from kfactory import DPin as Pin  # runtime re-export of a class
 from kfactory import DPins as Pins  # runtime re-export of a class
-from gdsfactory._ports import Port  # differentiable port
 from kfactory.layer import LayerEnum
+
+from gdsfactory._ports import Port  # differentiable port
 
 STEP_DIRECTIVES = {
     "x",
@@ -175,9 +175,7 @@ type ConnectivitySpec = ConductorConductorName | ConductorViaConductorName
 
 type Sparameters = dict[str, npt.NDArray[np.float64]]
 
-type Route = (
-    Any
-)
+type Route = Any
 type RoutingStrategy = Callable[..., Sequence[Route]]
 type RoutingStrategies = dict[str, RoutingStrategy]
 

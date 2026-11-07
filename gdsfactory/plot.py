@@ -99,9 +99,13 @@ def plot_polygons(
     if ax is None:
         _, ax = plt.subplots()
     cmap = plt.get_cmap("tab20")
-    for i, (_layer, polys) in enumerate(sorted(component.get_polygons_points().items())):
+    for i, (_layer, polys) in enumerate(
+        sorted(component.get_polygons_points().items())
+    ):
         for p in polys:
-            ax.add_patch(MplPolygon(to_numpy(p), closed=True, alpha=alpha, color=cmap(i % 20)))
+            ax.add_patch(
+                MplPolygon(to_numpy(p), closed=True, alpha=alpha, color=cmap(i % 20))
+            )
     ax.autoscale_view()
     ax.set_aspect("equal")
     return ax

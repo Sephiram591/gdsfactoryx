@@ -29,7 +29,7 @@ DBU = 1e-3
 
 
 def to_dbu(x: Any) -> DNum:
-    """um -> dbu like kfactory (``CplxTrans(dbu).inverted() * x``), keeping derivatives."""
+    """Um -> dbu like kfactory (``CplxTrans(dbu).inverted() * x``), keeping derivatives."""
     if isinstance(x, DNum):
         return x
     v = kdb.CplxTrans(DBU).inverted() * to_float(x)
@@ -39,11 +39,13 @@ def to_dbu(x: Any) -> DNum:
 
 
 def _steps(value: Any, n: int) -> list[list[Step]]:
-    """kfactory's conversion of starts/ends (dbu numbers or Steps) to per-route Steps."""
+    """Kfactory's conversion of starts/ends (dbu numbers or Steps) to per-route Steps."""
     if value is None or (isinstance(value, list | tuple) and len(value) == 0):
         return [[] for _ in range(n)]
-    if isinstance(value, DNum | int | float | np.number) or is_tracer(value) or (
-        isinstance(value, np.ndarray | jax.Array) and np.ndim(value) == 0
+    if (
+        isinstance(value, DNum | int | float | np.number)
+        or is_tracer(value)
+        or (isinstance(value, np.ndarray | jax.Array) and np.ndim(value) == 0)
     ):
         return [[Straight(dist=to_dbu(value))] for _ in range(n)]
     if isinstance(value, list):
@@ -136,7 +138,9 @@ def path_length_match(
                     ]
                 )
             case _:
-                raise ValueError(f"Argument side must be of any value of {LoopSide.__members__}")
+                raise ValueError(
+                    f"Argument side must be of any value of {LoopSide.__members__}"
+                )
         if element < -1:
             element_pts = router.start.pts[element - 1 : element + 1]
         elif element == -1:
@@ -204,7 +208,7 @@ def traced_route_bundle(
     allow_sbend: bool = False,
     constraints: Sequence[Any] | None = None,
 ) -> list[ManhattanRouter]:
-    """kfactory ``route_bundle`` (routing part only) on dual coordinates.
+    """Kfactory ``route_bundle`` (routing part only) on dual coordinates.
 
     Args:
         start_ports: start port transformations (dual, dbu).
@@ -235,10 +239,16 @@ def traced_route_bundle(
     end_ports = list(end_ports)
     if start_angles is not None:
         sa = start_angles if isinstance(start_angles, list) else [start_angles] * n
-        start_ports = [p * Trans(angles[a] - p.angle, False, 0, 0) for a, p in zip(sa, start_ports, strict=True)]
+        start_ports = [
+            p * Trans(angles[a] - p.angle, False, 0, 0)
+            for a, p in zip(sa, start_ports, strict=True)
+        ]
     if end_angles is not None:
         ea = end_angles if isinstance(end_angles, list) else [end_angles] * n
-        end_ports = [p * Trans(angles[a] - p.angle, False, 0, 0) for a, p in zip(ea, end_ports, strict=True)]
+        end_ports = [
+            p * Trans(angles[a] - p.angle, False, 0, 0)
+            for a, p in zip(ea, end_ports, strict=True)
+        ]
     if route_width:
         rw = route_width if isinstance(route_width, list) else [route_width] * n
         widths = [to_dbu(w) for w in rw]

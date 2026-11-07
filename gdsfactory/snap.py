@@ -104,8 +104,10 @@ def snap_to_grid[T: npt.NDArray[np.floating[Any]]](
         # straight-through: snapped value, identity gradient
         import jax
 
-        xa = jnp.asarray(x, dtype=jnp.float64) if not isinstance(x, list | tuple) else jnp.stack(
-            [jnp.asarray(v, dtype=jnp.float64) for v in x]
+        xa = (
+            jnp.asarray(x, dtype=jnp.float64)
+            if not isinstance(x, list | tuple)
+            else jnp.stack([jnp.asarray(v, dtype=jnp.float64) for v in x])
         )
         snapped = grid_um * jnp.floor(jax.lax.stop_gradient(xa) / grid_um + 0.5)
         return cast("_T | float", xa + jax.lax.stop_gradient(snapped - xa))

@@ -70,15 +70,19 @@ def kpolygon_to_array(poly: Any) -> Array:
     if isinstance(poly, kdb.Polygon | kdb.SimplePolygon):
         if isinstance(poly, kdb.Polygon) and poly.holes():
             poly = poly.resolved_holes()
-        pts = [(p.x * DBU, p.y * DBU) for p in poly.each_point_hull()] if isinstance(
-            poly, kdb.Polygon
-        ) else [(p.x * DBU, p.y * DBU) for p in poly.each_point()]
+        pts = (
+            [(p.x * DBU, p.y * DBU) for p in poly.each_point_hull()]
+            if isinstance(poly, kdb.Polygon)
+            else [(p.x * DBU, p.y * DBU) for p in poly.each_point()]
+        )
     elif isinstance(poly, kdb.DPolygon | kdb.DSimplePolygon):
         if isinstance(poly, kdb.DPolygon) and poly.holes():
             poly = poly.resolved_holes()
-        pts = [(p.x, p.y) for p in poly.each_point_hull()] if isinstance(
-            poly, kdb.DPolygon
-        ) else [(p.x, p.y) for p in poly.each_point()]
+        pts = (
+            [(p.x, p.y) for p in poly.each_point_hull()]
+            if isinstance(poly, kdb.DPolygon)
+            else [(p.x, p.y) for p in poly.each_point()]
+        )
     else:
         raise TypeError(f"Unsupported polygon type {type(poly)}")
     return asarray(np.asarray(pts, dtype=np.float64))
@@ -100,10 +104,17 @@ def klayout_shape_to_arrays(shape: Any) -> list[Array]:
         return [kpolygon_to_array(shape.polygon())]
     if isinstance(shape, kdb.DPath):
         return [kpolygon_to_array(shape.polygon())]
-    if isinstance(shape, kdb.Polygon | kdb.DPolygon | kdb.SimplePolygon | kdb.DSimplePolygon):
+    if isinstance(
+        shape, kdb.Polygon | kdb.DPolygon | kdb.SimplePolygon | kdb.DSimplePolygon
+    ):
         return [kpolygon_to_array(shape)]
     if isinstance(shape, kdb.Shape):
-        if shape.is_box() or shape.is_polygon() or shape.is_path() or shape.is_simple_polygon():
+        if (
+            shape.is_box()
+            or shape.is_polygon()
+            or shape.is_path()
+            or shape.is_simple_polygon()
+        ):
             return [kpolygon_to_array(shape.dpolygon)]
         return []
     raise TypeError(f"Unsupported klayout shape {type(shape)}")
@@ -219,8 +230,12 @@ def to_kfactory(
                 kinst.set_property(PROPID.NAME, r.name)
         if add_ports:
             for p in c.ports:
-                orientation = to_float(p.orientation) if p.orientation is not None else 0.0
-                trans = kdb.DCplxTrans(1, orientation, False, to_float(p.x), to_float(p.y))
+                orientation = (
+                    to_float(p.orientation) if p.orientation is not None else 0.0
+                )
+                trans = kdb.DCplxTrans(
+                    1, orientation, False, to_float(p.x), to_float(p.y)
+                )
                 kp = kc.create_port(
                     name=p.name,
                     width=round(to_float(p.width) / DBU) * DBU,
@@ -246,8 +261,9 @@ def to_kfactory(
     virtual_built: dict[tuple[int, int], Any] = {}
 
     def insert_virtual(parent: Any, r: Any, trans: Any) -> None:
-        """kfactory ``VInstance.insert_into``: manhattan base transform for the
-        instance, the residual transformation baked into a copy of the cell."""
+        """Kfactory ``VInstance.insert_into``: manhattan base transform for the
+        instance, the residual transformation baked into a copy of the cell.
+        """
         trans_ = trans * r.transform.to_klayout()
         base = kdb.DCplxTrans(kdb.ICplxTrans(trans_, DBU).s_trans().to_dtype(DBU))
         residual = base.inverted() * trans_
@@ -294,11 +310,15 @@ def to_kfactory(
                     continue
                 shapes = kc.kdb_cell.shapes(layer_index(lay))
                 for poly in polys:
-                    shapes.insert(array_to_kdpolygon(poly).transformed(residual).to_itype(DBU))
+                    shapes.insert(
+                        array_to_kdpolygon(poly).transformed(residual).to_itype(DBU)
+                    )
             for lab in c.labels:
                 if lab.layer not in excluded:
                     kc.kdb_cell.shapes(layer_index(lab.layer)).insert(
-                        kdb.DText(lab.text, to_float(lab.x), to_float(lab.y)).transformed(residual)
+                        kdb.DText(
+                            lab.text, to_float(lab.x), to_float(lab.y)
+                        ).transformed(residual)
                     )
             for r in c.insts:
                 insert_virtual(kc, r, residual)
@@ -329,13 +349,17 @@ def to_kfactory(
         if add_ports:
             for p in c.ports:
                 q = p.copy(rt, on_grid=False)
-                orientation = to_float(q.orientation) if q.orientation is not None else 0.0
+                orientation = (
+                    to_float(q.orientation) if q.orientation is not None else 0.0
+                )
                 kp = kc.create_port(
                     name=q.name,
                     width=round(to_float(q.width) / DBU) * DBU,
                     layer=layer_index(q.layer),
                     port_type=q.port_type,
-                    dcplx_trans=kdb.DCplxTrans(1, orientation, False, to_float(q.x), to_float(q.y)),
+                    dcplx_trans=kdb.DCplxTrans(
+                        1, orientation, False, to_float(q.x), to_float(q.y)
+                    ),
                 )
                 with contextlib.suppress(Exception):
                     kp.info.update(_clean(dict(q.info)))
@@ -353,7 +377,9 @@ def to_kfactory(
     return build(component)
 
 
-def flatten_exact(component: Component, merge: bool = True) -> tuple[dict[int, list[Array]], list[Any]]:
+def flatten_exact(
+    component: Component, merge: bool = True
+) -> tuple[dict[int, list[Array]], list[Any]]:
     """Flattens a (concrete) component exactly like kfactory's ``KCell.flatten``.
 
     Virtual references are inserted with ``insert_into_flat`` semantics (float
@@ -390,7 +416,10 @@ def flatten_exact(component: Component, merge: bool = True) -> tuple[dict[int, l
         if r.na > 1 or r.nb > 1:
             a, b = to_numpy(r.a), to_numpy(r.b)
             transforms = [
-                kdb.DCplxTrans(float(ia * a[0] + ib * b[0]), float(ia * a[1] + ib * b[1])) * trans_
+                kdb.DCplxTrans(
+                    float(ia * a[0] + ib * b[0]), float(ia * a[1] + ib * b[1])
+                )
+                * trans_
                 for ia in range(r.na)
                 for ib in range(r.nb)
             ]
@@ -399,15 +428,21 @@ def flatten_exact(component: Component, merge: bool = True) -> tuple[dict[int, l
                 for lay, polys in r.cell.polygons.items():
                     shapes = kc.kdb_cell.shapes(layer_index(lay))
                     for poly in polys:
-                        shapes.insert(array_to_kdpolygon(poly).transformed(tr).to_itype(DBU))
+                        shapes.insert(
+                            array_to_kdpolygon(poly).transformed(tr).to_itype(DBU)
+                        )
                 for lab in r.cell.labels:
                     kc.kdb_cell.shapes(layer_index(lab.layer)).insert(
-                        kdb.DText(lab.text, to_float(lab.x), to_float(lab.y)).transformed(tr)
+                        kdb.DText(
+                            lab.text, to_float(lab.x), to_float(lab.y)
+                        ).transformed(tr)
                     )
                 for rr in r.cell.insts:
                     insert_flat(rr, tr)
             else:
-                child = to_kfactory(r.cell, kcl=kcl, add_ports=False, cache=cache, unique_prefix="f_")
+                child = to_kfactory(
+                    r.cell, kcl=kcl, add_ports=False, cache=cache, unique_prefix="f_"
+                )
                 for li in kcl.layer_indexes():
                     reg = kdb.Region(child.kdb_cell.begin_shapes_rec(li))
                     if not reg.is_empty():
@@ -448,9 +483,11 @@ def _clean(d: dict[str, Any]) -> dict[str, Any]:
             cv = clean_value_json(v)
         except Exception:
             continue
-        if isinstance(cv, int | float | str | bool) or cv is None:
-            out[k] = cv
-        elif isinstance(cv, list | dict):
+        if (
+            isinstance(cv, int | float | str | bool)
+            or cv is None
+            or isinstance(cv, list | dict)
+        ):
             out[k] = cv
     return out
 

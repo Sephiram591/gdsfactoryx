@@ -19,12 +19,11 @@ from gdsfactory._jax import (
     asarray,
     cos_deg,
     is_tracer,
-    jnp,
-    xp,
     maybe_float,
     sin_deg,
     snap_dbu,
     to_float,
+    xp,
 )
 from gdsfactory.transform import Transform, manhattan_angle
 
@@ -59,6 +58,7 @@ class Port:
     """
 
     __slots__ = (
+        "__dict__",  # allows extra attributes (e.g. name_original)
         "_center",
         "_orientation",
         "_width",
@@ -66,9 +66,8 @@ class Port:
         "layer",
         "mirror",
         "name",
-        "port_type",
         "on_grid",
-        "__dict__",  # allows extra attributes (e.g. name_original)
+        "port_type",
     )
 
     def __init__(
@@ -300,7 +299,9 @@ class Port:
     def move(self, *args: Any) -> Port:
         """Moves in place: move((dx, dy)) or move(dx, dy) or move(origin, dest)."""
         dx, dy = _move_args(args)
-        self._center = self._snap_center(self._center + xp.stack([asarray(dx), asarray(dy)]))
+        self._center = self._snap_center(
+            self._center + xp.stack([asarray(dx), asarray(dy)])
+        )
         return self
 
     def moved(self, *args: Any) -> Port:
@@ -362,7 +363,7 @@ class Port:
             return f"Port(name={self.name!r})"
 
     def print(self) -> None:
-        print(repr(self))  # noqa: T201
+        print(repr(self))
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Port):
@@ -505,7 +506,9 @@ class Ports:
     def remove(self, name: str) -> None:
         self._ports = [p for p in self._ports if p.name != name]
 
-    def sort(self, key: Callable[[Port], Any] | None = None, reverse: bool = False) -> None:
+    def sort(
+        self, key: Callable[[Port], Any] | None = None, reverse: bool = False
+    ) -> None:
         self._ports.sort(key=key or (lambda p: p.name), reverse=reverse)  # type: ignore[arg-type]
 
     def reverse(self) -> None:
@@ -575,7 +578,12 @@ class Pin:
         self.info = PortInfo(info or {})
 
     def copy(self, trans: Transform | None = None) -> Pin:
-        return Pin(self.name, [p.copy(trans) for p in self.ports], self.pin_type, dict(self.info))
+        return Pin(
+            self.name,
+            [p.copy(trans) for p in self.ports],
+            self.pin_type,
+            dict(self.info),
+        )
 
     def __repr__(self) -> str:
         return f"Pin({self.name!r}, ports={[p.name for p in self.ports]}, pin_type={self.pin_type!r})"

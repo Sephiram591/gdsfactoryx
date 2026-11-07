@@ -5,7 +5,6 @@ from __future__ import annotations
 import warnings
 from collections.abc import Sequence
 from functools import partial
-
 from typing import Any
 
 import numpy as np

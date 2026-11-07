@@ -67,7 +67,6 @@ def optimal_step(
         a: float = 2,
     ) -> tuple[float, float]:
         """Finds the eta associated with x_desired or y_desired along the optimal curve."""
-
         W0, a0 = to_float(W), to_float(a)
         x0 = None if x_desired is None else to_float(x_desired)
         y0 = None if y_desired is None else to_float(y_desired)

@@ -388,9 +388,9 @@ def extrude_path(
 
     a_plus = a2 + a1
     cos_a_min = xp.cos(a2 - a1)
-    offsets = xp.column_stack((-xp.sin(a_plus) / cos_a_min, xp.cos(a_plus) / cos_a_min)) * (
-        0.5 * width
-    )
+    offsets = xp.column_stack(
+        (-xp.sin(a_plus) / cos_a_min, xp.cos(a_plus) / cos_a_min)
+    ) * (0.5 * width)
 
     points_back = xp.flipud(points - offsets)
     if to_float(spike_length) != 0:

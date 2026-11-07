@@ -28,19 +28,19 @@ from typing import TYPE_CHECKING, Any
 import jax
 import numpy as np
 
-from gdsfactory._jax import Array, asarray, is_tracer, jnp, to_float, to_numpy, xp
+from gdsfactory._jax import Array, asarray, is_tracer, to_float, to_numpy, xp
 from gdsfactory._ports import Port
 from gdsfactory.transform import Transform
 
 if TYPE_CHECKING:
-    import kfactory as kf
-
     from gdsfactory.component import Component, ComponentReference
 
 DBU = 1e-3
 
 # Debug switch: run (and check against kfactory) the traced router on every route.
-_CHECK_TRACED_ROUTER = bool(__import__("os").environ.get("GDSFACTORYX_CHECK_TRACED_ROUTER"))
+_CHECK_TRACED_ROUTER = bool(
+    __import__("os").environ.get("GDSFACTORYX_CHECK_TRACED_ROUTER")
+)
 
 
 def _sg(x: Any) -> Any:
@@ -311,7 +311,9 @@ def route_bundle_kf(
             "name": p.name,
             "x": to_float(p.x),
             "y": to_float(p.y),
-            "orientation": to_float(p.orientation) if p.orientation is not None else 0.0,
+            "orientation": to_float(p.orientation)
+            if p.orientation is not None
+            else 0.0,
             "width": to_float(p.width),
             "layer": p.layer,
             "port_type": p.port_type,
@@ -358,7 +360,9 @@ def route_bundle_kf(
         straight_cells[kc.cell_index()] = (width, length)
         return kc
 
-    def run(cell: Any, kwargs: dict[str, Any], with_obstacles: bool) -> tuple[Any, _Hook]:
+    def run(
+        cell: Any, kwargs: dict[str, Any], with_obstacles: bool
+    ) -> tuple[Any, _Hook]:
         if with_obstacles:
             cell.create_inst(m.export(obstacles))
         sp = [
@@ -381,12 +385,16 @@ def route_bundle_kf(
             ends=kwargs["ends"],
             waypoints=wps,
             route_width=kwargs["route_width"],
-            bboxes=[_dbox(b.dbox if isinstance(b, PortBox) else b) for b in (bboxes or [])],
+            bboxes=[
+                _dbox(b.dbox if isinstance(b, PortBox) else b) for b in (bboxes or [])
+            ],
             on_collision=on_collision_run,
             on_placer_error=on_placer_error,
             collision_check_layers=None
             if not collision_check_layers
-            else [m.kcl.layout.get_info(m.layer(lay)) for lay in collision_check_layers],
+            else [
+                m.kcl.layout.get_info(m.layer(lay)) for lay in collision_check_layers
+            ],
             **kf_kwargs,
         )
         with hook.installed():
@@ -420,7 +428,9 @@ def route_bundle_kf(
                 )
             else:
                 layer_info = (
-                    m.kcl.layout.get_info(m.layer(place_layer)) if place_layer is not None else None
+                    m.kcl.layout.get_info(m.layer(place_layer))
+                    if place_layer is not None
+                    else None
                 )
                 routes = kf.routing.electrical.route_bundle(
                     cell, sp, ep, place_layer=layer_info, **common
@@ -450,7 +460,10 @@ def route_bundle_kf(
             run(cell, base, with_obstacles=True)  # shows the error and raises
             raise
         # ------------------------------------------------------------ backbones
-        base_bbs = [np.asarray([[p.x * DBU, p.y * DBU] for p in r.pts], dtype=float) for r in hook.records]
+        base_bbs = [
+            np.asarray([[p.x * DBU, p.y * DBU] for p in r.pts], dtype=float)
+            for r in hook.records
+        ]
         route_records = list(hook.records)
         traced_bbs: list[Array] | None = None
         if traced:
@@ -479,7 +492,9 @@ def route_bundle_kf(
         end_lookup = {_key(p): p for p in ports2}
         for i, (rk, rec) in enumerate(zip(routes_kf, route_records, strict=False)):
             bb = traced_backbone(i)
-            p_start = start_lookup.get(_kkey(rec.start)) or ports1[min(i, len(ports1) - 1)]
+            p_start = (
+                start_lookup.get(_kkey(rec.start)) or ports1[min(i, len(ports1) - 1)]
+            )
             p_end = end_lookup.get(_kkey(rec.end)) or ports2[min(i, len(ports2) - 1)]
             if router == "optical":
                 route = _rebuild_optical(
@@ -500,7 +515,13 @@ def route_bundle_kf(
                 )
             else:
                 route = _rebuild_electrical(
-                    component, rk, bb, p_start, p_end, route_width=route_width, place_layer=place_layer
+                    component,
+                    rk,
+                    bb,
+                    p_start,
+                    p_end,
+                    route_width=route_width,
+                    place_layer=place_layer,
                 )
             out.append(route)
         return out
@@ -541,7 +562,10 @@ def place_manhattan_kf(
             straight_cells[kc.cell_index()] = (width * DBU, length * DBU)
             return m.kcl[kc.cell_index()]
 
-        pts_dbu = [kdb.Point(round(to_float(x) / DBU), round(to_float(y) / DBU)) for x, y in pts]
+        pts_dbu = [
+            kdb.Point(round(to_float(x) / DBU), round(to_float(y) / DBU))
+            for x, y in pts
+        ]
         rk = place_manhattan(
             m.kcl[cell.cell_index()],
             p1=m.kcl[cell.cell_index()].ports[kp1.name],
@@ -551,10 +575,17 @@ def place_manhattan_kf(
             pts=pts_dbu,
             port_type=port_type,
             allow_width_mismatch=allow_width_mismatch,
-            route_width=round(to_float(route_width) / DBU) if route_width is not None else None,
+            route_width=round(to_float(route_width) / DBU)
+            if route_width is not None
+            else None,
         )
         backbone = xp.stack([xp.stack([asarray(x), asarray(y)]) for x, y in pts])
-        traced = is_tracer(backbone) or _has_traced_geometry(bend90) or is_tracer(p1.center_array) or is_tracer(p2.center_array)
+        traced = (
+            is_tracer(backbone)
+            or _has_traced_geometry(bend90)
+            or is_tracer(p1.center_array)
+            or is_tracer(p2.center_array)
+        )
         route = _rebuild_optical(
             component,
             rk,
@@ -591,7 +622,9 @@ def _dbox(b: Any) -> Any:
     if isinstance(b, kdb.Box):
         return b.to_dtype(DBU)
     if all(hasattr(b, a) for a in ("left", "bottom", "right", "top")):
-        return kdb.DBox(to_float(b.left), to_float(b.bottom), to_float(b.right), to_float(b.top))
+        return kdb.DBox(
+            to_float(b.left), to_float(b.bottom), to_float(b.right), to_float(b.top)
+        )
     vals = list(b)
     if len(vals) == 2:
         (x0, y0), (x1, y1) = vals
@@ -649,7 +682,7 @@ def _dual_port(kp: Any, p: Port) -> Any:
 
 
 def _traced_bend_radius(bend90: Component | None, kb: Any, port_type: str) -> Any:
-    """kfactory's get_radius of the bend, with the derivative of the traced bend."""
+    """Kfactory's get_radius of the bend, with the derivative of the traced bend."""
     from kfactory.routing.generic import get_radius
 
     from gdsfactory.routing._dual import DNum
@@ -696,14 +729,18 @@ def _traced_backbones(
     from gdsfactory.routing._traced_router import to_dbu, traced_route_bundle
 
     port_type = kf_kwargs.get("place_port_type", "optical")
-    start_ts = [_dual_port(kp, p) for kp, p in zip(hook.start_ports, ports1, strict=True)]
+    start_ts = [
+        _dual_port(kp, p) for kp, p in zip(hook.start_ports, ports1, strict=True)
+    ]
     end_ts = [_dual_port(kp, p) for kp, p in zip(hook.end_ports, ports2, strict=True)]
     widths = [
         DNum.traced(p.width / DBU if is_tracer(p.width) else None, kp.width)
         for kp, p in zip(hook.start_ports, ports1, strict=True)
     ]
     if router == "optical":
-        bend90_radius = _traced_bend_radius(bend90, getattr(hook, "bend90_cell", None), port_type)
+        bend90_radius = _traced_bend_radius(
+            bend90, getattr(hook, "bend90_cell", None), port_type
+        )
     else:
         bend90_radius = DNum(0)
     wps = None
@@ -745,14 +782,21 @@ def _traced_backbones(
             )
         out.append(
             xp.stack(
-                [xp.stack([asarray(p.x.tv()) * DBU, asarray(p.y.tv()) * DBU]) for p in pts]
+                [
+                    xp.stack([asarray(p.x.tv()) * DBU, asarray(p.y.tv()) * DBU])
+                    for p in pts
+                ]
             )
         )
     return out
 
 
 def _is_number(v: Any) -> bool:
-    return isinstance(v, int | float) or is_tracer(v) or type(v).__module__.startswith("jax")
+    return (
+        isinstance(v, int | float)
+        or is_tracer(v)
+        or type(v).__module__.startswith("jax")
+    )
 
 
 def _port_from_dict(d: dict[str, Any]) -> Port:
@@ -807,7 +851,13 @@ def _strip(c: Component, memo: dict[int, Component]) -> Component:
         t = r.transform
         ref = ComponentReference(
             _strip(r.cell, memo),
-            Transform(to_float(t.x), to_float(t.y), to_float(t.rotation), t.mirror, to_float(t.magnification)),
+            Transform(
+                to_float(t.x),
+                to_float(t.y),
+                to_float(t.rotation),
+                t.mirror,
+                to_float(t.magnification),
+            ),
             r._name,
             n,
             r.na,
@@ -886,13 +936,19 @@ def _rebuild_optical(
         elif ci in sbend_cells:
             offset, length, width = sbend_cells[ci]
             assert sbend_factory is not None
-            elements.append(dict(kind="rigid", t=conc_t, comp=m.by_index[ci], bend=False))
+            elements.append(
+                dict(kind="rigid", t=conc_t, comp=m.by_index[ci], bend=False)
+            )
         elif ci in m.by_index:
-            elements.append(dict(kind="rigid", t=conc_t, comp=m.by_index[ci], bend=False))
+            elements.append(
+                dict(kind="rigid", t=conc_t, comp=m.by_index[ci], bend=False)
+            )
         else:
             from gdsfactory.klayout_bridge import from_kfactory
 
-            elements.append(dict(kind="rigid", t=conc_t, comp=from_kfactory(inst.cell), bend=False))
+            elements.append(
+                dict(kind="rigid", t=conc_t, comp=from_kfactory(inst.cell), bend=False)
+            )
 
     width_traced = route_width if is_tracer(route_width) else None
 
@@ -903,7 +959,9 @@ def _rebuild_optical(
             e["comp"] = straight_factory(width=e["width"], length=e["length"])
 
     if traced:
-        _add_tangents(elements, backbone, p_start, p_end, straight_factory, width_traced, rk)
+        _add_tangents(
+            elements, backbone, p_start, p_end, straight_factory, width_traced, rk
+        )
 
     refs = []
     for e in elements:
@@ -1003,7 +1061,11 @@ def _add_tangents(
             d = [np.linalg.norm(pp - cur_conc) for pp in pos]
             i_in = int(np.argmin(d))
             others = [k for k in range(len(lp)) if k != i_in]
-            i_out = max(others, key=lambda k: np.linalg.norm(pos[k] - pos[i_in])) if others else i_in
+            i_out = (
+                max(others, key=lambda k: np.linalg.norm(pos[k] - pos[i_in]))
+                if others
+                else i_in
+            )
             e["in"] = lp[i_in]
             e["out"] = lp[i_out]
             cur_conc = pos[i_out]
@@ -1024,7 +1086,9 @@ def _add_tangents(
         rigid_len = 0.0
         for e in body:
             if e["kind"] == "rigid":
-                rigid_len = rigid_len + xp.dot(e["t"].apply_vector(e["out"].center_array - e["in"].center_array), u)
+                rigid_len = rigid_len + xp.dot(
+                    e["t"].apply_vector(e["out"].center_array - e["in"].center_array), u
+                )
         straights = [e for e in body if e["kind"] == "straight"]
         conc_len = sum(e["length"] for e in straights)
         required = xp.dot(target - cur, u)
@@ -1074,7 +1138,9 @@ def _rebuild_electrical(
         path = Path(pts)
         w = asarray(width)
         p1 = path.centerpoint_offset_curve(pts, w / 2, path.start_angle, path.end_angle)
-        p2 = path.centerpoint_offset_curve(pts, -w / 2, path.start_angle, path.end_angle)
+        p2 = path.centerpoint_offset_curve(
+            pts, -w / 2, path.start_angle, path.end_angle
+        )
         poly = xp.concatenate([p1, p2[::-1]])
         layer = place_layer if place_layer is not None else p_start.layer
         component.add_polygon(poly, layer=layer)

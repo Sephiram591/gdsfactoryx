@@ -60,9 +60,7 @@ def optimal_90deg(
     xpts.append(xpts[0])
     ypts.append(ypts[0])
 
-    D.add_polygon(
-        list(zip(xpts, ypts, strict=False)), layer=layer
-    )
+    D.add_polygon(list(zip(xpts, ypts, strict=False)), layer=layer)
 
     port_type = "electrical"
 

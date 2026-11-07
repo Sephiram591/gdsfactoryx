@@ -63,7 +63,9 @@ def cdsem_bend180(
     wg2 = c.add_ref(wg)
     wg2.connect("o1", b2.ports["o1"])
 
-    label = c << gf.get_component(text, text=str(int(to_float(width) * 1e3)), size=text_size)
+    label = c << gf.get_component(
+        text, text=str(int(to_float(width) * 1e3)), size=text_size
+    )
     label.ymax = b2.ymin - 5
     label.x = 0
 

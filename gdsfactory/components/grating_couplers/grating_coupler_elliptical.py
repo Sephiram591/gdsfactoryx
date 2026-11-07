@@ -8,7 +8,6 @@ __all__ = [
 
 from functools import partial
 
-
 import gdsfactory as gf
 from gdsfactory._jax import xp
 from gdsfactory.component import Component

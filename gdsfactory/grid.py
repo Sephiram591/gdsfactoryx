@@ -9,7 +9,6 @@ from collections.abc import Sequence
 from itertools import zip_longest
 from typing import Any, Literal
 
-
 import gdsfactory as gf
 from gdsfactory._jax import to_float, xp
 from gdsfactory.component import Component, ComponentReference
@@ -90,7 +89,9 @@ def _grid(
 
     if shape is None:
         kcell_array = [flat] if is_1d else [list(a) for a in kcells]
-        insts = [_create_insts(target, array, rotation, mirror) for array in kcell_array]
+        insts = [
+            _create_insts(target, array, rotation, mirror) for array in kcell_array
+        ]
         bboxes = [
             [None if inst is None else inst.dbbox() for inst in array]
             for array in insts
@@ -179,7 +180,9 @@ def _flexgrid(
     y0: Any = 0.0
     if shape is None:
         kcell_array = [flat] if is_1d else [list(a) for a in kcells]
-        insts = [_create_insts(target, array, rotation, mirror) for array in kcell_array]
+        insts = [
+            _create_insts(target, array, rotation, mirror) for array in kcell_array
+        ]
         for i_y, array in enumerate(insts):
             for i_x, inst in enumerate(array):
                 if inst is not None:

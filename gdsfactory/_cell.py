@@ -72,7 +72,9 @@ def _concrete(value: Any) -> Any:
     return value
 
 
-def get_cell_name(cell_type: str, max_cellname_length: int | None = None, **kwargs: Any) -> str:
+def get_cell_name(
+    cell_type: str, max_cellname_length: int | None = None, **kwargs: Any
+) -> str:
     """Returns a cell name from the function name and its parameters.
 
     Same algorithm as kfactory (so names match upstream gdsfactory).
@@ -80,7 +82,9 @@ def get_cell_name(cell_type: str, max_cellname_length: int | None = None, **kwar
     from kfactory.serialization import get_cell_name as _kf_get_cell_name
 
     params = {k: _concrete(v) for k, v in kwargs.items()}
-    return _kf_get_cell_name(cell_type, max_cellname_length=max_cellname_length, **params)
+    return _kf_get_cell_name(
+        cell_type, max_cellname_length=max_cellname_length, **params
+    )
 
 
 def _layout_cache_enabled() -> bool:
@@ -122,7 +126,9 @@ def _freeze(value: Any) -> Any:
 
     try:
         hash(value)
-        if not isinstance(value, float | int | str | bool | type(None) | tuple | frozenset):
+        if not isinstance(
+            value, float | int | str | bool | type(None) | tuple | frozenset
+        ):
             # functions / partials / components: hash by identity or serialization
             if callable(value) or hasattr(value, "name"):
                 try:
@@ -314,7 +320,9 @@ def vcell(_func: Callable[..., Any] | None = None, /, **kwargs: Any) -> Any:
 _CELL_KWARGS_EARLY = set(inspect.signature(cell).parameters) - {"_func"}
 
 
-def cell_with_module_name(_func: Callable[..., Any] | None = None, /, **kwargs: Any) -> Any:
+def cell_with_module_name(
+    _func: Callable[..., Any] | None = None, /, **kwargs: Any
+) -> Any:
     """Decorator like ``cell`` but with ``with_module_name=True`` by default."""
     return cell(_func, with_module_name=True, **kwargs)
 
@@ -328,7 +336,11 @@ def schematic_cell(_func: Callable[..., Any] | None = None, /, **kwargs: Any) ->
             from gdsfactory.read.from_yaml import from_yaml
 
             schematic = func(*args, **kw)
-            netlist = schematic.model_dump() if hasattr(schematic, "model_dump") else schematic
+            netlist = (
+                schematic.model_dump()
+                if hasattr(schematic, "model_dump")
+                else schematic
+            )
             return from_yaml(netlist)
 
         return cell(build, **{k: v for k, v in kwargs.items() if k in _CELL_KWARGS})
@@ -341,12 +353,12 @@ def schematic_cell(_func: Callable[..., Any] | None = None, /, **kwargs: Any) ->
 _CELL_KWARGS = set(inspect.signature(cell).parameters) - {"_func"}
 
 __all__ = [
+    "cached_cells",
     "cell",
     "cell_with_module_name",
     "clean_name",
-    "cached_cells",
-    "factories",
     "clear_cache",
+    "factories",
     "get_cell_name",
     "schematic_cell",
     "vcell",

@@ -121,9 +121,7 @@ def _bend_euler(
     c = path.extrude(x, all_angle=all_angle)
     min_bend_radius = maybe_float(round_st(path.info["Rmin"], 3))
     c.info["length"] = maybe_float(round_st(path.length(), 3))
-    c.info["dy"] = maybe_float(
-        round_st(abs(path.points[0][0] - path.points[-1][0]), 3)
-    )
+    c.info["dy"] = maybe_float(round_st(abs(path.points[0][0] - path.points[-1][0]), 3))
     c.info["min_bend_radius"] = min_bend_radius
     c.info["radius"] = maybe_float(radius)
     c.info["width"] = maybe_float(width or x.width)

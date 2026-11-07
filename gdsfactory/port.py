@@ -34,12 +34,12 @@ from typing import TYPE_CHECKING, Any, Literal, TypedDict, Unpack, cast
 
 import kfactory as kf
 import numpy as np
-from gdsfactory._jax import to_float
-from gdsfactory._ports import Port  # differentiable port
 from rich.console import Console
 from rich.table import Table
 
 from gdsfactory import typings
+from gdsfactory._jax import to_float
+from gdsfactory._ports import Port  # differentiable port
 from gdsfactory.typings import (
     AngleInDegrees,
     ComponentFactory,
@@ -151,9 +151,8 @@ def port_array(
         kwargs: additional arguments.
 
     """
-    from gdsfactory.pdk import get_cross_section, get_layer
-
     from gdsfactory._jax import asarray
+    from gdsfactory.pdk import get_cross_section, get_layer
 
     pitch_array = asarray(pitch)
     if "layer" in kwargs:

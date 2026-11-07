@@ -9,6 +9,7 @@ JAX value, so the backbone of every route is differentiable with respect to the
 traced inputs (port positions, radius, separation, straights, waypoints, boxes).
 Collision checks and debug output use real KLayout objects (concrete values).
 """
+
 from __future__ import annotations
 
 from collections import defaultdict
@@ -27,9 +28,6 @@ from typing import (
 
 import klayout.db as kdb
 import numpy as np
-
-from gdsfactory.routing._dual import Box, DNum, Edge, Point, Trans, Vector, dint, to_kdb_points
-
 from kfactory.conf import (
     ANGLE_90,
     ANGLE_180,
@@ -40,6 +38,17 @@ from kfactory.conf import (
 )
 from kfactory.port import BasePort, Port
 from kfactory.routing.steps import Step, Steps, Straight
+
+from gdsfactory.routing._dual import (
+    Box,
+    DNum,
+    Edge,
+    Point,
+    Trans,
+    Vector,
+    dint,
+    to_kdb_points,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -307,20 +316,12 @@ class ManhattanRouterSide:
         return (self.other.t.angle - self.t.angle) % 4  # ty:ignore[invalid-return-type]
 
     def right(self) -> None:
-        self.pts.append(
-            (self.t * Trans(0, False, self.router.bend90_radius, 0)) * _p
-        )
-        self.t *= Trans(
-            3, False, self.router.bend90_radius, -self.router.bend90_radius
-        )
+        self.pts.append((self.t * Trans(0, False, self.router.bend90_radius, 0)) * _p)
+        self.t *= Trans(3, False, self.router.bend90_radius, -self.router.bend90_radius)
 
     def left(self) -> None:
-        self.pts.append(
-            (self.t * Trans(0, False, self.router.bend90_radius, 0)) * _p
-        )
-        self.t *= Trans(
-            1, False, self.router.bend90_radius, self.router.bend90_radius
-        )
+        self.pts.append((self.t * Trans(0, False, self.router.bend90_radius, 0)) * _p)
+        self.t *= Trans(1, False, self.router.bend90_radius, self.router.bend90_radius)
 
     def straight(self, d: int) -> None:
         self.t *= Trans(0, False, max(d, 0), 0)
@@ -809,9 +810,9 @@ def _place_dl_path_length(
                 f" on {pts[0]} to {pts[1]}"
             )
 
-        t = Trans(
-            angle, False, (t_ * Point(pmin, (tinv * pts[0]).y)).to_v()
-        ) * Trans(Vector(bend90_radius, 0))
+        t = Trans(angle, False, (t_ * Point(pmin, (tinv * pts[0]).y)).to_v()) * Trans(
+            Vector(bend90_radius, 0)
+        )
         if direction == 1:
             r = Trans(3, False, bend90_radius, -bend90_radius)
             rr = Trans(1, False, bend90_radius, bend90_radius)
@@ -883,9 +884,11 @@ def route_smart(
         allow_sbend: Allows the router to route the final pieces with sbends.
         kwargs: Additional kwargs. Compatibility for type checking. If any kwargs are
             passed an error is raised.
+
     Raises:
         ValueError: If the route cannot conform to bend radius and other routing
             restrictions a value error is raised.
+
     Returns:
         List of ManhattanRoute objects which contain all the instances in the route
         as well as the route info.
@@ -1301,9 +1304,7 @@ def route_smart(
     # and end ports) missed that their routes share territory.  Force them
     # to merge by extending the affected routers' bboxes with the overlap
     # region, reset the routers, and retry.
-    _saved_router_state: list[
-        tuple[Trans, list[Point], Trans, list[Point], bool]
-    ] = [
+    _saved_router_state: list[tuple[Trans, list[Point], Trans, list[Point], bool]] = [
         (
             r.start.t.dup(),
             list(r.start.pts),
@@ -1567,7 +1568,7 @@ def route_smart(
                                     )
                         if new_angle <= angle:
                             if new_angle != 0:
-                                i -= 1  # noqa: PLW2901
+                                i -= 1
                             break
                         routers_clockwise.extend(new_routers)
                         angle = new_angle
@@ -1851,7 +1852,6 @@ def _route_p_side(
     separation: int,
     reverse_order: bool,
 ) -> None:
-
     box = Box()
     extend: int = 0
 
@@ -1993,9 +1993,7 @@ def route_loosely(
                     continue
                 delta += router.width // 2
                 router.start.straight(s + tv.x)
-                router_start_box += router.start.t * Point(
-                    router.width + separation, 0
-                )
+                router_start_box += router.start.t * Point(router.width + separation, 0)
                 router.start.left()
                 route_to_bbox(
                     routers=[router.start],
@@ -2025,9 +2023,7 @@ def route_loosely(
                     continue
                 delta += router.width // 2
                 router.start.straight(s + tv.x)
-                router_start_box += router.start.t * Point(
-                    router.width + separation, 0
-                )
+                router_start_box += router.start.t * Point(router.width + separation, 0)
                 router.start.right()
                 route_to_bbox(
                     routers=[router.start],
@@ -2555,9 +2551,7 @@ def _route_waypoints(
             )
         all_routers: list[ManhattanRouter] = []
         start_manhattan_routers.sort(key=lambda sr: sr.end_transformation)
-        end_manhattan_routers.sort(
-            key=lambda er: er.end_transformation * Trans.R180
-        )
+        end_manhattan_routers.sort(key=lambda er: er.end_transformation * Trans.R180)
 
         for sr, er in zip(start_manhattan_routers, end_manhattan_routers, strict=False):
             router = ManhattanRouter(
