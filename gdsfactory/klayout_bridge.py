@@ -261,8 +261,10 @@ def to_kfactory(
     virtual_built: dict[tuple[int, int], Any] = {}
 
     def insert_virtual(parent: Any, r: Any, trans: Any) -> None:
-        """Kfactory ``VInstance.insert_into``: manhattan base transform for the
-        instance, the residual transformation baked into a copy of the cell.
+        """Kfactory ``VInstance.insert_into``.
+
+        The instance gets the manhattan base transform; the residual transformation is
+        baked into a copy of the cell.
         """
         trans_ = trans * r.transform.to_klayout()
         base = kdb.DCplxTrans(kdb.ICplxTrans(trans_, DBU).s_trans().to_dtype(DBU))

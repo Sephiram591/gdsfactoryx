@@ -258,7 +258,10 @@ class Path:
         return self.ymax - self.ymin
 
     def move(self, *args: Any) -> Path:
-        """Moves: move((dx, dy)), move(dx, dy) or move(origin, destination)."""
+        """Moves the path.
+
+        Call as ``move((dx, dy))``, ``move(dx, dy)`` or ``move(origin, destination)``.
+        """
         from gdsfactory._ports import _move_args
 
         dx, dy = _move_args(args)

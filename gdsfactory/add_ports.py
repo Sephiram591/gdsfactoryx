@@ -325,8 +325,12 @@ def add_ports_from_markers_square(
         # Snap to the nearest 2 nm (0.002 µm)
         width = round_st(width - pin_extra_width, step=0.002)
 
-        if to_float(dx) == to_float(dy) and (
-            max_pin_area_um2 > to_float(dx * dy) > min_pin_area_um2
+        area = to_float(dx * dy)
+        # max_pin_area_um2=None: no maximum (comparing None raised TypeError)
+        if (
+            to_float(dx) == to_float(dy)
+            and (max_pin_area_um2 is None or area < max_pin_area_um2)
+            and area > min_pin_area_um2
         ):
             component.add_port(
                 port_name,

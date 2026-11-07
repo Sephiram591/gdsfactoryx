@@ -7,6 +7,8 @@ __all__ = [
     "spiral_racetrack_heater_metal",
 ]
 
+from typing import Any
+
 import numpy as np
 
 import gdsfactory as gf
@@ -407,6 +409,9 @@ def spiral_racetrack_heater_metal(
     c = gf.Component()
     xs = gf.get_cross_section(waveguide_cross_section)
     min_radius = min_radius or xs.radius or 0
+    assert (
+        min_radius is not None
+    )  # for type checkers: the `or 0` above never gives None
 
     spiral = c << spiral_racetrack(
         min_radius,

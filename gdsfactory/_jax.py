@@ -20,7 +20,7 @@ need concrete values (discrete choices, KLayout operations) raise there.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, TypeAlias
 
 import jax
 
@@ -30,7 +30,9 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import numpy.typing as npt  # noqa: E402
 
-Array = jax.Array
+# An explicit alias, so type checkers accept Array in annotations. Not a PEP 695 `type`
+# statement (UP040): other modules use Array at runtime, where it must be the class.
+Array: TypeAlias = jax.Array  # noqa: UP040
 
 
 def _is_jax(x: Any) -> bool:

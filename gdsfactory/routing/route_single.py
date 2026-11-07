@@ -133,7 +133,6 @@ def route_single(
             f"Either {cross_section=} or {layer=} and route_width must be provided"
         )
 
-    c = component
     p1 = port1
     p2 = port2
     port_type = port_type or p1.port_type

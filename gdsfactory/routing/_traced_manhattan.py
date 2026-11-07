@@ -334,7 +334,7 @@ class ManhattanRouterSide:
 
     @property
     def path_length(self) -> int:
-        pl: int = 0
+        pl: Any = 0  # dint() gives DNum, which carries derivatives
         l_ = len(self.pts)
         if l_ > 0:
             p1 = self.pts[0]
@@ -419,6 +419,7 @@ class ManhattanRouter:
                 measure to stop infinite loops. This should never trigger an error.
             straight_s_bend_strategy: When emulating an s-bend (build a large S out of
                 90deg bends), use the short or the longer route.
+            bbox: Accepted for compatibility with kfactory's ``auto_route``; not used.
         """
         if self.finished:
             return self.start.pts
@@ -704,7 +705,7 @@ def path_length_match_manhattan_route(
     }
 
     for router in routers:
-        modify_pts: tuple[Point, Point] = tuple(router.start.pts[-2:])  # ty:ignore[invalid-assignment]
+        modify_pts: tuple[Point, Point] = (router.start.pts[-2], router.start.pts[-1])
         v = modify_pts[1] - modify_pts[0]
         match (v.x, v.y):
             case (x, 0) if x > 0:
@@ -882,6 +883,8 @@ def route_smart(
             around, but start or end bends might encroach on the bounding boxes when
             leaving them.
         allow_sbend: Allows the router to route the final pieces with sbends.
+        route_debug: Optional kfactory ``RouteDebug`` that receives each finished
+            router's path, end points and fan-in names, for inspecting the routing.
         kwargs: Additional kwargs. Compatibility for type checking. If any kwargs are
             passed an error is raised.
 

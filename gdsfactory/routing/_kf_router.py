@@ -406,15 +406,20 @@ def route_bundle_kf(
                 if kt is not None:
                     special["taper"] = kt.cell_index()
                 hook.bend90_cell = kb
-                sb = None
+                sb: Callable[[Any, float, float, float], Any] | None = None
                 if sbend_factory is not None:
+                    factory = sbend_factory  # not None inside the closure
 
-                    def sb(c: Any, offset: float, length: float, width: float) -> Any:
-                        comp = sbend_factory(offset=offset, length=length, width=width)
+                    def _sbend(
+                        c: Any, offset: float, length: float, width: float
+                    ) -> Any:
+                        comp = factory(offset=offset, length=length, width=width)
                         kc = m.export(comp)
                         sbend_cells[kc.cell_index()] = (offset, length, width)
                         inst = c << kc
                         return kf.DInstanceGroup(insts=[inst], ports=list(inst.ports))
+
+                    sb = _sbend
 
                 routes = kf.routing.optical.route_bundle(
                     cell,
@@ -934,7 +939,7 @@ def _rebuild_optical(
         elif taper is not None and ci == special.get("taper"):
             elements.append(dict(kind="rigid", t=conc_t, comp=taper, bend=False))
         elif ci in sbend_cells:
-            offset, length, width = sbend_cells[ci]
+            _offset, length, width = sbend_cells[ci]
             assert sbend_factory is not None
             elements.append(
                 dict(kind="rigid", t=conc_t, comp=m.by_index[ci], bend=False)
@@ -1033,7 +1038,6 @@ def _add_tangents(
     cur_conc = to_numpy(p_start.center_array)
     corners = backbone  # traced (N, 2)
     corners_np = to_numpy(corners)
-    seg_index = 0
 
     # group elements per segment: bends terminate a segment
     segments: list[list[dict[str, Any]]] = [[]]
@@ -1046,8 +1050,8 @@ def _add_tangents(
         if not seg and s_idx == len(segments) - 1:
             break
         # direction of this segment (concrete)
-        a = corners_np[seg_index]
-        b = corners_np[min(seg_index + 1, len(corners_np) - 1)]
+        a = corners_np[s_idx]
+        b = corners_np[min(s_idx + 1, len(corners_np) - 1)]
         u_np = b - a
         nrm = np.linalg.norm(u_np)
         u = asarray(u_np / nrm) if nrm > 0 else asarray([1.0, 0.0])
@@ -1075,7 +1079,7 @@ def _add_tangents(
         if last is not None and last.get("bend"):
             v_local = _virtual_corner(last["in"], last["out"])
             t = last["t"]
-            corner_tr = corners[seg_index + 1]
+            corner_tr = corners[s_idx + 1]
             target = corner_tr + t.apply_vector(last["in"].center_array - v_local)
             body = seg[:-1]
         else:
@@ -1117,7 +1121,6 @@ def _add_tangents(
             nt.y = t.y + _tangent(trans_tr[1])
             e["t"] = nt
             cur = trans_tr + t.apply_vector(e["out"].center_array)
-        seg_index += 1
 
 
 def _rebuild_electrical(

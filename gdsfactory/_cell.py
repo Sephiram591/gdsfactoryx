@@ -40,7 +40,7 @@ class ComponentFunc(Protocol[ComponentParams]):
 
 
 def clean_name(name: str) -> str:
-    """Ensures that gds cells are composed of [a-zA-Z0-9_\\-]."""
+    r"""Ensures that gds cells are composed of [a-zA-Z0-9_\-]."""
     from kfactory.serialization import clean_name as _kf_clean_name
 
     return _kf_clean_name(name)
@@ -137,9 +137,10 @@ def _freeze(value: Any) -> Any:
                     return ("__id__", id(value))
         if isinstance(value, tuple):
             return tuple(_freeze(v) for v in value)
-        return value
     except TypeError:
         pass
+    else:
+        return value
     if isinstance(value, dict):
         return tuple(sorted((k, _freeze(v)) for k, v in value.items()))
     if isinstance(value, list | tuple):

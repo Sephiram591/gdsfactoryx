@@ -19,7 +19,8 @@ from kfactory import logger
 import klayout.db as kdb
 from kfactory import DSchematic as Schematic
 
-from gdsfactory import _jax  # enables float64 and provides tracer helpers
+# imported for its side effect: enables float64
+from gdsfactory import _jax  # noqa: F401
 from gdsfactory._ports import Pin as DPin
 from gdsfactory._ports import Pin as ProtoPin
 from gdsfactory.transform import Transform

@@ -584,15 +584,15 @@ class Box:
             return
         raise TypeError(f"Box{args!r}")
 
-    def _set(self, l: DNum, b: DNum, r: DNum, t: DNum) -> None:
-        self._l, self._r = (l, r) if l <= r else (r, l)
-        self._b, self._t = (b, t) if b <= t else (t, b)
+    def _set(self, left: DNum, bottom: DNum, right: DNum, top: DNum) -> None:
+        self._l, self._r = (left, right) if left <= right else (right, left)
+        self._b, self._t = (bottom, top) if bottom <= top else (top, bottom)
 
     @classmethod
-    def _from(cls, l: DNum, b: DNum, r: DNum, t: DNum) -> Box:
+    def _from(cls, left: DNum, bottom: DNum, right: DNum, top: DNum) -> Box:
         box = cls.__new__(cls)
         box._empty = False
-        box._l, box._b, box._r, box._t = l, b, r, t
+        box._l, box._b, box._r, box._t = left, bottom, right, top
         return box
 
     def to_kdb(self) -> kdb.Box:

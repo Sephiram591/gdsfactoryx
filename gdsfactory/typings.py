@@ -201,8 +201,13 @@ type ComponentBaseFactory = Callable[..., component.ComponentBase]
 type ComponentFactoryDict = dict[str, ComponentFactory]
 type ComponentFactories = Sequence[ComponentFactory]
 
+# upstream lists kf.DKCell, the base of its Component; gdsfactoryx's Component is not a DKCell
 type ComponentSpec = (
-    str | ComponentFactory | dict[str, Any] | partial[component.Component]
+    str
+    | ComponentFactory
+    | dict[str, Any]
+    | component.Component
+    | partial[component.Component]
 )
 type ComponentAllAngleSpec = (
     str | ComponentAllAngleFactory | dict[str, Any] | component.ComponentAllAngle

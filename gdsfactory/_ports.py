@@ -297,7 +297,10 @@ class Port:
         return self.copy().apply_transform(t)
 
     def move(self, *args: Any) -> Port:
-        """Moves in place: move((dx, dy)) or move(dx, dy) or move(origin, dest)."""
+        """Moves the port in place.
+
+        Call as ``move((dx, dy))``, ``move(dx, dy)`` or ``move(origin, destination)``.
+        """
         dx, dy = _move_args(args)
         self._center = self._snap_center(
             self._center + xp.stack([asarray(dx), asarray(dy)])

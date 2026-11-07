@@ -176,7 +176,7 @@ def _all_angle_route(case: str, v: Any) -> Any:
 
 
 @pytest.mark.parametrize(
-    "case,x0,rtol",
+    ("case", "x0", "rtol"),
     [("crossing", 40.0, 1e-5), ("optimized", 30.0, 1e-3), ("backbone", 3.0, 1e-4)],
 )
 def test_route_bundle_all_angle_gradients(case: str, x0: float, rtol: float) -> None:

@@ -19,6 +19,7 @@ and straights are then placed with traced geometry.
 from __future__ import annotations
 
 from collections.abc import Callable
+from itertools import pairwise
 from typing import Any
 
 import jax
@@ -372,7 +373,7 @@ def _backbone2bundle(
     backbone: list[Any], widths: list[Any], spacings: list[Any]
 ) -> list[list[Any]]:
     """Traced kfactory ``backbone2bundle``."""
-    edges = list(zip(backbone[:-1], backbone[1:], strict=True))
+    edges = list(pairwise(backbone))
     width = sum(widths) + sum(spacings)
     x = _fdiv(-width, 2)
     out = []

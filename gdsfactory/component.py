@@ -635,7 +635,10 @@ class ComponentReference(_BBoxMixin):
         return self
 
     def move(self, *args: Any) -> Self:
-        """Moves the reference: move((dx, dy)), move(dx, dy), move(origin, destination)."""
+        """Moves the reference.
+
+        Call as ``move((dx, dy))``, ``move(dx, dy)`` or ``move(origin, destination)``.
+        """
         from gdsfactory._ports import _move_args
 
         dx, dy = _move_args(args)
@@ -1027,7 +1030,9 @@ class Component(_BBoxMixin):
 
     _virtual: bool = False
 
-    def __new__(cls, name: str | None = None, base: Any = None, **kwargs: Any) -> Any:
+    # __new__ receives the constructor's arguments, so it keeps __init__'s signature
+    # (callers pass name=...), although only `base` is used here.
+    def __new__(cls, name: str | None = None, base: Any = None, **kwargs: Any) -> Any:  # noqa: ARG004
         if isinstance(base, Component):
             # kfactory idiom ``Component(base=other.base)``: same cell
             return base
@@ -1167,10 +1172,10 @@ class Component(_BBoxMixin):
 
     def add_box(self, box: Box | Sequence[float], layer: LayerSpec) -> None:
         if isinstance(box, Box):
-            l, b, r, t = box.left, box.bottom, box.right, box.top
+            left, bottom, right, top = box.left, box.bottom, box.right, box.top
         else:
-            l, b, r, t = box
-        self.add_polygon(_rect_points(l, b, r, t), layer)
+            left, bottom, right, top = box
+        self.add_polygon(_rect_points(left, bottom, right, top), layer)
 
     def shapes(self, layer: LayerSpec) -> _ShapesProxy:
         return _ShapesProxy(self, _layer_key(layer))
@@ -2273,8 +2278,7 @@ class Component(_BBoxMixin):
                 t, c = stack.pop()
                 items.append((t, c))
                 for r in c.insts:
-                    for rt in r.array_transforms():
-                        stack.append((t * rt, r.cell))
+                    stack.extend((t * rt, r.cell) for rt in r.array_transforms())
         for t, c in items:
             for pts, width in c._paths.get(key, []):
                 q = to_numpy(t.apply(pts))
@@ -2552,7 +2556,8 @@ class ComponentAllAngle(Component):
 
 
 ComponentBase = Component
-AnyComponent: TypeAlias = Component
+# a runtime alias of the class (usable in isinstance), not a PEP 695 `type` statement
+AnyComponent: TypeAlias = Component  # noqa: UP040
 
 
 class _ShapesProxy:
@@ -2725,9 +2730,9 @@ def polygon_area(points: Array) -> Any:
 
 
 def _rect_points(left: Any, bottom: Any, right: Any, top: Any) -> Array:
-    l, b, r, t = (asarray(v) for v in (left, bottom, right, top))
+    x0, y0, x1, y1 = (asarray(v) for v in (left, bottom, right, top))
     return xp.stack(
-        [xp.stack([l, b]), xp.stack([l, t]), xp.stack([r, t]), xp.stack([r, b])]
+        [xp.stack([x0, y0]), xp.stack([x0, y1]), xp.stack([x1, y1]), xp.stack([x1, y0])]
     )
 
 
@@ -2742,7 +2747,7 @@ def _to_point_arrays(points: Any) -> list[Array]:
     if isinstance(points, Box):
         return [_rect_points(points.left, points.bottom, points.right, points.top)]
     mod = type(points).__module__
-    if mod.startswith("klayout") or mod.startswith("pya"):
+    if mod.startswith(("klayout", "pya")):
         from gdsfactory.klayout_bridge import klayout_shape_to_arrays
 
         return klayout_shape_to_arrays(points)
@@ -2765,11 +2770,7 @@ def _to_point_arrays(points: Any) -> list[Array]:
 # KLayout region helpers (non-differentiable boolean / sizing operations)
 # ---------------------------------------------------------------------------
 def ensure_tuple_of_tuples(points: Any) -> tuple[tuple[float, float], ...]:
-    if (
-        isinstance(points, np.ndarray)
-        or isinstance(points, xp.ndarray)
-        or is_tracer(points)
-    ):
+    if isinstance(points, np.ndarray | xp.ndarray) or is_tracer(points):
         return tuple(map(tuple, to_numpy(points).tolist()))
     if isinstance(points, list) and points and isinstance(points[0], np.ndarray | list):
         return tuple(tuple(point) for point in points)
