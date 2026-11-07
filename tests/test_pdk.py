@@ -1,3 +1,4 @@
+import weakref
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -122,11 +123,22 @@ def test_pdk_model_dump() -> None:
 
 
 @pytest.fixture
-def restore_kcl_state() -> Iterator[None]:
+def restore_kcl_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    import gdsfactory.component as component_module
     from gdsfactory.gpdk import PDK
 
     original_dbu = gf.kcl.dbu
     gf.clear_cache()
+    # Components that other tests keep alive (module globals, parametrize values) hold
+    # their layers in use, so PDK activation does not prune them. Hide them, so the
+    # test sees only the components it creates, as when it runs alone.
+    leftovers = weakref.WeakSet(component_module.live_components())
+    live_components = component_module.live_components
+    monkeypatch.setattr(
+        component_module,
+        "live_components",
+        lambda: [c for c in live_components() if c not in leftovers],
+    )
     try:
         yield
     finally:
