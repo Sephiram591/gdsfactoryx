@@ -465,7 +465,7 @@ class ComponentReference(_BBoxMixin):
         y = round(to_float(t.y) * 1000)
         name = f"{self.cell.name}_{x}_{y}"
         # KLayout's own angle (atan2 of the stored sin/cos), like kfactory
-        angle = t.to_klayout().angle
+        angle = t.klayout_angle()
         if angle != 0:
             if float(angle).is_integer():
                 name += f"_A{int(angle)}"
@@ -528,9 +528,12 @@ class ComponentReference(_BBoxMixin):
         if getattr(self, "virtual", False):
             self._transform = t
             return
-        self._transform = Transform(
+        snapped = Transform(
             snap_dbu(t.x), snap_dbu(t.y), t.rotation, t.mirror, t.magnification
         )
+        if "klayout_angle" in t._cache:  # the rotation is unchanged: keep KLayout's angle for it
+            snapped._cache["klayout_angle"] = t._cache["klayout_angle"]
+        self._transform = snapped
 
     def _array_transform(self, ia: int = 0, ib: int = 0) -> Transform:
         if ia == 0 and ib == 0:
@@ -2552,13 +2555,16 @@ def _kl_value(t: Transform, kt: Any) -> Transform:
             return value + stop_gradient(target - value)
         return target
 
-    return Transform(
+    out = Transform(
         st(t.x, kt.disp.x),
         st(t.y, kt.disp.y),
         st(rot, a_adj) if abs(a_adj - r) > 0 else rot,
         t.mirror,
         t.magnification,
     )
+    # the composition's own angle, for names (Transform.klayout_angle)
+    out._cache["klayout_angle"] = (to_float(out.rotation), float(a))
+    return out
 
 
 def _klayout_apply(t: Transform, kt: Any, points: Array) -> Array:

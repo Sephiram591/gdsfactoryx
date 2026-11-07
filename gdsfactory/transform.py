@@ -48,7 +48,23 @@ class Transform:
         return xp.stack([asarray(self.x), asarray(self.y)])
 
     def copy(self) -> Transform:
-        return Transform(self.x, self.y, self.rotation, self.mirror, self.magnification)
+        t = Transform(self.x, self.y, self.rotation, self.mirror, self.magnification)
+        if "klayout_angle" in self._cache:
+            t._cache["klayout_angle"] = self._cache["klayout_angle"]
+        return t
+
+    def klayout_angle(self) -> float:
+        """KLayout's angle (degrees) of this transformation, as kfactory reads it for instance names.
+
+        While the rotation is the one taken from a KLayout composition (``component._kl_value``),
+        this is that composition's own angle. Otherwise it is ``to_klayout().angle``: rebuilding a
+        KLayout transformation from an angle KLayout already produced would round-trip it through
+        sin/cos once more and change its last bits.
+        """
+        recorded = self._cache.get("klayout_angle")
+        if recorded is not None and recorded[0] == to_float(self.rotation):
+            return float(recorded[1])
+        return float(self.to_klayout().angle)
 
     def matrix(self) -> Array:
         c = cos_deg(self.rotation)
