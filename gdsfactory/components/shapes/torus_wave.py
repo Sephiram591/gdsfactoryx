@@ -3,7 +3,7 @@ from __future__ import annotations
 __all__ = ["torus_wave"]
 
 import gdsfactory as gf
-from gdsfactory._jax import xp
+from gdsfactory._jax import to_float, xp
 from gdsfactory.component import Component
 from gdsfactory.typings import LayerSpec
 
@@ -34,7 +34,7 @@ def torus_wave(
         layer: layer spec.
     """
     c = Component()
-    n_points = int(xp.round(360.0 / angle_resolution)) + 1
+    n_points = round(360.0 / to_float(angle_resolution)) + 1
     theta = xp.linspace(0, 2 * xp.pi, n_points, endpoint=True)
 
     r_outer = outer_radius + amplitude * xp.sin(n_oscillations * theta)
@@ -46,12 +46,11 @@ def torus_wave(
     inner_x = r_inner[::-1] * xp.cos(theta[::-1])
     inner_y = r_inner[::-1] * xp.sin(theta[::-1])
 
-    points = list(
-        zip(
+    points = xp.column_stack(
+        [
             xp.concatenate([outer_x, inner_x]),
             xp.concatenate([outer_y, inner_y]),
-            strict=False,
-        )
+        ]
     )
     c.add_polygon(points, layer=layer)
     return c

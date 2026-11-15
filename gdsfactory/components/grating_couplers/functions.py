@@ -31,15 +31,19 @@ def ellipse_arc(
         a: ellipse semi-major axis.
         b: semi-minor axis.
         x0: in um.
-        theta_min: in rad.
-        theta_max: in rad.
-        angle_step: in rad.
+        theta_min: in degrees.
+        theta_max: in degrees.
+        angle_step: in degrees.
     """
     # Compute theta in degrees, then convert to radians only once
     n = len(
-        np.arange(to_float(theta_min), to_float(theta_max) + angle_step, angle_step)
+        np.arange(
+            to_float(theta_min),
+            to_float(theta_max) + to_float(angle_step),
+            to_float(angle_step),
+        )
     )
-    theta = (theta_min + np.arange(n) * angle_step) * DEG2RAD
+    theta = (theta_min + xp.arange(n) * angle_step) * DEG2RAD
 
     # Compute xs and ys in a vectorized way, no unnecessary temporaries
     xs = a * xp.cos(theta) + x0

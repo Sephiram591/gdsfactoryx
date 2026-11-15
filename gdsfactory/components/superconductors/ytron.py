@@ -10,7 +10,7 @@ __all__ = ["ytron_round"]
 from numpy import pi
 
 import gdsfactory as gf
-from gdsfactory._jax import xp
+from gdsfactory._jax import to_float, xp
 from gdsfactory.component import Component
 from gdsfactory.typings import LayerSpec
 
@@ -49,7 +49,9 @@ def ytron_round(
     theta = theta * pi / 180
     theta_resolution = theta_resolution * pi / 180
     thetalist = xp.linspace(
-        -(pi - theta), -theta, int((pi - 2 * theta) / theta_resolution) + 2
+        -(pi - theta),
+        -theta,
+        int((pi - 2 * to_float(theta)) / to_float(theta_resolution)) + 2,
     )
     semicircle_x = rho * xp.cos(thetalist)
     semicircle_y = rho * xp.sin(thetalist) + rho
@@ -90,7 +92,7 @@ def ytron_round(
     #  Create a blank device, add the geometry, and define the ports
     # ==========================================================================
     c = gf.Component()
-    c.add_polygon(list(zip(xpts, ypts, strict=True)), layer=layer)
+    c.add_polygon(xp.column_stack([xp.asarray(xpts), xp.asarray(ypts)]), layer=layer)
     c.add_port(
         name="left",
         center=(-(xc + arm_x_left + arm_widths[0] / 2), yc + arm_y_left),

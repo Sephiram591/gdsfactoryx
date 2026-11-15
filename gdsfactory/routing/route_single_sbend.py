@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import gdsfactory as gf
+from gdsfactory._jax import to_float
 from gdsfactory.component import Component, ComponentReference
 from gdsfactory.typings import ComponentSpec, CrossSectionSpec, Port
 
@@ -16,7 +17,7 @@ def add_straight(
     width: float | None = None,
     **connect_kwargs: Any,
 ) -> Port:
-    if not length:
+    if to_float(length) == 0:
         return port
     straight = component << gf.components.straight(
         length=length, cross_section=cross_section, width=width
@@ -85,7 +86,8 @@ def route_bundle_sbend(
 
     # We need to act differently if the route is orthogonal in x
     # or orthogonal in y
-    size = (xsize, ysize) if port1.orientation in [0, 180] else (ysize, -xsize)
+    ori1 = round(to_float(port1.orientation or 0)) % 360
+    size = (xsize, ysize) if ori1 in [0, 180] else (ysize, -xsize)
     bend = gf.get_component(bend_s, size=size, cross_section=cross_section)
 
     bend_ref = component << bend
@@ -96,7 +98,9 @@ def route_bundle_sbend(
         allow_width_mismatch=allow_width_mismatch,
     )
 
-    orthogonality_error = abs(abs(port1.orientation - port2.orientation) - 180)
+    orthogonality_error = abs(
+        abs(to_float(port1.orientation) - to_float(port2.orientation)) - 180
+    )
     if orthogonality_error > 0.1:
         raise ValueError(
             f"Ports need to have orthogonal orientation {orthogonality_error}\n"

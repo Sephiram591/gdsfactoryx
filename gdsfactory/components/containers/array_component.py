@@ -3,6 +3,7 @@ from __future__ import annotations
 __all__ = ["array"]
 
 import gdsfactory as gf
+from gdsfactory._jax import to_float
 from gdsfactory.component import Component
 from gdsfactory.typings import ComponentSpec, PostProcesses, Size
 
@@ -58,14 +59,14 @@ def array(
         |___|      |___|     |___|      |___|
     ```
     """
-    if size:
-        columns = int(size[0] / column_pitch)
-        rows = int(size[1] / row_pitch)
+    if size is not None:
+        columns = int(to_float(size[0]) / to_float(column_pitch))
+        rows = int(to_float(size[1]) / to_float(row_pitch))
 
-    if rows > 1 and row_pitch == 0:
+    if rows > 1 and to_float(row_pitch) == 0:
         raise ValueError(f"rows = {rows} > 1 require {row_pitch=} > 0")
 
-    if columns > 1 and column_pitch == 0:
+    if columns > 1 and to_float(column_pitch) == 0:
         raise ValueError(f"columns = {columns} > 1 require {column_pitch} > 0")
 
     c = Component()
@@ -92,7 +93,7 @@ def array(
     for p in elec_ports:
         c.create_pin(ports=[p], name=p.name)
 
-    if post_process:
+    if post_process is not None:
         for f in post_process:
             f(c)
     if auto_rename_ports:

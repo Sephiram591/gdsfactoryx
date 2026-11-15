@@ -5,7 +5,7 @@ __all__ = ["spiral_archimedes"]
 import numpy as np
 
 import gdsfactory as gf
-from gdsfactory._jax import to_float, to_numpy, xp
+from gdsfactory._jax import has_abstract_tracers, safe_sqrt, to_float, to_numpy, xp
 from gdsfactory.component import Component
 from gdsfactory.typings import LayerSpec
 
@@ -44,8 +44,8 @@ def spiral_archimedes(
     dr = xp.full_like(theta, growth_rate)
     tx = dr * xp.cos(theta) - r_center * xp.sin(theta)
     ty = dr * xp.sin(theta) + r_center * xp.cos(theta)
-    t_len = xp.sqrt(tx**2 + ty**2)
-    t_len = xp.where(t_len == 0, 1.0, t_len)
+    sq = tx**2 + ty**2
+    t_len = xp.sqrt(xp.where(sq == 0, 1.0, sq))
     # Unit normal (perpendicular to tangent, pointing inward).
     nx = -ty / t_len
     ny = tx / t_len
@@ -59,17 +59,18 @@ def spiral_archimedes(
     inner_y = y_center + ny * hw
 
     # Find the point of the inner edge which has the minimum distance from the start of the outer edge.
-    distances_from_edge_point = xp.sqrt(
+    distances_from_edge_point = safe_sqrt(
         (inner_x - outer_x[0]) ** 2 + (inner_y - outer_y[0]) ** 2
     )
-    min_to_edge_id = int(np.argmin(to_numpy(distances_from_edge_point)))
-    # For a smooth spiral, the point of interest is the start of the inner edge, with distance = width.
-    # If that is not the case, then end the spiral at the point which violates its smoothness.
-    if min_to_edge_id != 0:
-        outer_x = outer_x[min_to_edge_id:]
-        outer_y = outer_y[min_to_edge_id:]
-        inner_x = inner_x[min_to_edge_id:]
-        inner_y = inner_y[min_to_edge_id:]
+    if not has_abstract_tracers(distances_from_edge_point):
+        min_to_edge_id = int(np.argmin(to_numpy(distances_from_edge_point)))
+        # For a smooth spiral, the point of interest is the start of the inner edge, with distance = width.
+        # If that is not the case, then end the spiral at the point which violates its smoothness.
+        if min_to_edge_id != 0:
+            outer_x = outer_x[min_to_edge_id:]
+            outer_y = outer_y[min_to_edge_id:]
+            inner_x = inner_x[min_to_edge_id:]
+            inner_y = inner_y[min_to_edge_id:]
 
     # Close the polygon: outer path forward, inner path reversed.
     points_x = xp.concatenate([outer_x, inner_x[::-1]])

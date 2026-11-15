@@ -70,8 +70,11 @@ def coordinates() -> np.ndarray:
 def test_snap_jit_matches_eager_bitwise(device: Any) -> None:
     x = jax.device_put(jnp.asarray(coordinates()), device)
     expected = bits(snap_dbu_reference(x))
+    def _snap(v: Any) -> Any:
+        return snap_dbu(v)
+
     np.testing.assert_array_equal(bits(snap_dbu(x)), expected)
-    np.testing.assert_array_equal(bits(jax.jit(snap_dbu)(x)), expected)
+    np.testing.assert_array_equal(bits(jax.jit(_snap)(x)), expected)
     primal_out, tangent = jax.jvp(snap_dbu, (x,), (jnp.ones_like(x),))
     np.testing.assert_array_equal(bits(primal_out), expected)
     np.testing.assert_array_equal(np.asarray(tangent), 1.0)
@@ -94,8 +97,11 @@ def test_snap_gradient_is_identity_under_jit(device: Any) -> None:
 def test_snap_float32_input_is_promoted_like_before(device: Any) -> None:
     x = jax.device_put(jnp.asarray(coordinates().astype(np.float32)), device)
     expected = bits(snap_dbu_reference(x))
+    def _snap(v: Any) -> Any:
+        return snap_dbu(v)
+
     np.testing.assert_array_equal(bits(snap_dbu(x)), expected)
-    np.testing.assert_array_equal(bits(jax.jit(snap_dbu)(x)), expected)
+    np.testing.assert_array_equal(bits(jax.jit(_snap)(x)), expected)
 
 
 def test_snap_python_and_numpy_values_unchanged() -> None:
@@ -112,9 +118,12 @@ def test_snap_python_and_numpy_values_unchanged() -> None:
 
 def test_snap_disabled_returns_input_under_jit(device: Any) -> None:
     """SNAP_ENABLED is read when the function is traced (a new function here, not a cached compile)."""
+    def _snap(v: Any) -> Any:
+        return snap_dbu(v)
+
     x = jax.device_put(jnp.asarray(coordinates()), device)
     gf.snap.SNAP_ENABLED = False
-    np.testing.assert_array_equal(bits(jax.jit(lambda v: snap_dbu(v))(x)), bits(x))
+    np.testing.assert_array_equal(bits(jax.jit(_snap)(x)), bits(x))
 
 
 def build(p: Any) -> tuple[list[Any], list[Any], list[Any]]:

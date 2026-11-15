@@ -10,7 +10,7 @@ import klayout.dbcore as kdb
 import networkx as nx
 import numpy as np
 import numpy.typing as npt
-from kfactory.routing.aa.optical import OpticalAllAngleRoute
+from kfactory.routing.aa.optical import OpticalAllAngleRoute as KfOpticalAllAngleRoute
 from klayout.dbcore import DPoint
 from shapely.geometry import LineString
 
@@ -24,6 +24,7 @@ from gdsfactory.typings import (
     Coordinates,
     CrossSectionSpec,
     LayerSpec,
+    OpticalAllAngleRoute,
     Port,
     Route,
 )
@@ -40,7 +41,7 @@ def get_route_bend_count(route: Route) -> int:
     """
     if isinstance(route, ManhattanRoute):
         return route.n_bend90
-    if isinstance(route, OpticalAllAngleRoute):
+    if isinstance(route, OpticalAllAngleRoute | KfOpticalAllAngleRoute):
         return 100
     # mypy exhaustiveness
     raise TypeError(f"Unsupported Route type: {type(route)}")

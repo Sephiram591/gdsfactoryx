@@ -34,7 +34,7 @@ from typing import Any, Literal, cast
 import kfactory as kf
 
 import gdsfactory as gf
-from gdsfactory._jax import to_float
+from gdsfactory._jax import is_abstract_tracer, to_float
 from gdsfactory.component import Component
 from gdsfactory.config import CONF
 from gdsfactory.routing._kf_router import ManhattanRoute, route_bundle_kf
@@ -145,13 +145,19 @@ def route_single(
             port_types=(port_type, port_type),
         )
 
-    if route_width:
+    _has_width = route_width is not None and (
+        is_abstract_tracer(route_width) or to_float(route_width) != 0
+    )
+    _has_radius = radius is not None and (
+        is_abstract_tracer(radius) or to_float(radius) != 0
+    )
+    if _has_width:
         xs = gf.get_cross_section(cross_section, width=route_width)
     else:
         xs = gf.get_cross_section(cross_section)
-    width = route_width or xs.width
+    width = route_width if _has_width else xs.width
 
-    radius = radius or xs.radius
+    radius = radius if _has_radius else xs.radius
     bend90 = gf.get_component(bend, cross_section=xs, radius=radius, width=width)
     if auto_taper:
         p1 = add_auto_tapers(component, [p1], xs, layer_transitions)[0]
@@ -233,7 +239,14 @@ def route_single(
                     f" points (um): {[(to_float(a), to_float(b)) for a, b in pts]}"
                 ) from e
             if on_placer_error == "show_error":
-                _show_placer_error(component, p1, p2, pts, route_width or p1.width, e)
+                _show_placer_error(
+                    component,
+                    p1,
+                    p2,
+                    pts,
+                    width if _has_width else p1.width,
+                    e,
+                )
                 raise kf.routing.generic.PlacerError(
                     f"Error while trying to place route from {p1.name} to {p2.name}"
                 ) from e
@@ -241,7 +254,9 @@ def route_single(
                 gf.logger.error(f"Error in route_single: {e}")
                 warnings.warn(f"Routing failed: {e}", stacklevel=2)
             _ = kf_on_placer_error
-            return _error_path(component, p1, p2, pts, route_width or p1.width)
+            return _error_path(
+                component, p1, p2, pts, width if _has_width else p1.width
+            )
 
     else:
         kf_on_collision = "error" if on_collision == "warning" else on_collision
@@ -406,8 +421,8 @@ def route_single_electrical(
 
     """
     xs = gf.get_cross_section(cross_section)
-    layer = layer or xs.layer
-    width = width or xs.width
+    layer = xs.layer if layer is None else layer
+    width = xs.width if width is None else width
     layer = gf.get_layer(layer)
     route_bundle_kf(
         component,

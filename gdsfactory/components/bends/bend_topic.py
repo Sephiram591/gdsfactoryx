@@ -115,7 +115,7 @@ def _bend_topic(
         x.validate_radius(min_bend_radius)
 
     top = None if int(to_float(angle)) in {180, -180, -90} else 0
-    bottom = 0 if int(to_float(angle)) in {-90} else None
+    bottom = 0 if int(to_float(angle)) == -90 else None
     x.add_bbox(c, top=top, bottom=bottom)
     c.add_route_info(
         cross_section=x,

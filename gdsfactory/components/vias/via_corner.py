@@ -2,11 +2,11 @@ from __future__ import annotations
 
 __all__ = ["via_corner"]
 
+import math
 from typing import Any
 
-from numpy import floor
-
 import gdsfactory as gf
+from gdsfactory._jax import maybe_float, to_float
 from gdsfactory.cross_section import metal2, metal3
 from gdsfactory.port import select_ports
 from gdsfactory.typings import ComponentSpec, MultiCrossSectionAngleSpec
@@ -38,17 +38,17 @@ def via_corner(
     layers = [x.layer for x in cross_sections]
     layers_ports = layers
 
-    max_width = max(widths)
-    max_height = max(heights)
-    min_height = min(heights)
-    min_width = min(widths)
+    max_width = max(widths, key=to_float)
+    max_height = max(heights, key=to_float)
+    min_height = min(heights, key=to_float)
+    min_width = min(widths, key=to_float)
 
     a = min_width / 2
     b = min_height / 2
 
     c = gf.Component()
-    c.info["size"] = (float(max_width), float(max_height))
-    c.info["length"] = max(max_width, max_height)
+    c.info["size"] = (maybe_float(max_width), maybe_float(max_height))
+    c.info["length"] = max(max_width, max_height, key=to_float)
 
     port_type = "electrical"
     for i, layer in enumerate(layers):
@@ -96,8 +96,8 @@ def via_corner(
         nb_vias_x = (min_width - w - 2 * g) / pitch_x + 1
         nb_vias_y = (min_height - h - 2 * g) / pitch_y + 1
 
-        nb_vias_x = int(floor(nb_vias_x)) or 1
-        nb_vias_y = int(floor(nb_vias_y)) or 1
+        nb_vias_x = math.floor(to_float(nb_vias_x)) or 1
+        nb_vias_y = math.floor(to_float(nb_vias_y)) or 1
         ref = c.add_ref(
             via,
             columns=nb_vias_x,

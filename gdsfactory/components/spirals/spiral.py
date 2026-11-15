@@ -3,6 +3,7 @@ from __future__ import annotations
 __all__ = ["spiral"]
 
 import gdsfactory as gf
+from gdsfactory._jax import to_float
 from gdsfactory.cross_section import CrossSectionSpec
 from gdsfactory.typings import ComponentSpec
 
@@ -37,7 +38,7 @@ def spiral(
     dx = abs(o2.x - o1.x)
     dy = abs(o2.y - o1.y)
 
-    if dx != dy:
+    if to_float(dx) != to_float(dy):
         raise ValueError(f"bend component {b} must have dx == dy")
     radius = dx
     _length = length
@@ -64,7 +65,7 @@ def spiral(
     total_length += spacing  # s_space
     total_length += _length + 2 * radius + spacing  # l0_2
 
-    if length > 0:
+    if to_float(length) > 0:
         l0_1 = c << gf.get_component(
             straight, cross_section=cross_section, length=_length
         )

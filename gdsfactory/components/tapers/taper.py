@@ -13,12 +13,17 @@ __all__ = [
 from functools import partial
 
 import gdsfactory as gf
-from gdsfactory._jax import maybe_float
+from gdsfactory._jax import asarray, is_abstract_tracer, maybe_float, to_float, xp
 from gdsfactory.component import Component
 from gdsfactory.port import Port
 from gdsfactory.typings import CrossSectionSpec, LayerSpec
 
 from .._schematic import taper_schematic, transition_schematic
+
+
+def _has_nonzero_length(length: float | None) -> bool:
+    """Return True if length is non-None and non-zero (or an abstract tracer)."""
+    return length is not None and (is_abstract_tracer(length) or to_float(length) != 0)
 
 
 @gf.cell_with_module_name(schematic_function=taper_schematic, tags=["tapers"])
@@ -53,7 +58,7 @@ def taper(
         raise ValueError("port_types should have two elements")
 
     x1 = gf.get_cross_section(cross_section, width=width1)
-    if width2:
+    if width2 is not None:
         width2 = gf.snap.snap_to_grid2x(width2)
         x2 = gf.get_cross_section(cross_section, width=width2)
     else:
@@ -61,43 +66,36 @@ def taper(
 
     width1 = x1.width
     width2 = x2.width
-    width_max = max([width1, width2])
-    if layer:
+    width_max = maybe_float(xp.maximum(width1, width2))
+    if layer is not None:
         x = gf.get_cross_section(cross_section, width=width_max, layer=layer)
     else:
         x = gf.get_cross_section(cross_section, width=width_max)
-    layer = layer or x.layer
+    layer = layer if layer is not None else x.layer
     assert layer is not None
 
     if isinstance(port, gf.Port):
         width1 = port.width
 
-    width2 = width2 or width1
+    width2 = width2 if width2 is not None else width1
     c = gf.Component()
     y1 = width1 / 2
     y2 = width2 / 2
 
-    if length:
-        p1 = [
-            (0, y1),
-            (length, y2),
-            (length, -y2),
-            (0, -y1),
-        ]
-        c.add_polygon(p1, layer=layer)
+    if _has_nonzero_length(length):
+        x_pts = asarray([0, length, length, 0])
+        c.add_polygon(
+            xp.column_stack([x_pts, asarray([y1, y2, -y2, -y1])]),
+            layer=layer,
+        )
 
         for s1, s2 in zip(x1.sections[1:], x2.sections[1:], strict=False):
             y1 = s1.width / 2
             y2 = s2.width / 2
             offset1 = s1.offset
             offset2 = s2.offset
-            p1 = [
-                (0, offset1 + y1),
-                (length, offset2 + y2),
-                (length, offset2 - y2),
-                (0, offset1 - y1),
-            ]
-            c.add_polygon(p1, layer=s1.layer)
+            y_pts = asarray([offset1 + y1, offset2 + y2, offset2 - y2, offset1 - y1])
+            c.add_polygon(xp.column_stack([x_pts, y_pts]), layer=s1.layer)
 
     if with_bbox:
         x.add_bbox(c)
@@ -121,7 +119,7 @@ def taper(
             port_type=port_types[1],
         )
 
-    c.info["length"] = length
+    c.info["length"] = maybe_float(length)
     c.info["width1"] = maybe_float(width1)
     c.info["width2"] = maybe_float(width2)
     for port in c.ports:
@@ -191,10 +189,10 @@ def taper_strip_to_ridge(
     taper_ref_wg = c << taper_wg
     taper_ref_slab = c << taper_slab
 
-    c.info["length"] = length
+    c.info["length"] = maybe_float(length)
     c.add_port(name="o1", port=taper_ref_wg.ports["o1"])
 
-    if slab_port_layer:
+    if slab_port_layer is not None:
         port = taper_ref_wg.ports["o2"]
         c.add_port(
             name="o2",
@@ -209,7 +207,7 @@ def taper_strip_to_ridge(
     else:
         c.add_port(name="o2", port=taper_ref_wg.ports["o2"])
 
-    if length:
+    if _has_nonzero_length(length):
         xs.add_bbox(c)
     c.flatten()
     return c
@@ -241,20 +239,19 @@ def taper_strip_to_ridge_trenches(
     yL = width / 2 + trench_width - trench_offset + slab_offset
 
     # straight
-    x = [0, length, length, 0]
-    yw = [y0, yL, -yL, -y0]
-    c.add_polygon(list(zip(x, yw, strict=False)), layer=layer_wg)
+    x = asarray([0, length, length, 0])
+    yw = asarray([y0, yL, -yL, -y0])
+    c.add_polygon(xp.column_stack([x, yw]), layer=layer_wg)
 
     # top trench
     ymin0 = width / 2
     yminL = width / 2
     ymax0 = width / 2 + trench_width
     ymaxL = width / 2 + trench_width + slab_offset
-    x = [0, length, length, 0]
-    ytt = [ymin0, yminL, ymaxL, ymax0]
-    ytb = [-ymin0, -yminL, -ymaxL, -ymax0]
-    c.add_polygon(list(zip(x, ytt, strict=False)), layer=trench_layer)
-    c.add_polygon(list(zip(x, ytb, strict=False)), layer=trench_layer)
+    ytt = asarray([ymin0, yminL, ymaxL, ymax0])
+    ytb = asarray([-ymin0, -yminL, -ymaxL, -ymax0])
+    c.add_polygon(xp.column_stack([x, ytt]), layer=trench_layer)
+    c.add_polygon(xp.column_stack([x, ytb]), layer=trench_layer)
 
     c.add_port(name="o1", center=(0, 0), width=width, orientation=180, layer=layer_wg)
     c.add_port(

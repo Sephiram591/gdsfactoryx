@@ -23,9 +23,10 @@ from __future__ import annotations
 
 import pathlib
 from collections.abc import Callable, Generator, Sequence
+from dataclasses import dataclass, field
 from enum import IntEnum
 from functools import partial
-from typing import Any, Literal, ParamSpec, Protocol, TypedDict, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, ParamSpec, Protocol, TypedDict, TypeVar
 
 import klayout.db as kdb
 import numpy as np
@@ -35,6 +36,9 @@ from kfactory import DPins as Pins  # runtime re-export of a class
 from kfactory.layer import LayerEnum
 
 from gdsfactory._ports import Port  # differentiable port
+
+if TYPE_CHECKING:
+    from gdsfactory.component import ComponentReference
 
 STEP_DIRECTIVES = {
     "x",
@@ -175,6 +179,25 @@ type ConnectivitySpec = ConductorConductorName | ConductorViaConductorName
 
 type Sparameters = dict[str, npt.NDArray[np.float64]]
 
+@dataclass
+class OpticalAllAngleRoute:
+    """An all-angle optical route (lengths and coordinates in um)."""
+
+    backbone: list[Any]
+    start_port: Port
+    end_port: Port
+    instances: list[ComponentReference] = field(default_factory=list)
+    length: Any = 0.0
+    length_straights: Any = 0.0
+    backbone_um: Any = None
+    polygons: dict[Any, list[Any]] = field(default_factory=dict)
+
+    @property
+    def length_um(self) -> Any:
+        """Total route length in um (differentiable)."""
+        return self.length
+
+
 type Route = Any
 type RoutingStrategy = Callable[..., Sequence[Route]]
 type RoutingStrategies = dict[str, RoutingStrategy]
@@ -298,6 +321,7 @@ __all__ = (
     "LayerTransitions",
     "Layers",
     "Number",
+    "OpticalAllAngleRoute",
     "PathType",
     "PathTypes",
     "Pin",

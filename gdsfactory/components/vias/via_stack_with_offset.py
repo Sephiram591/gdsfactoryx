@@ -9,12 +9,24 @@ __all__ = [
 import warnings
 from collections.abc import Sequence
 from functools import partial
+from typing import Any
 
+import jax
 from numpy import floor
 
 import gdsfactory as gf
+from gdsfactory._jax import asarray, is_tracer, stop_gradient, to_float
 from gdsfactory.component import Component
 from gdsfactory.typings import ComponentSpec, LayerSpec, LayerSpecs, Size
+
+
+def _trunc_st(x: Any) -> Any:
+    """Straight-through integer truncation (works under eager grad and jax.jit)."""
+    if is_tracer(x) or isinstance(x, jax.Array):
+        xa = asarray(x)
+        t = jax.lax.trunc(stop_gradient(xa))
+        return xa + stop_gradient(t - xa)
+    return int(x)
 
 
 @gf.cell_with_module_name(tags=["vias"])
@@ -64,24 +76,28 @@ def via_stack_with_offset(
     c = Component()
     y0 = 0.0
 
-    if sizes and layer_offsets:
+    sizes_seq = list(sizes) if sizes is not None else None
+    layer_offsets_seq = list(layer_offsets) if layer_offsets is not None else None
+    offsets_seq = list(offsets) if offsets is not None else None
+
+    if sizes_seq and layer_offsets_seq:
         raise ValueError("You need to set either sizes or layer_offsets")
 
-    if size and sizes:
+    if size is not None and sizes_seq:
         raise ValueError("You need to set either size or sizes")
 
-    offsets = list(offsets or [0] * len(layers))
-    layer_offsets = list(layer_offsets or [0] * len(layers))
-    if sizes:
-        sizes_list = list(sizes)
+    offsets_list = offsets_seq or [0] * len(layers)
+    layer_offsets_list = layer_offsets_seq or [0] * len(layers)
+    if sizes_seq:
+        sizes_list = sizes_seq
     else:
         assert size is not None
         sizes_list = [size] * len(layers)
 
-    elements = {len(layers), len(layer_offsets), len(vias), len(sizes_list)}
+    elements = {len(layers), len(layer_offsets_list), len(vias), len(sizes_list)}
     if len(elements) > 1:
         warnings.warn(
-            f"Got {len(layers)} layers, {len(layer_offsets)} layer_offsets, {len(vias)} vias, {len(sizes_list)} sizes",
+            f"Got {len(layers)} layers, {len(layer_offsets_list)} layer_offsets, {len(vias)} vias, {len(sizes_list)} sizes",
             stacklevel=3,
         )
 
@@ -106,7 +122,13 @@ def via_stack_with_offset(
     multiple_port_layers = len(resolved_port_orientations) > 1
 
     for layer, resolved_layer, via, layer_size, size_offset, offset in zip(
-        layers, resolved_layers, vias, sizes_list, layer_offsets, offsets, strict=False
+        layers,
+        resolved_layers,
+        vias,
+        sizes_list,
+        layer_offsets_list,
+        offsets_list,
+        strict=False,
     ):
         assert layer_size is not None
         width, height = layer_size
@@ -124,7 +146,7 @@ def via_stack_with_offset(
                 port_orientations=resolved_port_orientations[resolved_layer],
                 auto_rename_ports=False,
             )
-            ref_layer.ymin = int(y0)
+            ref_layer.ymin = _trunc_st(y0)
             if multiple_port_layers:
                 layer_name = (
                     resolved_layer.name
@@ -142,9 +164,9 @@ def via_stack_with_offset(
                 port_type=None,
                 port_orientations=None,
             )
-            ref_layer.ymin = int(y0)
+            ref_layer.ymin = _trunc_st(y0)
 
-        if via:
+        if via is not None:
             via = gf.get_component(via)
             if "xsize" not in via.info:
                 raise ValueError(f"via {via.name!r} is missing xsize info")
@@ -169,8 +191,8 @@ def via_stack_with_offset(
             nb_vias_x = (width - w - 2 * enclosure) / pitch_x + 1
             nb_vias_y = (height - h - 2 * enclosure) / pitch_y + 1
 
-            nb_vias_x = int(abs(floor(nb_vias_x))) or 1
-            nb_vias_y = int(abs(floor(nb_vias_y))) or 1
+            nb_vias_x = int(abs(floor(to_float(nb_vias_x)))) or 1
+            nb_vias_y = int(abs(floor(to_float(nb_vias_y)))) or 1
 
             cw = (width - (nb_vias_x - 1) * pitch_x - w) / 2
             ch = (height - (nb_vias_y - 1) * pitch_y - h) / 2
@@ -187,7 +209,10 @@ def via_stack_with_offset(
             )
             ref.move((x00, y00))
             y0 += height
-            if ref.xsize + enclosure > width or ref.ysize + enclosure > height:
+            if (
+                to_float(ref.xsize + enclosure) > to_float(width)
+                or to_float(ref.ysize + enclosure) > to_float(height)
+            ):
                 warnings.warn(
                     f"size = {size} for layer {layer} violates min enclosure"
                     f" {enclosure} for via {via.name!r}",
@@ -209,12 +234,6 @@ def via_stack_with_offset(
         c.create_pin(ports=elec, name="pad")
     return c
 
-
-via_stack_with_offset_ppp_m1 = partial(
-    via_stack_with_offset,
-    layers=("PPP", "M1"),
-    vias=(None, "viac"),
-)
 
 via_stack_with_offset_ppp_m1 = partial(
     via_stack_with_offset,

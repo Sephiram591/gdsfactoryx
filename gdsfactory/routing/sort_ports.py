@@ -2,15 +2,16 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from gdsfactory._jax import to_float
 from gdsfactory.typings import Port, Ports
 
 
 def get_port_x(port: Port) -> float:
-    return port.center[0]
+    return float(to_float(port.center[0]))
 
 
 def get_port_y(port: Port) -> float:
-    return port.center[1]
+    return float(to_float(port.center[1]))
 
 
 def sort_ports_x(ports: Ports) -> list[Port]:
@@ -52,18 +53,14 @@ def sort_ports(
     if not ports1_list:
         raise ValueError("ports1 is an empty list")
 
-    if ports1_list[0].orientation in [0, 180] and ports2_list[0].orientation in [
-        0,
-        180,
-    ]:
+    ori1 = round(to_float(ports1_list[0].orientation or 0)) % 360
+    ori2 = round(to_float(ports2_list[0].orientation or 0)) % 360
+    if ori1 in [0, 180] and ori2 in [0, 180]:
         _sort(get_port_y, ports1_list, enforce_port_ordering, ports2_list)
-    elif ports1_list[0].orientation in [90, 270] and ports2_list[0].orientation in [
-        90,
-        270,
-    ]:
+    elif ori1 in [90, 270] and ori2 in [90, 270]:
         _sort(get_port_x, ports1_list, enforce_port_ordering, ports2_list)
     else:
-        axis = "X" if ports1_list[0].orientation in [0, 180] else "Y"
+        axis = "X" if ori1 in [0, 180] else "Y"
         f_key1 = get_port_y if axis == "X" else get_port_x
         ports1_list.sort(key=f_key1)
         if not enforce_port_ordering:

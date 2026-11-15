@@ -1,26 +1,69 @@
 """Inductor components PDK."""
 
+from __future__ import annotations
+
 import math
+from typing import Any, cast
+
+import jax
+import numpy as np
 
 import gdsfactory as gf
 from gdsfactory import Component
-from gdsfactory._jax import round_st, to_float
+from gdsfactory._jax import (
+    asarray,
+    has_tracers,
+    points_array,
+    round_st,
+    to_float,
+    xp,
+)
 from gdsfactory.typings import ComponentSpec, LayerSpec, LayerSpecs
 
 from .._schematic import inductor_schematic
 from ._geometry import (
-    Poly,
     _add_via_array,
-    _make_aspect_shift_y,
-    _map_y,
     _mirror_x,
     _pgs,
     _routing_geometric_45,
     _via_component_info,
-    _zip,
 )
 
 __all__ = ["inductor", "spiral_inductor", "symmetric_inductor"]
+
+
+def _shift_y_value(y: Any, d_out: float, aspect_ratio: float) -> Any:
+    """Stretch straight sides only (y=0 fixed). Identity when concrete aspect_ratio == 1."""
+    if not has_tracers(aspect_ratio) and to_float(aspect_ratio) == 1.0:
+        return y
+    ext = d_out * (aspect_ratio - 1)
+    if has_tracers(y) or isinstance(y, jax.Array | np.ndarray):
+        ya = asarray(y)
+        return xp.where(ya > 0, ya + ext / 2, xp.where(ya < 0, ya - ext / 2, ya))
+    if y > 0:
+        return y + ext / 2
+    if y < 0:
+        return y - ext / 2
+    return y
+
+
+def _polygon_with_aspect(
+    xpts: Any, ypts: Any, d_out: float, aspect_ratio: float
+) -> Any:
+    """Pack x/y coordinate sequences into an (N, 2) array with aspect shift on y."""
+    xa = asarray(xpts)
+    ya = _shift_y_value(asarray(ypts), d_out, aspect_ratio)
+    return xp.column_stack([xa, ya])
+
+
+def _poly_to_points(poly: Any, d_out: float, aspect_ratio: float) -> Any:
+    """Convert a Poly list of (x, y) tuples to an (N, 2) array with aspect shift on y."""
+    arr = points_array(poly)
+    if not has_tracers(aspect_ratio) and to_float(aspect_ratio) == 1.0:
+        return arr
+    return xp.column_stack(
+        [arr[:, 0], _shift_y_value(arr[:, 1], d_out, aspect_ratio)]
+    )
 
 
 def inductor_min_diameter(width: float, space: float, turns: int, grid: float) -> float:
@@ -36,7 +79,7 @@ def inductor_min_diameter(width: float, space: float, turns: int, grid: float) -
         Minimum diameter in micrometers.
     """
     min_d = 2 * turns * (width + space) + 4 * width
-    return round(min_d / grid) * grid
+    return cast("float", round_st(min_d, step=grid))
 
 
 @gf.cell_with_module_name(schematic_function=inductor_schematic, tags=["analog"])
@@ -114,13 +157,11 @@ def inductor(
     c.add_port(name="P2", center=(+s, s), width=s, orientation=270, layer=layer_metal)
 
     # Add IND layer
-    outer_polygon_pts = []
-    for i in range(8):
-        r_outer = (d / 2 + length) / (math.cos(pi_over_4 / 2))
-        angle = i * pi_over_4 + pi_over_4 / 2
-        x = r_outer * math.cos(angle)
-        y = r_outer * math.sin(angle) + octagon_center_y
-        outer_polygon_pts.append((x, y))
+    r_outer = (d / 2 + length) / (math.cos(pi_over_4 / 2))
+    angles = xp.arange(8) * pi_over_4 + pi_over_4 / 2
+    outer_polygon_pts = xp.column_stack(
+        [r_outer * xp.cos(angles), r_outer * xp.sin(angles) + octagon_center_y]
+    )
 
     c.add_polygon(points=outer_polygon_pts, layer=layer_inductor)
 
@@ -198,6 +239,8 @@ def spiral_inductor(
     """
     c = Component()
     PI = math.pi
+    N = int(to_float(N))
+    sides = int(to_float(sides))
     opposite = port_side == "opposite"
 
     # Derived parameters (identical to build_spiral_inductor)
@@ -266,24 +309,27 @@ def spiral_inductor(
         + list(reversed(y_in))
         + list(reversed(y_in_start))
     )
-    winding_polygon: Poly = list(zip(x_poly, y_poly, strict=True))
-
     last_x_in = x_in[-1]
     last_x_out = x_out[-1]
     underpass_end_x = -(d_out / 2 + width) if opposite else d_out / 2 + width
 
-    underpass_polygon: Poly = [
-        (last_x_in, exit_yc - width / 2),
-        (underpass_end_x, exit_yc - width / 2),
-        (underpass_end_x, exit_yc + width / 2),
-        (last_x_in, exit_yc + width / 2),
+    underpass_x = [last_x_in, underpass_end_x, underpass_end_x, last_x_in]
+    underpass_y = [
+        exit_yc - width / 2,
+        exit_yc - width / 2,
+        exit_yc + width / 2,
+        exit_yc + width / 2,
     ]
 
-    shift_y = _make_aspect_shift_y(d_out, aspect_ratio)
-
     # Winding + underpass polygons
-    c.add_polygon(_map_y(winding_polygon, shift_y), layer=layer_winding)
-    c.add_polygon(_map_y(underpass_polygon, shift_y), layer=layer_underpass)
+    c.add_polygon(
+        _polygon_with_aspect(x_poly, y_poly, d_out, aspect_ratio),
+        layer=layer_winding,
+    )
+    c.add_polygon(
+        _polygon_with_aspect(underpass_x, underpass_y, d_out, aspect_ratio),
+        layer=layer_underpass,
+    )
 
     # Via array: fill the overlap region between winding and underpass
     via_cx = last_x_out + (last_x_in - last_x_out) / 2
@@ -296,31 +342,38 @@ def spiral_inductor(
     extend = 2 * (h + enclosure) + via_spacing_y
 
     avail_x = width - 2 * enclosure
-    if extend > width:
+    if to_float(extend) > to_float(width):
         avail_y = extend - 2 * enclosure
         via_center_y = via_cy + (extend - width) / 2
     else:
         avail_y = width - 2 * enclosure
         via_center_y = via_cy
 
-    _add_via_array(c, via_component, via_cx, shift_y(via_center_y), avail_x, avail_y)
+    _add_via_array(
+        c,
+        via_component,
+        via_cx,
+        _shift_y_value(via_center_y, d_out, aspect_ratio),
+        avail_x,
+        avail_y,
+    )
 
     if add_pgs:
         for layer in layers_pgs:
             for strip in _pgs(pgs_diameter, pgs_width, pgs_spacing):
-                c.add_polygon(_map_y(strip, shift_y), layer=layer)
+                c.add_polygon(_poly_to_points(strip, d_out, aspect_ratio), layer=layer)
 
     # Ports
     c.add_port(
         "P1",
-        center=(d_out / 2 + width, shift_y(entry_yc)),
+        center=(d_out / 2 + width, _shift_y_value(entry_yc, d_out, aspect_ratio)),
         width=width,
         orientation=0.0,
         layer=layer_winding,
     )
     c.add_port(
         "P2",
-        center=(underpass_end_x, shift_y(exit_yc)),
+        center=(underpass_end_x, _shift_y_value(exit_yc, d_out, aspect_ratio)),
         width=width,
         orientation=180.0,
         layer=layer_underpass,
@@ -401,6 +454,8 @@ def symmetric_inductor(
     c = Component()
     PI = math.pi
     SQRT2 = math.sqrt(2)
+    N = int(to_float(N))
+    sides = int(to_float(sides))
 
     via_component = gf.get_component(via)
     _via_w, via_h, via_enclosure, _via_pitch_x, via_pitch_y = _via_component_info(
@@ -425,13 +480,17 @@ def symmetric_inductor(
     right_angles = [PI * (-0.5 + (i + 0.5) * 2 / sides) for i in range(n_half)]
     sep_total = width + spacing + (SQRT2 - 1) * (2 * spacing + width)
 
-    shift_y = _make_aspect_shift_y(d_out, aspect_ratio)
+    def add_winding(xpts: Any, ypts: Any) -> None:
+        c.add_polygon(
+            _polygon_with_aspect(xpts, ypts, d_out, aspect_ratio),
+            layer=layer_winding,
+        )
 
-    def add_winding(poly: Poly) -> None:
-        c.add_polygon(_map_y(poly, shift_y), layer=layer_winding)
-
-    def add_crossing(poly: Poly) -> None:
-        c.add_polygon(_map_y(poly, shift_y), layer=layer_underpass)
+    def add_crossing(xpts: Any, ypts: Any) -> None:
+        c.add_polygon(
+            _polygon_with_aspect(xpts, ypts, d_out, aspect_ratio),
+            layer=layer_underpass,
+        )
 
     for winding in range(N):
         # Left section
@@ -451,7 +510,7 @@ def symmetric_inductor(
             x_in = [-sep_total / 2, *x_in, -sep_total / 2]
         y_out = [y_out[0], *y_out, y_out[-1]]
         y_in = [y_in[0], *y_in, y_in[-1]]
-        add_winding(_zip([*x_out, *reversed(x_in)], [*y_out, *reversed(y_in)]))
+        add_winding([*x_out, *reversed(x_in)], [*y_out, *reversed(y_in)])
 
         # Right section
         x_out = [R1 * math.cos(p) for p in right_angles]
@@ -470,7 +529,7 @@ def symmetric_inductor(
             x_in = [sep_total / 2, *x_in, sep_total / 2]
         y_out = [y_out[0], *y_out, y_out[-1]]
         y_in = [y_in[0], *y_in, y_in[-1]]
-        add_winding(_zip([*x_out, *reversed(x_in)], [*y_out, *reversed(y_in)]))
+        add_winding([*x_out, *reversed(x_in)], [*y_out, *reversed(y_in)])
 
         # Crossings (skip on the innermost winding — nothing left to cross)
         if winding != N - 1:
@@ -479,15 +538,23 @@ def symmetric_inductor(
             else:
                 h = (-R2 + s) * math.sin(PI * (0.5 - 1 / sides))
 
-            add_crossing(
-                _routing_geometric_45(
-                    width, spacing, 0, h - width - spacing / 2, extend
-                )
+            c.add_polygon(
+                _poly_to_points(
+                    _routing_geometric_45(
+                        width, spacing, 0, h - width - spacing / 2, extend
+                    ),
+                    d_out,
+                    aspect_ratio,
+                ),
+                layer=layer_underpass,
             )
             cross_top = _routing_geometric_45(
                 width, spacing, 0, h - width - spacing / 2, 0
             )
-            add_winding(_mirror_x(cross_top))
+            c.add_polygon(
+                _poly_to_points(_mirror_x(cross_top), d_out, aspect_ratio),
+                layer=layer_winding,
+            )
 
             for cx, cy in [
                 (-sep_total / 2 - width / 2, h - 3 * width / 2 - spacing),
@@ -498,7 +565,7 @@ def symmetric_inductor(
                     c,
                     via_component,
                     cx + dx,
-                    shift_y(cy),
+                    _shift_y_value(cy, d_out, aspect_ratio),
                     extend - 2 * via_enclosure,
                     width - 2 * via_enclosure,
                 )
@@ -542,10 +609,10 @@ def symmetric_inductor(
                 ]
 
         if N <= 2:
-            add_winding(_zip(x_ct, y_ct))
+            add_winding(x_ct, y_ct)
         else:
             ct_port_layer = layer_underpass
-            add_crossing(_zip(x_ct, y_ct))
+            add_crossing(x_ct, y_ct)
 
             if N % 2 != 0:
                 x_ct1, y_ct1 = (
@@ -585,16 +652,16 @@ def symmetric_inductor(
                 y_ct2 - extend / 2,
             ]
 
-            add_winding(_zip(xvp1, yvp1))
-            add_crossing(_zip(xvp1, yvp1))
-            add_crossing(_zip(xvp2, yvp2))
+            add_winding(xvp1, yvp1)
+            add_crossing(xvp1, yvp1)
+            add_crossing(xvp2, yvp2)
 
             for cx, cy in [(x_ct1, y_ct1), (x_ct2, y_ct2)]:
                 _add_via_array(
                     c,
                     via_component,
                     cx,
-                    shift_y(cy),
+                    _shift_y_value(cy, d_out, aspect_ratio),
                     width - 2 * via_enclosure,
                     extend - 2 * via_enclosure,
                 )
@@ -619,32 +686,31 @@ def symmetric_inductor(
     ]
     if center_tap:
         add_winding(
-            _zip(
-                [-width / 2, -width / 2, width / 2, width / 2],
-                [
-                    -d_out / 2 - width,
-                    -d_out / 2 + width,
-                    -d_out / 2 + width,
-                    -d_out / 2 - width,
-                ],
-            )
+            [-width / 2, -width / 2, width / 2, width / 2],
+            [
+                -d_out / 2 - width,
+                -d_out / 2 + width,
+                -d_out / 2 + width,
+                -d_out / 2 - width,
+            ],
         )
-    add_winding(_zip(x_port, y_port))
-    add_winding(_zip([-x for x in x_port], y_port))
+    add_winding(x_port, y_port)
+    add_winding([-x for x in x_port], y_port)
 
     port_y = -d_out / 2 - width
     port_x = ps + width if center_tap else (ps + width) / 2
+    shifted_port_y = _shift_y_value(port_y, d_out, aspect_ratio)
 
     c.add_port(
         "P1",
-        center=(-port_x, shift_y(port_y)),
+        center=(-port_x, shifted_port_y),
         width=width,
         orientation=270.0,
         layer=layer_winding,
     )
     c.add_port(
         "P2",
-        center=(port_x, shift_y(port_y)),
+        center=(port_x, shifted_port_y),
         width=width,
         orientation=270.0,
         layer=layer_winding,
@@ -652,7 +718,7 @@ def symmetric_inductor(
     if center_tap:
         c.add_port(
             "CT",
-            center=(0, shift_y(port_y)),
+            center=(0, shifted_port_y),
             width=width,
             orientation=270.0,
             layer=ct_port_layer,
@@ -661,7 +727,7 @@ def symmetric_inductor(
     if add_pgs:
         for layer in layers_pgs:
             for strip in _pgs(pgs_diameter, pgs_width, pgs_spacing):
-                c.add_polygon(_map_y(strip, shift_y), layer=layer)
+                c.add_polygon(_poly_to_points(strip, d_out, aspect_ratio), layer=layer)
 
     # Metadata
     c.info["resistance"] = resistance

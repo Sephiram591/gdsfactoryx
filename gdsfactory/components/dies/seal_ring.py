@@ -3,6 +3,7 @@ from __future__ import annotations
 __all__ = ["seal_ring", "seal_ring_segmented"]
 
 import gdsfactory as gf
+from gdsfactory._jax import to_float
 from gdsfactory.snap import snap_to_grid
 from gdsfactory.typings import ComponentSpec, Float2
 
@@ -141,7 +142,9 @@ def seal_ring_segmented(
         via_stack, size=(length_segment, width_segment), port_orientations=None
     )
     horizontal = gf.c.array(
-        component=segment_horizontal, columns=int(dx / pitch), column_pitch=pitch
+        component=segment_horizontal,
+        columns=int(to_float(dx) / to_float(pitch)),
+        column_pitch=pitch,
     )
 
     if with_north:
@@ -170,7 +173,10 @@ def seal_ring_segmented(
     dy = abs(tl.ymin - bl.ymax)
 
     vertical = gf.c.array(
-        component=segment_vertical, rows=int(dy / pitch), columns=1, row_pitch=pitch
+        component=segment_vertical,
+        rows=int(to_float(dy) / to_float(pitch)),
+        columns=1,
+        row_pitch=pitch,
     )
 
     if with_east:

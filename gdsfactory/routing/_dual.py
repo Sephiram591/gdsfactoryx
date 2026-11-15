@@ -35,6 +35,28 @@ def _st(t: Any, v: float) -> Any:
     return t + jax.lax.stop_gradient(v - t)
 
 
+def _dmin(a: DNum, b: DNum) -> DNum:
+    """Order-independent minimum of two DNums, preserving derivatives on ties."""
+    if a.v < b.v:
+        return a
+    if b.v < a.v:
+        return b
+    if a.t is not None and b.t is not None:
+        return DNum.traced(0.5 * (a.t + b.t), a.v)
+    return b if a.t is None else a
+
+
+def _dmax(a: DNum, b: DNum) -> DNum:
+    """Order-independent maximum of two DNums, preserving derivatives on ties."""
+    if a.v > b.v:
+        return a
+    if b.v > a.v:
+        return b
+    if a.t is not None and b.t is not None:
+        return DNum.traced(0.5 * (a.t + b.t), a.v)
+    return b if a.t is None else a
+
+
 class DNum:
     """Exact integer (or float) value ``v`` with an optional JAX value ``t``."""
 
@@ -118,10 +140,13 @@ class DNum:
     def __mod__(self, other: Any) -> DNum:
         o = DNum.of(other)
         v = self.v % o.v
-        # x % n has derivative 1 w.r.t. x (piecewise)
-        if self.t is None:
+        if self.t is None and o.t is None:
             return DNum(v)
-        return DNum.traced(self.t, v)
+        q = self.v // o.v
+        return DNum.traced(self.tv() - o.tv() * q, v)
+
+    def __rmod__(self, other: Any) -> DNum:
+        return DNum.of(other) % self
 
     def __round__(self, ndigits: int | None = None) -> DNum:
         v = round(self.v, ndigits) if ndigits is not None else round(self.v)
@@ -682,10 +707,10 @@ class Box:
         if self._empty:
             return other.dup()
         return Box._from(
-            min(self._l, other._l),
-            min(self._b, other._b),
-            max(self._r, other._r),
-            max(self._t, other._t),
+            _dmin(self._l, other._l),
+            _dmin(self._b, other._b),
+            _dmax(self._r, other._r),
+            _dmax(self._t, other._t),
         )
 
     def __iadd__(self, other: Any) -> Box:
@@ -706,10 +731,10 @@ class Box:
         if k.empty():
             return Box()
         return Box._from(
-            max(self._l, other._l),
-            max(self._b, other._b),
-            min(self._r, other._r),
-            min(self._t, other._t),
+            _dmax(self._l, other._l),
+            _dmax(self._b, other._b),
+            _dmin(self._r, other._r),
+            _dmin(self._t, other._t),
         )
 
     def enlarged(self, *args: Any) -> Box:

@@ -49,7 +49,7 @@ def cdsem_all(
 
     all_devices = [_c1]
 
-    if bend90:
+    if bend90 is not None:
         all_devices += [
             gf.get_component(
                 cdsem_bend180,
@@ -63,7 +63,7 @@ def cdsem_all(
             for width in widths
         ]
 
-    if dense_lines_width:
+    if dense_lines_width is not None:
         density_params = [
             (
                 dense_lines_width - dense_lines_width_difference,

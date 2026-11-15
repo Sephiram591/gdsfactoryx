@@ -9,7 +9,14 @@ from typing import Literal, overload
 import numpy as np
 
 import gdsfactory as gf
-from gdsfactory._jax import maybe_float, to_float, to_numpy
+from gdsfactory._jax import (
+    has_abstract_tracers,
+    is_abstract_tracer,
+    maybe_float,
+    to_float,
+    to_numpy,
+    xp,
+)
 from gdsfactory.component import Component, ComponentAllAngle
 from gdsfactory.path import arc
 from gdsfactory.snap import snap_to_grid
@@ -79,16 +86,14 @@ def _bend_circular(
     ```
     """
     x = gf.get_cross_section(cross_section)
-    radius = radius or x.radius
+    radius = radius if radius is not None else x.radius
     assert radius is not None
-    if layer and width:
-        x = gf.get_cross_section(
-            cross_section, layer=layer or x.layer, width=width or x.width
-        )
-    elif layer:
-        x = gf.get_cross_section(cross_section, layer=layer or x.layer)
-    elif width:
-        x = gf.get_cross_section(cross_section, width=width or x.width)
+    if layer is not None and width is not None:
+        x = gf.get_cross_section(cross_section, layer=layer, width=width)
+    elif layer is not None:
+        x = gf.get_cross_section(cross_section, layer=layer)
+    elif width is not None:
+        x = gf.get_cross_section(cross_section, width=width)
 
     p = arc(radius=radius, angle=angle, npoints=npoints, angular_step=angular_step)
     c = p.extrude(x, all_angle=all_angle)
@@ -96,9 +101,10 @@ def _bend_circular(
     c.info["length"] = maybe_float(snap_to_grid(p.length()))
     c.info["dy"] = maybe_float(abs(p.points[0][0] - p.points[-1][0]))
     c.info["radius"] = maybe_float(radius)
-    c.info["width"] = width or x.width
-    top = None if int(to_float(angle)) in {180, -180, -90} else 0
-    bottom = 0 if int(to_float(angle)) in {-90} else None
+    c.info["width"] = width if width is not None else x.width
+    angle_val = None if is_abstract_tracer(angle) else int(to_float(angle))
+    top = None if angle_val in {180, -180, -90} else 0
+    bottom = 0 if angle_val == -90 else None
     x.add_bbox(c, top=top, bottom=bottom)
     if not allow_min_radius_violation:
         x.validate_radius(radius)
@@ -108,11 +114,25 @@ def _bend_circular(
         n_bend_90=abs(angle / 90.0),
         min_bend_radius=radius,
     )
-    for prt in c.ports:  # positive radius for outward left turning
-        if np.allclose(to_numpy(prt.center_array), to_numpy(p.points[0])):
-            prt.info["radius"] = -radius if angle > 0 else radius
-        elif np.allclose(to_numpy(prt.center_array), to_numpy(p.points[-1])):
-            prt.info["radius"] = radius if angle > 0 else -radius
+    signed_radius = (
+        xp.where(angle > 0, -radius, radius)
+        if is_abstract_tracer(angle)
+        else (-radius if to_float(angle) > 0 else radius)
+    )
+    if has_abstract_tracers((p.points, angle)):
+        start_names = {s.port_names[0] for s in x.sections if s.port_names}
+        end_names = {s.port_names[1] for s in x.sections if s.port_names}
+        for prt in c.ports:
+            if prt.name in start_names:
+                prt.info["radius"] = signed_radius
+            elif prt.name in end_names:
+                prt.info["radius"] = -signed_radius
+    else:
+        for prt in c.ports:  # positive radius for outward left turning
+            if np.allclose(to_numpy(prt.center_array), to_numpy(p.points[0])):
+                prt.info["radius"] = signed_radius
+            elif np.allclose(to_numpy(prt.center_array), to_numpy(p.points[-1])):
+                prt.info["radius"] = -signed_radius
     return c
 
 
@@ -139,9 +159,9 @@ def bend_circular(
         cross_section: spec (CrossSection, string or dict).
         allow_min_radius_violation: if True allows radius to be smaller than cross_section radius.
     """
-    if abs(to_float(angle)) not in {90, 180}:
+    if not is_abstract_tracer(angle) and abs(to_float(angle)) not in {90, 180}:
         warnings.warn(
-            f"bend_euler angle should be 90 or 180. Got {angle}. Use bend_euler_all_angle instead.",
+            f"bend_circular angle should be 90 or 180. Got {angle}. Use bend_circular_all_angle instead.",
             UserWarning,
             stacklevel=3,
         )

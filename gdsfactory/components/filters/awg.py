@@ -7,7 +7,7 @@ __all__ = ["awg", "free_propagation_region"]
 from functools import partial
 
 import gdsfactory as gf
-from gdsfactory._jax import xp
+from gdsfactory._jax import asarray, maybe_float, round_st, to_float, xp
 from gdsfactory.component import Component
 from gdsfactory.typings import ComponentSpec, CrossSectionSpec, Step
 
@@ -41,6 +41,8 @@ def free_propagation_region(
                   \ |
                    \|
     """
+    inputs = int(to_float(inputs))
+    outputs = int(to_float(outputs))
     y1 = width1 / 2
     y2 = width2 / 2
     xs = gf.get_cross_section(cross_section)
@@ -51,7 +53,7 @@ def free_propagation_region(
     ypts = [y1, y2, -y2, -y1]
 
     c = gf.Component()
-    c.add_polygon(list(zip(xpts, ypts, strict=False)), layer=layer)
+    c.add_polygon(xp.column_stack([asarray(xpts), asarray(ypts)]), layer=layer)
 
     if inputs == 1:
         c.add_port(
@@ -125,6 +127,8 @@ def awg(
             that makes an AWG disperse light by wavelength.
         cross_section: cross_section function.
     """
+    arms = int(to_float(arms))
+    outputs = int(to_float(outputs))
     c = Component()
     fpr_in = gf.get_component(
         free_propagation_region_input_function,
@@ -142,7 +146,7 @@ def awg(
     fpr_in_ref = c.add_ref(fpr_in)
     fpr_out_ref = c.add_ref(fpr_out)
 
-    if length_increment <= 0:
+    if to_float(length_increment) <= 0:
         fpr_in_ref.rotate(90)
         fpr_out_ref.rotate(90)
         fpr_out_ref.x += fpr_spacing
@@ -161,17 +165,19 @@ def awg(
         fpr_out_ref.movey(e0.y - fpr_out_ref.ports["E0"].y)
         gap = fpr_out_ref.ports["E0"].x - e0.x
         xs = gf.get_cross_section(cross_section)
-        bend_radius = xs.radius or 10.0
-        margin = max(4.0, bend_radius)
+        bend_radius = 10.0 if xs.radius is None else xs.radius
+        margin = maybe_float(xp.maximum(4.0, bend_radius))
         max_rise = (gap - 2 * bend_radius) / 2
-        stagger = max(0.0, min(4.0, (max_rise - margin) / max(arms - 2, 1)))
+        stagger = maybe_float(
+            xp.clip((max_rise - margin) / max(arms - 2, 1), 0.0, 4.0)
+        )
         lengths: list[float] = []
         for i in range(arms):
             p_in = fpr_in_ref.ports[f"E{i}"]
             p_out = fpr_out_ref.ports[f"E{i}"]
             rise_x = margin + (arms - 1 - i) * stagger
             h = i * length_increment / 2.0
-            if h > 0:
+            if to_float(h) > 0:
                 steps: list[Step] = [
                     {"dx": rise_x},
                     {"dy": h},
@@ -186,7 +192,7 @@ def awg(
                     c, p_in, p_out, cross_section=cross_section
                 )
             lengths.append(route.length_backbone / 1000.0)
-        c.info["arm_lengths"] = [round(x, 4) for x in lengths]
+        c.info["arm_lengths"] = [maybe_float(round_st(x, 4)) for x in lengths]
 
     c.add_port("o1", port=fpr_in_ref.ports["o1"])
     for i, port in enumerate(gf.port.get_ports_list(fpr_out_ref, prefix="W")):

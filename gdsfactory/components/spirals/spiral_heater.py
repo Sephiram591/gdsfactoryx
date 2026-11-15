@@ -7,12 +7,19 @@ __all__ = [
     "spiral_racetrack_heater_metal",
 ]
 
-from typing import Any
-
+import jax
 import numpy as np
 
 import gdsfactory as gf
-from gdsfactory._jax import is_tracer, stop_gradient, to_float, xp
+from gdsfactory._jax import (
+    has_abstract_tracers,
+    has_tracers,
+    is_abstract_tracer,
+    jnp,
+    stop_gradient,
+    to_float,
+    xp,
+)
 from gdsfactory.component import Component
 from gdsfactory.routing.route_bundle import route_bundle
 from gdsfactory.typings import (
@@ -58,8 +65,8 @@ def spiral_racetrack(
     c = gf.Component()
 
     xs = gf.get_cross_section(cross_section)
-    min_radius = min_radius or xs.radius
-    assert min_radius
+    min_radius = min_radius if min_radius is not None else xs.radius
+    assert min_radius is not None
 
     _bend_s = gf.get_component(
         bend_s,
@@ -144,7 +151,8 @@ def spiral_racetrack_fixed_length(
 
     xs_s_bend = cross_section_s or cross_section
     xs = gf.get_cross_section(xs_s_bend)
-    min_radius = min_radius or xs.radius
+    min_radius = min_radius if min_radius is not None else xs.radius
+    assert min_radius is not None
 
     if np.mod(n_straight_sections, 2) != 0:
         raise ValueError("The number of straight sections has to be even!")
@@ -157,6 +165,7 @@ def spiral_racetrack_fixed_length(
         in_out_port_spacing=in_out_port_spacing,
         min_radius=min_radius,
         spacings=spacings,
+        straight=straight,
         bend=bend,
         bend_s=bend_s,
         cross_section_s_bend=xs_s_bend,
@@ -179,7 +188,11 @@ def spiral_racetrack_fixed_length(
     c.info["length"] = _spiral.info["length"]
     c.info["straight_length"] = straight_length
 
-    if spiral.ports["o1"].x > spiral.ports["o2"].x:
+    if (
+        not is_abstract_tracer(spiral.ports["o1"].x)
+        and not is_abstract_tracer(spiral.ports["o2"].x)
+        and to_float(spiral.ports["o1"].x) > to_float(spiral.ports["o2"].x)
+    ):
         spiral.mirror_x()
 
     # add a bit more to the spiral racetrack to make the in and out ports be aligned in y
@@ -233,6 +246,7 @@ def _spiral_total_length(
     bend_s: ComponentSpec,
     cross_section: CrossSectionSpec,
     cross_section_s_bend: CrossSectionSpec,
+    straight: ComponentSpec = straight,
 ) -> float:
     """Length from input to output port of the fixed-length spiral for a straight length."""
     _bend = gf.get_component(
@@ -261,7 +275,12 @@ def _spiral_total_length(
 
     o1 = _spiral.ports["o1"]
     o2 = _spiral.ports["o2"]
-    if o1.x > o2.x:
+    if has_abstract_tracers((o1.x, o2.x)):
+        swap = o1.x > o2.x
+        o1_x = xp.where(swap, -o1.x, o1.x)
+        o2_x = xp.where(swap, -o2.x, o2.x)
+        xmin = xp.where(swap, -_spiral.xmax, _spiral.xmin)
+    elif to_float(o1.x) > to_float(o2.x):
         o1_x = -o1.x
         o2_x = -o2.x
         xmin = -_spiral.xmax
@@ -290,6 +309,7 @@ def _req_straight_len(
     bend_s: ComponentSpec = "bend_s",
     cross_section: CrossSectionSpec = "strip",
     cross_section_s_bend: CrossSectionSpec = "strip",
+    straight: ComponentSpec = straight,
 ) -> float:
     """Returns geometrical parameters to make a spiral of a given length.
 
@@ -307,15 +327,17 @@ def _req_straight_len(
         bend_s: factory to generate the s-bend segments.
         cross_section: cross-section of the waveguides.
         cross_section_s_bend: s bend cross section
+        straight: factory to generate the straight segments.
     """
     from scipy.interpolate import interp1d
 
     xs = gf.get_cross_section(cross_section)
-    min_radius = min_radius or xs.radius
-    assert min_radius
+    min_radius = min_radius if min_radius is not None else xs.radius
+    assert min_radius is not None
     traced_args = (length, in_out_port_spacing, min_radius, *spacings)
-    traced = any(is_tracer(a) for a in traced_args)
+    traced = has_tracers(traced_args)
     common = dict(
+        straight=straight,
         bend=bend,
         bend_s=bend_s,
         cross_section=cross_section,
@@ -327,50 +349,92 @@ def _req_straight_len(
     min_straigth_length_t = get_min_sbend_size(
         (None, -min_radius * 2 + 1 * spacings[0]), cross_section_s_bend
     )
-    min_straigth_length = to_float(min_straigth_length_t)
 
-    if min_straigth_length > 0.8 * to_float(in_out_port_spacing):
-        raise ValueError(
-            "The maximum straight length makes the inner s bend too tight. Increase the in-out port spacing."
+    n = 100
+
+    def _bracket_concrete(
+        length_f: float,
+        in_out_f: float,
+        min_r_f: float,
+        *spacings_f: float,
+    ) -> tuple[float, int, int]:
+        min_s_len = to_float(
+            get_min_sbend_size(
+                (None, -min_r_f * 2 + 1 * spacings_f[0]), cross_section_s_bend
+            )
+        )
+        if min_s_len > 0.8 * in_out_f:
+            raise ValueError(
+                "The maximum straight length makes the inner s bend too tight. Increase the in-out port spacing."
+            )
+        straight_lengths = np.linspace(min_s_len, 0.9 * in_out_f, n)
+        concrete_kw = dict(
+            in_out_port_spacing=in_out_f,
+            min_radius=min_r_f,
+            spacings=tuple(spacings_f),
+            **common,
+        )
+        lens = [float(_spiral_total_length(s, **concrete_kw)) for s in straight_lengths]
+        f = interp1d(lens, straight_lengths)
+        s_val = float(f(length_f))
+        order = np.argsort(lens, kind="mergesort")
+        xs_sorted = np.asarray(lens)[order]
+        hi = int(np.clip(np.searchsorted(xs_sorted, length_f), 1, n - 1))
+        return s_val, int(order[hi - 1]), int(order[hi])
+
+    if has_abstract_tracers(traced_args):
+        i0, i1 = jax.pure_callback(
+            lambda l_v, io_v, mr_v, *sp_v: tuple(
+                np.asarray(idx, dtype=np.int32)
+                for idx in _bracket_concrete(
+                    float(l_v), float(io_v), float(mr_v), *(float(s) for s in sp_v)
+                )[1:]
+            ),
+            (
+                jax.ShapeDtypeStruct((), jnp.int32),
+                jax.ShapeDtypeStruct((), jnp.int32),
+            ),
+            jnp.asarray(length),
+            jnp.asarray(in_out_port_spacing),
+            jnp.asarray(min_radius),
+            *(jnp.asarray(s) for s in spacings),
+            vmap_method="sequential",
+        )
+        a, b = min_straigth_length_t, 0.9 * in_out_port_spacing
+        s0 = a + i0 * (b - a) / (n - 1)
+        s1 = a + i1 * (b - a) / (n - 1)
+        traced_kw = dict(
+            in_out_port_spacing=in_out_port_spacing,
+            min_radius=min_radius,
+            spacings=tuple(spacings),
+            **common,
+        )
+        l0 = _spiral_total_length(s0, **traced_kw)
+        l1 = _spiral_total_length(s1, **traced_kw)
+        dl = l1 - l0
+        safe_dl = xp.where(xp.abs(dl) > 1e-30, dl, 1.0)
+        return xp.where(  # type: ignore[no-any-return]
+            xp.abs(dl) > 1e-30, s0 + (length - l0) * (s1 - s0) / safe_dl, s0
         )
 
-    # "Brute force" approach - sweep length and save total length (concrete)
-    n = 100
-    straight_lengths = np.linspace(
-        min_straigth_length, 0.9 * to_float(in_out_port_spacing), n
+    straight_length, i0, i1 = _bracket_concrete(
+        to_float(length),
+        to_float(in_out_port_spacing),
+        to_float(min_radius),
+        *(to_float(s) for s in spacings),
     )
-    concrete = dict(
-        in_out_port_spacing=to_float(in_out_port_spacing),
-        min_radius=to_float(min_radius),
-        spacings=tuple(to_float(s) for s in spacings),
-        **common,
-    )
-    lens = [float(_spiral_total_length(s, **concrete)) for s in straight_lengths]
-
-    # get the required spacing to achieve the required length (interpolate)
-    f = interp1d(lens, straight_lengths)
-    straight_length = float(f(to_float(length)))
     if not traced:
         return straight_length
 
-    # bracket used by interp1d (it sorts x), rebuilt with traced geometry
-    order = np.argsort(lens, kind="mergesort")
-    xs_sorted = np.asarray(lens)[order]
-    hi = int(np.clip(np.searchsorted(xs_sorted, to_float(length)), 1, n - 1))
-    i0, i1 = int(order[hi - 1]), int(order[hi])
-
-    def grid(i: int) -> Any:
-        # np.linspace(a, b, n)[i] = a + i * (b - a) / (n - 1)
-        a, b = min_straigth_length_t, 0.9 * in_out_port_spacing
-        return a + i * (b - a) / (n - 1)
-
+    a, b = min_straigth_length_t, 0.9 * in_out_port_spacing
+    s0 = a + i0 * (b - a) / (n - 1)
+    s1 = a + i1 * (b - a) / (n - 1)
     traced_kw = dict(
         in_out_port_spacing=in_out_port_spacing,
         min_radius=min_radius,
         spacings=tuple(spacings),
         **common,
     )
-    s0, s1 = grid(i0), grid(i1)
     l0 = _spiral_total_length(s0, **traced_kw)
     l1 = _spiral_total_length(s1, **traced_kw)
     t = s0 + (length - l0) * (s1 - s0) / (l1 - l0)
@@ -408,7 +472,7 @@ def spiral_racetrack_heater_metal(
     """
     c = gf.Component()
     xs = gf.get_cross_section(waveguide_cross_section)
-    min_radius = min_radius or xs.radius or 0
+    min_radius = min_radius if min_radius is not None else (xs.radius or 0)
     assert (
         min_radius is not None
     )  # for type checkers: the `or 0` above never gives None
@@ -529,7 +593,7 @@ def spiral_racetrack_heater_doped(
         heater_cross_section: cross-section of the heater.
     """
     xs = gf.get_cross_section(waveguide_cross_section)
-    min_radius = min_radius or xs.radius or 0
+    min_radius = min_radius if min_radius is not None else (xs.radius or 0)
 
     c = gf.Component()
 

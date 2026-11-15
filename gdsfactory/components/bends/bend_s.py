@@ -12,8 +12,11 @@ import numpy.typing as npt
 
 import gdsfactory as gf
 from gdsfactory._jax import (
+    _jax_float_dtype,
+    has_abstract_tracers,
     has_tracers,
-    is_tracer,
+    is_abstract_tracer,
+    jnp,
     maybe_float,
     stop_gradient,
     to_float,
@@ -74,7 +77,7 @@ def bezier(
         allow_min_radius_violation: bool.
         width: width to use. Defaults to cross_section.width.
     """
-    if width:
+    if width is not None:
         xs = gf.get_cross_section(cross_section, width=width)
     else:
         xs = gf.get_cross_section(cross_section)
@@ -201,7 +204,7 @@ def bend_s(
     """
     dx, dy = size
 
-    if dy == 0:
+    if not is_abstract_tracer(dy) and to_float(dy) == 0:
         return gf.components.straight(
             length=dx, cross_section=cross_section, width=width
         )
@@ -243,36 +246,91 @@ def _get_euler_sbend_angle_middle_length_from_jog(
     """
     from scipy import optimize
 
-    def euler_displacement(theta: float) -> float:
-        curve = gf.path.euler(radius=radius, angle=theta, use_eff=use_eff, p=p)
+    def euler_displacement(theta: Any, r: Any = radius, p_val: Any = p) -> Any:
+        curve = gf.path.euler(radius=r, angle=theta, use_eff=use_eff, p=p_val)
         return curve.ysize
+
+    def _solve_sub_jog(j_val: Any, r_val: Any, p_val: Any) -> Any:
+        def _solve_concrete(j_v: Any, r_v: Any, p_v: Any) -> float:
+            res = optimize.minimize_scalar(
+                lambda theta: float(
+                    (to_float(euler_displacement(theta, r_v, p_v)) - float(j_v)) ** 2
+                ),
+                bounds=(1.0, 90.0),
+                method="bounded",
+            )
+            return float(res.x)
+
+        if not has_tracers((j_val, r_val, p_val)):
+            return _solve_concrete(to_float(j_val), to_float(r_val), to_float(p_val))
+
+        float_dtypes = [
+            jnp.asarray(v).dtype
+            for v in (j_val, r_val, p_val)
+            if isinstance(v, jax.Array | np.ndarray)
+            and np.issubdtype(jnp.asarray(v).dtype, np.floating)
+        ]
+        out_dtype = jnp.result_type(*float_dtypes) if float_dtypes else _jax_float_dtype()
+
+        @jax.custom_jvp
+        def _solve(j_in: Any, r_in: Any, p_in: Any) -> Any:
+            def _cb(j_cb: Any, r_cb: Any, p_cb: Any) -> np.ndarray:
+                return np.asarray(
+                    _solve_concrete(float(j_cb), float(r_cb), float(p_cb)),
+                    dtype=np.dtype(out_dtype),
+                )
+
+            return jax.pure_callback(
+                _cb,
+                jax.ShapeDtypeStruct((), out_dtype),
+                j_in,
+                r_in,
+                p_in,
+                vmap_method="sequential",
+            )
+
+        @_solve.defjvp
+        def _solve_jvp(primals: Any, tangents: Any) -> tuple[Any, Any]:
+            j_p, r_p, p_p = primals
+            j_t, r_t, p_t = tangents
+            theta_star = _solve(j_p, r_p, p_p)
+
+            def _res_of_params(j_in: Any, r_in: Any, p_in: Any) -> Any:
+                return jnp.asarray(
+                    euler_displacement(theta_star, r_in, p_in) - j_in, dtype=out_dtype
+                )
+
+            def _res_of_theta(th_in: Any) -> Any:
+                return jnp.asarray(
+                    euler_displacement(th_in, r_p, p_p) - j_p, dtype=out_dtype
+                )
+
+            _, df_dp_dot = jax.jvp(_res_of_params, (j_p, r_p, p_p), (j_t, r_t, p_t))
+            _, df_dtheta = jax.jvp(
+                _res_of_theta, (theta_star,), (jnp.ones_like(theta_star),)
+            )
+            nonzero = jnp.abs(df_dtheta) > 1e-30
+            safe_denom = jnp.where(nonzero, df_dtheta, jnp.ones_like(df_dtheta))
+            theta_dot = jnp.where(
+                nonzero, -df_dp_dot / safe_denom, jnp.zeros_like(theta_star)
+            )
+            return theta_star, jnp.asarray(theta_dot, dtype=out_dtype)
+
+        return _solve(
+            jnp.asarray(j_val, dtype=out_dtype),
+            jnp.asarray(r_val, dtype=out_dtype),
+            jnp.asarray(p_val, dtype=out_dtype),
+        )
 
     dy_full = euler_displacement(theta=90)
 
-    if jog <= dy_full:
-        # Define the objective function: squared error between computed displacement and jog
-        def objective(theta: float) -> float:
-            return (euler_displacement(theta) - jog) ** 2
-
-        result = optimize.minimize_scalar(
-            lambda theta: to_float(objective(theta)), bounds=(1, 90), method="bounded"
-        )
-        angle_deg = result.x
+    if has_abstract_tracers((jog, dy_full)):
+        angle_sub = _solve_sub_jog(jog, radius, p)
+        angle_deg = xp.where(jog <= dy_full, angle_sub, 90.0)
+        middle_length = xp.where(jog <= dy_full, 0.0, 2 * jog - 2 * dy_full)
+    elif to_float(jog) <= to_float(dy_full):
+        angle_deg = _solve_sub_jog(jog, radius, p)
         middle_length = 0.0
-        if has_tracers((jog, radius, p)):
-            # implicit differentiation of euler_displacement(angle) = jog:
-            # the value stays the optimizer's result, the gradient is
-            # d(angle) = -(d displacement) / (d displacement / d angle).
-            radius_c, p_c = to_float(radius), to_float(p)
-            slope = float(
-                jax.grad(
-                    lambda th: gf.path.euler(
-                        radius=radius_c, angle=th, use_eff=use_eff, p=p_c
-                    ).ysize
-                )(float(angle_deg))
-            )
-            residual = (euler_displacement(angle_deg) - jog) / slope
-            angle_deg = angle_deg - (residual - stop_gradient(residual))
     else:
         angle_deg = 90.0
         middle_length = 2 * jog - 2 * dy_full
@@ -314,19 +372,23 @@ def bend_s_offset(
         if not with_euler:
             p = 0
 
-    if width:
+    if width is not None:
         xs = gf.get_cross_section(cross_section, width=width)
     else:
         xs = gf.get_cross_section(cross_section)
 
-    radius = radius or xs.radius
+    radius = radius if radius is not None else xs.radius
     assert radius is not None, "radius cannot be None"
 
     xs.validate_radius(radius)
     angle, middle_length = _get_euler_sbend_angle_middle_length_from_jog(
         jog=abs(offset) / 2, radius=radius, p=p, use_eff=with_arc_floorplan
     )
-    angle = angle if math.copysign(1, to_float(offset)) > 0 else -angle
+    angle = (
+        xp.where(offset >= 0, angle, -angle)
+        if is_abstract_tracer(offset)
+        else (angle if math.copysign(1, to_float(offset)) > 0 else -angle)
+    )
     path = gf.path.euler(
         radius=radius,
         angle=+angle,
@@ -335,7 +397,11 @@ def bend_s_offset(
         npoints=npoints,
         angular_step=angular_step,
     )
-    if middle_length > 1e-6:
+    if is_abstract_tracer(middle_length):
+        path += gf.path.straight(
+            length=xp.where(middle_length > 1e-6, middle_length, 1e-6)
+        )
+    elif to_float(middle_length) > 1e-6:
         path += gf.path.straight(length=middle_length)
     path += gf.path.euler(
         radius=radius,
@@ -378,35 +444,53 @@ def get_min_sbend_size(
     if min_radius is None:
         raise ValueError("The min radius for the specified layer is not known!")
 
-    min_size = np.inf
-
     assert known_s is not None
 
     # Guess sizes, iterate over them until we cannot achieve the min radius
     # the max size corresponds to an ellipsoid
     # the sweep is discrete: run it on concrete values
-    size_list[1 - ind] = to_float(known_s)
-    max_size = float(np.sqrt(np.abs(min_radius * to_float(known_s))) * 2.5)
-    sizes = np.linspace(max_size, 0.1 * max_size, num_points)
+    def _find_k_concrete(known_f: float, min_r_f: float) -> int:
+        sz = [known_f, known_f]
+        max_s = float(np.sqrt(np.abs(min_r_f * known_f)) * 2.5)
+        sizes = np.linspace(max_s, 0.1 * max_s, num_points)
+        t = np.linspace(0, 1, 201)
+        for idx, s in enumerate(sizes):
+            sz[ind] = float(s)
+            dx, dy = sz
+            control_points = ((0, 0), (dx / 2, 0), (dx / 2, dy), (dx, dy))
+            path_points = bezier_curve(t, control_points)
+            curv = curvature(path_points, t)
+            min_bend_radius = 1.0 / max(np.abs(curv))
+            if min_bend_radius < min_r_f:
+                return idx
+        return -1
 
-    for s in sizes:
-        sz = size_list
-        sz[ind] = s
-        dx, dy = size_list
-        assert dx is not None and dy is not None
-        control_points = ((0, 0), (dx / 2, 0), (dx / 2, dy), (dx, dy))
-        npoints = 201
-        t = np.linspace(0, 1, npoints)
-        path_points = bezier_curve(t, control_points)
-        curv = curvature(path_points, t)
-        min_bend_radius = 1 / max(np.abs(curv))
-        if min_bend_radius < min_radius:
-            min_size = s
-            break
+    if has_abstract_tracers((known_s, min_radius)):
+        k = jax.pure_callback(
+            lambda kv, rv: np.asarray(
+                _find_k_concrete(float(kv), float(rv)), dtype=np.int32
+            ),
+            jax.ShapeDtypeStruct((), jnp.int32),
+            jnp.asarray(known_s),
+            jnp.asarray(min_radius),
+            vmap_method="sequential",
+        )
+        traced = (
+            xp.sqrt(xp.abs(min_radius * known_s))
+            * 2.5
+            * (1.0 - 0.9 * k / (num_points - 1))
+        )
+        return xp.where(k >= 0, traced, jnp.inf)  # type: ignore[no-any-return]
 
-    if is_tracer(known_s) and np.isfinite(min_size):
-        # sizes[k] = max_size * (1 - 0.9 k / (num_points - 1)) with k discrete
-        k = int(np.argmin(np.abs(sizes - min_size)))
+    known_f = to_float(known_s)
+    min_r_f = to_float(min_radius)
+    k = _find_k_concrete(known_f, min_r_f)
+    if k < 0:
+        return np.inf
+
+    max_size = float(np.sqrt(np.abs(min_r_f * known_f)) * 2.5)
+    min_size = float(np.linspace(max_size, 0.1 * max_size, num_points)[k])
+    if has_tracers((known_s, min_radius)):
         traced = xp.sqrt(xp.abs(min_radius * known_s)) * 2.5
         traced = traced * (1 - 0.9 * k / (num_points - 1))
         return min_size + (traced - stop_gradient(traced))  # type: ignore[no-any-return]

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pathlib
-from enum import Enum
+from enum import StrEnum
 
 import typer
 from kfactory.cli.build import build
@@ -17,7 +17,7 @@ app = typer.Typer()
 app.command()(build)
 
 
-class Migration(str, Enum):
+class Migration(StrEnum):
     """Available Migrations."""
 
     upgrade7to8unsafe = "7to8-unsafe"

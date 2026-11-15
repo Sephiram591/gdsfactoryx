@@ -126,14 +126,15 @@ def route_bundle_sbend(
         ys = bend_port2.center[1] - bend_port1.center[1]
         xs = bend_port2.center[0] - bend_port1.center[0]
 
-        if p1.orientation in [0, 180]:
+        ori1 = round(to_float(p1.orientation or 0)) % 360
+        if ori1 in [0, 180]:
             xsize = xs
             ysize = ys
-        elif p1.orientation == 90:
+        elif ori1 == 90:
             xsize = ys
             ysize = -xs
 
-        elif p1.orientation == 270:
+        elif ori1 == 270:
             xsize = -ys
             ysize = xs
 

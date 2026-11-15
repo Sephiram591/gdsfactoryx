@@ -6,6 +6,7 @@ import kfactory as kf
 import numpy as np
 
 import gdsfactory as gf
+from gdsfactory._jax import xp
 from gdsfactory.component import Component
 from gdsfactory.constants import _glyph, _indent, _width
 from gdsfactory.typings import Coordinate, LayerSpec, LayerSpecs
@@ -41,10 +42,11 @@ def text(
                 xoffset += 500 * scaling
             elif 33 <= ascii_val <= 126:
                 for poly in _glyph[ascii_val]:
-                    xpts = np.array(poly)[:, 0] * scaling
-                    ypts = np.array(poly)[:, 1] * scaling
+                    pts = np.asarray(poly, dtype=np.float64)
+                    xpts = pts[:, 0] * scaling + xoffset
+                    ypts = pts[:, 1] * scaling + yoffset
                     label.add_polygon(
-                        list(zip(xpts + xoffset, ypts + yoffset, strict=False)),
+                        xp.column_stack([xpts, ypts]),
                         layer=layer,
                     )
                 xoffset += (_width[ascii_val] + _indent[ascii_val]) * scaling

@@ -3,7 +3,7 @@ from __future__ import annotations
 __all__ = ["pie_arc"]
 
 import gdsfactory as gf
-from gdsfactory._jax import xp
+from gdsfactory._jax import to_float, xp
 from gdsfactory.component import Component
 from gdsfactory.typings import LayerSpec
 
@@ -35,13 +35,13 @@ def pie_arc(
 
     c = Component()
     sweep = end_angle - start_angle
-    n_points = max(int(abs(sweep) / angle_resolution), 2)
+    n_points = max(int(abs(to_float(sweep)) / to_float(angle_resolution)), 2)
     theta = xp.deg2rad(xp.linspace(start_angle, end_angle, n_points, endpoint=True))
 
-    arc_points = list(
-        zip(radius * xp.cos(theta), radius_y * xp.sin(theta), strict=False)
+    arc_points = xp.column_stack([radius * xp.cos(theta), radius_y * xp.sin(theta)])
+    points = xp.concatenate(
+        [xp.zeros((1, 2), dtype=arc_points.dtype), arc_points], axis=0
     )
-    points = [(0, 0)] + arc_points
     c.add_polygon(points, layer=layer)
     return c
 

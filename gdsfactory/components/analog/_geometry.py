@@ -8,7 +8,7 @@ from collections.abc import Callable
 from numpy import floor
 
 from gdsfactory import Component, ComponentReference
-from gdsfactory._jax import to_float
+from gdsfactory._jax import to_float, xp
 
 Poly = list[tuple[float, float]]
 
@@ -34,10 +34,10 @@ def _make_aspect_shift_y(
     d_out: float, aspect_ratio: float = 1.0
 ) -> Callable[[float], float]:
     """Stretch straight sides only (y=0 fixed). Identity when aspect_ratio == 1."""
-    if aspect_ratio == 1:
+    if to_float(aspect_ratio) == 1:
         return lambda y: y
     ext = d_out * (aspect_ratio - 1)
-    return lambda y: y + ext / 2 if y > 0 else (y - ext / 2 if y < 0 else y)
+    return lambda y: xp.where(y > 0, y + ext / 2, xp.where(y < 0, y - ext / 2, y))
 
 
 def _routing_geometric_45(
@@ -52,7 +52,7 @@ def _routing_geometric_45(
     y_upper = [-s / 2, -s / 2, s / 2 + w, s / 2 + w]
     x_lower = [-h / 2, -h / 2 + g + d, h / 2 - g, h / 2]
     y_lower = [-s / 2 - w, -s / 2 - w, s / 2, s / 2]
-    if extend > 0:
+    if to_float(extend) > 0:
         x_upper = [-h / 2 - extend] + x_upper + [h / 2 + extend]
         y_upper = [-s / 2] + y_upper + [s / 2 + w]
         x_lower = [-h / 2 - extend] + x_lower + [h / 2 + extend]
@@ -136,7 +136,7 @@ def _via_array_at(
     avail_extend = extend - 2 * enclosure
     avail_width = width - 2 * enclosure
 
-    if abs(cy) > abs(cx):
+    if abs(to_float(cy)) > abs(to_float(cx)):
         _add_via_array(c, via_component, cx + dx, cy, avail_extend, avail_width)
     else:
         _add_via_array(c, via_component, cx, cy + dy, avail_width, avail_extend)

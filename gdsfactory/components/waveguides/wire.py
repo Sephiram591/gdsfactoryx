@@ -11,10 +11,8 @@ __all__ = [
 
 from typing import Any
 
-import numpy as np
-
 import gdsfactory as gf
-from gdsfactory._jax import maybe_float, round_st
+from gdsfactory._jax import asarray, maybe_float, round_st, xp
 from gdsfactory.component import Component
 from gdsfactory.cross_section import (
     port_names_electrical,
@@ -40,7 +38,7 @@ def wire_corner(
         width: optional width. Defaults to cross_section width.
         radius: ignored.
     """
-    if width:
+    if width is not None:
         x = gf.get_cross_section(cross_section, width=width)
     else:
         x = gf.get_cross_section(cross_section)
@@ -51,9 +49,9 @@ def wire_corner(
 
     c = Component()
     a = width / 2
-    xpts = [-a, a, a, -a]
-    ypts = [-a, -a, a, a]
-    c.add_polygon(list(zip(xpts, ypts, strict=False)), layer=layer)
+    xpts = asarray([-a, a, a, -a])
+    ypts = asarray([-a, -a, a, a])
+    c.add_polygon(xp.column_stack([xpts, ypts]), layer=layer)
     c.add_port(
         name=port_names[0],
         center=(-a, 0),
@@ -70,8 +68,8 @@ def wire_corner(
         layer=layer,
         port_type=port_types[1],
     )
-    c.info["length"] = width
-    c.info["dy"] = width
+    c.info["length"] = maybe_float(width)
+    c.info["dy"] = maybe_float(width)
     x.add_bbox(c)
     for port in c.ports:
         if port.port_type == "electrical":
@@ -94,7 +92,9 @@ def wire_corner45_straight(
     """
     c = gf.Component()
     xs = gf.get_cross_section(cross_section)
-    radius = radius or xs.radius or width
+    radius = (
+        radius if radius is not None else (xs.radius if xs.radius is not None else width)
+    )
 
     if radius is None:
         raise ValueError("Either radius or width must be specified")
@@ -108,7 +108,7 @@ def wire_corner45_straight(
         ]
     )
 
-    if width:
+    if width is not None:
         xs = gf.get_cross_section(cross_section, width=width)
     else:
         xs = gf.get_cross_section(cross_section)
@@ -136,20 +136,21 @@ def wire_corner45(
         layer: optional layer.
         with_corner90_ports: if True adds ports at 90 degrees.
     """
-    if width:
+    if width is not None:
         x = gf.get_cross_section(cross_section, width=width)
     else:
         x = gf.get_cross_section(cross_section)
-    layer = layer or x.layer
+    layer = layer if layer is not None else x.layer
     assert layer is not None
-    width = width or x.width
-    radius = radius or width
+    width = width if width is not None else x.width
+    radius = radius if radius is not None else width
 
     c = Component()
     a = width / 2
-    xpts = [0, radius + a, radius + a, -np.sqrt(2) * width]
-    ypts = [-a, radius, radius + np.sqrt(2) * width, -a]
-    c.add_polygon(list(zip(xpts, ypts, strict=False)), layer=layer)
+    sqrt2 = xp.sqrt(2)
+    xpts = asarray([0, radius + a, radius + a, -sqrt2 * width])
+    ypts = asarray([-a, radius, radius + sqrt2 * width, -a])
+    c.add_polygon(xp.column_stack([xpts, ypts]), layer=layer)
 
     if with_corner90_ports:
         c.add_port(
@@ -170,7 +171,7 @@ def wire_corner45(
         )
 
     else:
-        w = maybe_float(round_st(width * np.sqrt(2), 3))
+        w = maybe_float(round_st(width * sqrt2, 3))
 
         c.add_port(
             name="e1",
@@ -188,7 +189,7 @@ def wire_corner45(
             layer=layer,
             port_type="electrical",
         )
-    c.info["length"] = maybe_float(np.sqrt(2) * radius)
+    c.info["length"] = maybe_float(sqrt2 * radius)
     for port in c.ports:
         if port.port_type == "electrical":
             c.create_pin(ports=[port], name=port.name)
@@ -227,19 +228,21 @@ def wire_corner_sections(
         offset = section.offset
         b = width / 2
 
-        xpts = [xmin, offset - b, offset - b, offset + b, offset + b, xmin]
-        ypts = [
-            -offset + b,
-            -offset + b,
-            ymax,
-            ymax,
-            -offset - b,
-            -offset - b,
-        ]
+        xpts = asarray([xmin, offset - b, offset - b, offset + b, offset + b, xmin])
+        ypts = asarray(
+            [
+                -offset + b,
+                -offset + b,
+                ymax,
+                ymax,
+                -offset - b,
+                -offset - b,
+            ]
+        )
 
         assert layer is not None
 
-        c.add_polygon(list(zip(xpts, ypts, strict=False)), layer=layer)
+        c.add_polygon(xp.column_stack([xpts, ypts]), layer=layer)
 
     c.add_port(
         name="e1",
@@ -257,8 +260,8 @@ def wire_corner_sections(
         layer=x.layer,
         port_type=port_type,
     )
-    c.info["length"] = ymax - xmin
-    c.info["dy"] = ymax - xmin
+    c.info["length"] = maybe_float(ymax - xmin)
+    c.info["dy"] = maybe_float(ymax - xmin)
     x.add_bbox(c)
     if port_type == "electrical":
         for port in c.ports:

@@ -16,43 +16,46 @@ from collections.abc import Sequence
 from typing import Any
 
 import jax
-import klayout.db as kdb
 import numpy as np
 from kfactory.conf import logger
 from kfactory.routing.steps import Step, Straight
 
-from gdsfactory._jax import get_dbu, is_tracer, to_float
+from gdsfactory._jax import is_tracer
 from gdsfactory.routing._dual import DNum, Point, Trans
 from gdsfactory.routing._traced_manhattan import ManhattanRouter, route_smart
-
-
-def to_dbu(x: Any) -> DNum:
-    """Um -> dbu like kfactory (``CplxTrans(dbu).inverted() * x``), keeping derivatives."""
-    if isinstance(x, DNum):
-        return x
-    dbu = get_dbu()
-    v = kdb.CplxTrans(dbu).inverted() * to_float(x)
-    if is_tracer(x):
-        return DNum.traced(x / dbu, v)
-    return DNum(v)
+from gdsfactory.routing.utils import to_dbu
 
 
 def _steps(value: Any, n: int) -> list[list[Step]]:
     """Kfactory's conversion of starts/ends (dbu numbers or Steps) to per-route Steps."""
-    if value is None or (isinstance(value, list | tuple) and len(value) == 0):
+    if value is None:
         return [[] for _ in range(n)]
     if (
         isinstance(value, DNum | int | float | np.number)
-        or is_tracer(value)
-        or (isinstance(value, np.ndarray | jax.Array) and np.ndim(value) == 0)
+        or (isinstance(value, np.ndarray | jax.Array) and value.ndim == 0)
+        or (is_tracer(value) and getattr(value, "ndim", 0) == 0)
     ):
         return [[Straight(dist=to_dbu(value))] for _ in range(n)]
-    if isinstance(value, list):
+    if isinstance(value, np.ndarray | jax.Array) or is_tracer(value):
+        if getattr(value, "ndim", 1) != 1:
+            raise ValueError(f"Unsupported array starts/ends shape {value.shape}")
+        if len(value) == 0:
+            return [[] for _ in range(n)]
+        return [[Straight(dist=to_dbu(s)) for s in value] for _ in range(n)]
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes):
+        if len(value) == 0:
+            return [[] for _ in range(n)]
         if isinstance(value[0], Step):
-            return [value for _ in range(n)]
-        if isinstance(value[0], list):
-            return value
-        return [[Straight(dist=to_dbu(s)) for s in value]] * n
+            return [list(value) for _ in range(n)]
+        if isinstance(value[0], Sequence) and not isinstance(value[0], str | bytes):
+            return [
+                [
+                    s if isinstance(s, Step) else Straight(dist=to_dbu(s))
+                    for s in row
+                ]
+                for row in value
+            ]
+        return [[Straight(dist=to_dbu(s)) for s in value] for _ in range(n)]
     raise TypeError(f"Unsupported starts/ends {value!r}")
 
 
@@ -248,8 +251,13 @@ def traced_route_bundle(
             p * Trans(angles[a] - p.angle, False, 0, 0)
             for a, p in zip(ea, end_ports, strict=True)
         ]
-    if route_width:
-        rw = route_width if isinstance(route_width, list) else [route_width] * n
+    if route_width is not None:
+        rw = (
+            list(route_width)
+            if isinstance(route_width, list | tuple)
+            or (hasattr(route_width, "ndim") and route_width.ndim == 1)
+            else [route_width] * n
+        )
         widths = [to_dbu(w) for w in rw]
     routers = route_smart(
         start_ports=start_ports,
@@ -261,7 +269,7 @@ def traced_route_bundle(
         separation=to_dbu(separation),
         sort_ports=sort_ports,
         bbox_routing=bbox_routing,
-        bboxes=list(bboxes or []),
+        bboxes=[] if bboxes is None else list(bboxes),
         waypoints=waypoints,
         allow_sbend=allow_sbend,
     )

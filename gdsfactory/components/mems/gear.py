@@ -3,7 +3,7 @@ from __future__ import annotations
 __all__ = ["gear"]
 
 import gdsfactory as gf
-from gdsfactory._jax import xp
+from gdsfactory._jax import to_float, xp
 from gdsfactory.component import Component
 from gdsfactory.typings import LayerSpec
 
@@ -76,17 +76,18 @@ def gear(
     # Hub disc
     n_hub_pts = 64
     hub_angles = xp.linspace(0, 2 * xp.pi, n_hub_pts, endpoint=False)
-    hub_points = [(hub_radius * xp.cos(a), hub_radius * xp.sin(a)) for a in hub_angles]
+    hub_points = xp.column_stack(
+        [hub_radius * xp.cos(hub_angles), hub_radius * xp.sin(hub_angles)]
+    )
     c.add_polygon(hub_points, layer=layer)
 
     # Center hole cutout
-    if hub_hole_radius > 0:
+    if to_float(hub_hole_radius) > 0:
         n_hole_pts = 64
         hole_angles = xp.linspace(0, 2 * xp.pi, n_hole_pts, endpoint=False)
-        hole_points = [
-            (hub_hole_radius * xp.cos(a), hub_hole_radius * xp.sin(a))
-            for a in hole_angles
-        ]
+        hole_points = xp.column_stack(
+            [hub_hole_radius * xp.cos(hole_angles), hub_hole_radius * xp.sin(hole_angles)]
+        )
         c.add_polygon(hole_points, layer=layer)
 
     return c

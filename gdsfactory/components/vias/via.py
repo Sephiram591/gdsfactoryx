@@ -4,10 +4,9 @@ __all__ = ["via", "via1", "via2", "via_circular", "viac"]
 
 from collections.abc import Sequence
 from functools import partial
-from typing import cast
 
 import gdsfactory as gf
-from gdsfactory._jax import xp
+from gdsfactory._jax import to_float, xp
 from gdsfactory.component import Component
 from gdsfactory.typings import LayerSpec, Size
 
@@ -52,8 +51,8 @@ def via(
         |_______________________________________|
     ```
     """
-    row_pitch = row_pitch or pitch
-    column_pitch = column_pitch or pitch
+    row_pitch = row_pitch if row_pitch is not None else pitch
+    column_pitch = column_pitch if column_pitch is not None else pitch
 
     c = Component()
     c.info["row_pitch"] = row_pitch
@@ -103,17 +102,16 @@ def via_circular(
         row_pitch: Optional pitch between rows of vias. Default is pitch.
         angle_resolution: number of degrees per point.
     """
-    if radius <= 0:
+    if to_float(radius) <= 0:
         raise ValueError(f"radius={radius} must be > 0")
     c = Component()
-    t = xp.linspace(0, 360, int(360 / angle_resolution) + 1) * xp.pi / 180
-    xpts = list(radius * xp.cos(t))
-    ypts = list(radius * xp.sin(t))
-    xpts = cast("list[float]", xpts)
-    ypts = cast("list[float]", ypts)
-    c.add_polygon(points=list(zip(xpts, ypts, strict=False)), layer=layer)
-    row_pitch = row_pitch or pitch
-    column_pitch = column_pitch or pitch
+    t = xp.linspace(0, 360, int(360 / to_float(angle_resolution)) + 1) * xp.pi / 180
+    c.add_polygon(
+        points=xp.column_stack([radius * xp.cos(t), radius * xp.sin(t)]),
+        layer=layer,
+    )
+    row_pitch = row_pitch if row_pitch is not None else pitch
+    column_pitch = column_pitch if column_pitch is not None else pitch
 
     c.info["row_pitch"] = row_pitch
     c.info["column_pitch"] = column_pitch

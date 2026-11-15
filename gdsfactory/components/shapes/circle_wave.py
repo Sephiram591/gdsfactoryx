@@ -3,7 +3,7 @@ from __future__ import annotations
 __all__ = ["circle_wave"]
 
 import gdsfactory as gf
-from gdsfactory._jax import xp
+from gdsfactory._jax import to_float, xp
 from gdsfactory.component import Component
 from gdsfactory.typings import LayerSpec
 
@@ -28,7 +28,7 @@ def circle_wave(
         layer: layer spec.
     """
     c = Component()
-    n_points = int(xp.round(360.0 / angle_resolution)) + 1
+    n_points = round(360.0 / to_float(angle_resolution)) + 1
     theta = xp.linspace(0, 2 * xp.pi, n_points, endpoint=True)
     r = radius + amplitude * xp.sin(n_oscillations * theta)
     points = xp.stack((r * xp.cos(theta), r * xp.sin(theta)), axis=-1)

@@ -5,6 +5,7 @@ __all__ = ["delay_snake2"]
 import warnings
 
 import gdsfactory as gf
+from gdsfactory._jax import to_float
 from gdsfactory.component import Component
 from gdsfactory.typings import ComponentSpec, CrossSectionSpec
 
@@ -67,11 +68,12 @@ def delay_snake2(
 
     delta_length = (length - length0 - length2 - n * bend180.info["length"]) / (n + 1)
     length1 = delta_length - length0
-    if length1 < 0:
+    if to_float(length1) < 0:
         raise ValueError(
             "Snake is too short: either reduce length0, length2, "
             f"increase the total length, or decrease the number of loops (n = {n}). "
-            f"length1 = {int(length1)}, delta_length = {int(delta_length)}\n" + diagram
+            f"length1 = {int(to_float(length1))}, delta_length = {int(to_float(delta_length))}\n"
+            + diagram
         )
 
     s1 = gf.components.straight(

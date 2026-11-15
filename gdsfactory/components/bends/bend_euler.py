@@ -7,7 +7,7 @@ from functools import partial
 from typing import Literal, overload
 
 import gdsfactory as gf
-from gdsfactory._jax import maybe_float, round_st, to_float
+from gdsfactory._jax import is_abstract_tracer, maybe_float, round_st, to_float
 from gdsfactory.component import Component, ComponentAllAngle
 from gdsfactory.path import euler
 from gdsfactory.typings import AnyComponent, CrossSectionSpec, LayerSpec
@@ -96,19 +96,17 @@ def _bend_euler(
     ```
     """
     x = gf.get_cross_section(cross_section)
-    radius = radius or x.radius
+    radius = radius if radius is not None else x.radius
 
     if radius is None:
         raise ValueError("radius must be specified")
 
-    if layer and width:
-        x = gf.get_cross_section(
-            cross_section, layer=layer or x.layer, width=width or x.width
-        )
-    elif layer:
-        x = gf.get_cross_section(cross_section, layer=layer or x.layer)
-    elif width:
-        x = gf.get_cross_section(cross_section, width=width or x.width)
+    if layer is not None and width is not None:
+        x = gf.get_cross_section(cross_section, layer=layer, width=width)
+    elif layer is not None:
+        x = gf.get_cross_section(cross_section, layer=layer)
+    elif width is not None:
+        x = gf.get_cross_section(cross_section, width=width)
 
     path = euler(
         radius=radius,
@@ -124,13 +122,14 @@ def _bend_euler(
     c.info["dy"] = maybe_float(round_st(abs(path.points[0][0] - path.points[-1][0]), 3))
     c.info["min_bend_radius"] = min_bend_radius
     c.info["radius"] = maybe_float(radius)
-    c.info["width"] = maybe_float(width or x.width)
+    c.info["width"] = maybe_float(width if width is not None else x.width)
 
     if not allow_min_radius_violation:
         x.validate_radius(radius)
 
-    top = None if int(to_float(angle)) in {180, -180, -90} else 0
-    bottom = 0 if int(to_float(angle)) in {-90} else None
+    angle_val = None if is_abstract_tracer(angle) else int(to_float(angle))
+    top = None if angle_val in {180, -180, -90} else 0
+    bottom = 0 if angle_val == -90 else None
     x.add_bbox(c, top=top, bottom=bottom)
     c.add_route_info(
         cross_section=x,
@@ -232,7 +231,7 @@ def bend_euler(
         cross_section: specification (CrossSection, string, CrossSectionFactory dict).
         allow_min_radius_violation: if True allows radius to be smaller than cross_section radius.
     """
-    if abs(to_float(angle)) not in {90, 180}:
+    if not is_abstract_tracer(angle) and abs(to_float(angle)) not in {90, 180}:
         warnings.warn(
             f"bend_euler angle should be 90 or 180. Got {angle}. Use bend_euler_all_angle instead.",
             UserWarning,

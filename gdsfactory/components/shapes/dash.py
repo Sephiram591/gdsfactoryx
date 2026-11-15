@@ -2,17 +2,18 @@ from __future__ import annotations
 
 __all__ = ["dash"]
 
+from collections.abc import Sequence
+from typing import Any
+
 import gdsfactory as gf
-from gdsfactory._jax import xp
+from gdsfactory._jax import to_float, xp
 from gdsfactory.component import Component
 from gdsfactory.typings import LayerSpec
 
 
-def _bezier3(
-    px: list[float], py: list[float], n: int = 30
-) -> tuple[list[float], list[float]]:
+def _bezier3(px: Sequence[Any], py: Sequence[Any], n: int = 30) -> tuple[Any, Any]:
     """Cubic Bezier from 4 control points."""
-    t = xp.linspace(0, 1, n)
+    t = xp.linspace(0, 1, int(to_float(n)))
     x = (
         (1 - t) ** 3 * px[0]
         + 3 * (1 - t) ** 2 * t * px[1]
@@ -25,7 +26,7 @@ def _bezier3(
         + 3 * (1 - t) * t**2 * py[2]
         + t**3 * py[3]
     )
-    return list(x), list(y)
+    return x, y
 
 
 @gf.cell_with_module_name(tags=["shapes"])
@@ -95,10 +96,14 @@ def dash(
     xangle_lb, yangle_lb = _bezier3(px, py, n_bezier_points)
 
     # Assemble outline
-    xdash = xangle_lu + xtip_t + xangle_ru + xangle_rb + xtip_b + xangle_lb
-    ydash = yangle_lu + ytip_t + yangle_ru + yangle_rb + ytip_b + yangle_lb
+    xdash = xp.concatenate(
+        [xangle_lu, xtip_t, xangle_ru, xangle_rb, xtip_b, xangle_lb]
+    )
+    ydash = xp.concatenate(
+        [yangle_lu, ytip_t, yangle_ru, yangle_rb, ytip_b, yangle_lb]
+    )
 
-    points = list(zip(xdash, ydash, strict=False))
+    points = xp.column_stack([xdash, ydash])
     c.add_polygon(points, layer=layer)
     return c
 

@@ -8,7 +8,7 @@ import gdsfactory as gf
 from gdsfactory._jax import to_float
 from gdsfactory.component import Component
 from gdsfactory.routing.auto_taper import add_auto_tapers
-from gdsfactory.typings import ComponentSpec, CrossSectionSpec
+from gdsfactory.typings import ComponentSpec, CrossSectionSpec, Port
 
 
 @gf.cell_with_module_name(tags=["grating_couplers"])
@@ -34,7 +34,7 @@ def grating_coupler_array(
         n: number of grating couplers.
         port_name: port name.
         rotation: rotation angle for each reference.
-        with_loopback: if True, adds a loopback between edge GCs. Only works for rotation = 90 for now.
+        with_loopback: if True, adds a loopback between edge GCs. Only works for rotation = -90 for now.
         cross_section: cross_section for the routing.
         straight_to_grating_spacing: spacing between the last grating coupler and the loopback.
         centered: if True, centers the array around the origin.
@@ -46,7 +46,7 @@ def grating_coupler_array(
     grating_coupler = gf.get_component(grating_coupler)
     if mirror_grating_coupler:
         grating_coupler = gf.functions.mirror(grating_coupler)
-    ports: dict[str, kf.DPort] = {}
+    ports: dict[str, Port] = {}
 
     for i in range(n):
         gc = c << grating_coupler
@@ -58,12 +58,12 @@ def grating_coupler_array(
             c.add_port(port=gc.ports[port_name], name=port_name_new)
 
     if with_loopback:
-        if rotation != -90:
+        if to_float(rotation) != -90:
             raise ValueError(
                 f"with_loopback works only with rotation = -90, got {rotation=}"
             )
         routing_xs = gf.get_cross_section(cross_section)
-        radius = radius or routing_xs.radius
+        radius = radius if radius is not None else routing_xs.radius
         if radius is None:
             bend_component = gf.get_component(bend, cross_section=cross_section)
             try:
@@ -82,7 +82,8 @@ def grating_coupler_array(
             [
                 grating_coupler.ysize,
                 grating_coupler.xsize,
-            ]
+            ],
+            key=to_float,
         )
         d_loop = c.kcl.to_dbu(to_float(d_loop_um)) + radius_dbu
 
@@ -126,7 +127,7 @@ def _get_routing_radius(bend: Component, cross_section: CrossSectionSpec) -> flo
     p1, p2 = bend_ports
     dx = abs(p1.center[0] - p2.center[0])
     dy = abs(p1.center[1] - p2.center[1])
-    if dx != dy:
+    if to_float(dx) != to_float(dy):
         raise ValueError(
             f"Expected ports to have equal spacing in x and y, got dx={dx} and dy={dy}"
         )

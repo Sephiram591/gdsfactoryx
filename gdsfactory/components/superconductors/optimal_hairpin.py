@@ -4,7 +4,7 @@ __all__ = ["optimal_hairpin"]
 
 
 import gdsfactory as gf
-from gdsfactory._jax import asarray, xp
+from gdsfactory._jax import asarray, to_float, xp
 from gdsfactory.component import Component
 from gdsfactory.snap import snap_to_grid
 from gdsfactory.typings import LayerSpec
@@ -53,7 +53,7 @@ def optimal_hairpin(
     # TODO This is an inefficient way of finding points that you need
     xpts = [x]
     ypts = [y]
-    while (y < 0) & (n < 1e6):
+    while (to_float(y) < 0) and (n < 1e6):
         s = x + 1j * y
         w = xp.sqrt(1 - xp.exp(xp.pi * s / a))
         wx = xp.real(w)
@@ -93,8 +93,8 @@ def optimal_hairpin(
     #  Create a blank device, add the geometry, and define the ports
     # ==========================================================================
     c = Component()
-    c.add_polygon(list(zip(xpts_np, +ypts_np, strict=False)), layer=layer)
-    c.add_polygon(list(zip(xpts_np, -ypts_np, strict=False)), layer=layer)
+    c.add_polygon(xp.column_stack([xpts_np, +ypts_np]), layer=layer)
+    c.add_polygon(xp.column_stack([xpts_np, -ypts_np]), layer=layer)
     port_type = "electrical"
 
     xports = xp.min(xpts_np)

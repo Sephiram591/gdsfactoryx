@@ -23,30 +23,35 @@ from itertools import pairwise
 from typing import Any
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 
 import gdsfactory as gf
 from gdsfactory._jax import (
+    _jax_float_dtype,
     asarray,
     get_dbu,
+    has_abstract_tracers,
     has_tracers,
     is_tracer,
+    safe_arctan2,
+    safe_hypot,
+    safe_sqrt,
     stop_gradient,
     to_float,
     to_numpy,
     xp,
 )
 from gdsfactory.component import Component, ComponentReference
-from gdsfactory.routing._kf_router import ManhattanRoute
 from gdsfactory.typings import (
     CellAllAngleSpec,
     ComponentSpec,
     Coordinates,
     CrossSectionSpec,
+    OpticalAllAngleRoute,
     Port,
 )
 
-OpticalAllAngleRoute = ManhattanRoute
 MIN_ALL_ANGLE_ROUTES_POINTS = 3
 _POINT_TOLERANCE = 1e-6  # um, traced port vs kfactory
 
@@ -66,17 +71,21 @@ def _dir(angle_deg: Any) -> Any:
 def _cut(p1: Any, d1: Any, p2: Any, d2: Any) -> Any:
     """Intersection of the lines p1 + s d1 and p2 + t d2 (None if parallel)."""
     det = d1[0] * (-d2[1]) - (-d2[0]) * d1[1]
+    rhs = p2 - p1
+    num = rhs[0] * (-d2[1]) - (-d2[0]) * rhs[1]
+    if has_abstract_tracers(det):
+        safe_det = xp.where(xp.abs(det) < 1e-14, 1.0, det)
+        return p1 + (num / safe_det) * d1
     if abs(to_float(det)) < 1e-14:
         return None
-    rhs = p2 - p1
-    s = (rhs[0] * (-d2[1]) - (-d2[0]) * rhs[1]) / det
+    s = num / det
     return p1 + s * d1
 
 
 def _shifted(p1: Any, p2: Any, d: Any) -> tuple[Any, Any]:
     """Edge p1->p2 shifted by d to its left (KLayout DEdge.shifted)."""
     v = p2 - p1
-    n = xp.stack([-v[1], v[0]]) / xp.sqrt(xp.sum(v**2))
+    n = xp.stack([-v[1], v[0]]) / safe_sqrt(xp.sum(v**2))
     return p1 + d * n, p2 + d * n
 
 
@@ -108,15 +117,19 @@ def _effective_radius(p1: Port, p2: Port) -> Any:
     d2 = p2.direction
     mat = xp.stack([d1, -d2], axis=1)
     rhs = p2.center_array - p1.center_array
-    det = to_float(mat[0, 0] * mat[1, 1] - mat[0, 1] * mat[1, 0])
-    if abs(det) < 1e-12:
+    det = mat[0, 0] * mat[1, 1] - mat[0, 1] * mat[1, 0]
+    if has_abstract_tracers(det):
+        safe_mat = xp.where(xp.abs(det) < 1e-12, xp.eye(2), mat)
+        st = xp.linalg.solve(safe_mat, rhs)
+        return xp.abs(st[0])
+    if abs(to_float(det)) < 1e-12:
         return float("inf")
     st = xp.linalg.solve(mat, rhs)
     return xp.abs(st[0])
 
 
 def _angle_deg(v: Any) -> Any:
-    return xp.rad2deg(xp.arctan2(v[1], v[0]))
+    return xp.rad2deg(safe_arctan2(v[1], v[0]))
 
 
 def place_all_angle_route(
@@ -129,7 +142,7 @@ def place_all_angle_route(
     straight_ports: tuple[str, str] = ("o1", "o2"),
     tolerance: float = 0.1,
     angle_tolerance: float = 0.0001,
-) -> ManhattanRoute:
+) -> OpticalAllAngleRoute:
     """Places bends and straights along an all-angle backbone (differentiable).
 
     Port of kfactory's ``routing.aa.optical.route`` with traced geometry.
@@ -166,23 +179,25 @@ def place_all_angle_route(
     effective_radius: Any = 0.0
     _port = start_port
     insts: list[ComponentReference] = []
-    length = xp.linalg.norm(pt - old_pt)
+    seg0 = pt - old_pt
+    length = safe_hypot(seg0[0], seg0[1])
     length_straights: Any = 0.0
 
     for k in range(2, n):
         new_pt = pts[k]
         s_v = pt - old_pt
         e_v = new_pt - pt
-        length = length + xp.linalg.norm(e_v)
-        a = xp.mod(_angle_deg(e_v) - _angle_deg(s_v) + 180, 360) - 180
+        length = length + safe_hypot(e_v[0], e_v[1])
+        delta = _angle_deg(e_v) - _angle_deg(s_v)
+        k_wrap = round(to_float(delta) / 360.0)
+        a = delta - 360.0 * k_wrap
         a_f = to_float(a)
+        seg_len = safe_hypot(s_v[0], s_v[1])
         if abs(a_f) >= angle_tolerance:
-            bend = bend_func(width=width, angle=xp.abs(a))
+            bend = bend_func(width=width, angle=a if a_f >= 0 else -a)
             p1, p2 = (bend.ports[_p] for _p in bend_ports)
             effective_radius = _effective_radius(p1, p2)
-            if to_float(
-                xp.linalg.norm(pt - old_pt) - effective_radius - start_offset
-            ) < -(dbu * tolerance):
+            if to_float(seg_len - effective_radius - start_offset) < -(dbu * tolerance):
                 raise ValueError(
                     f"Not enough space to place bends at points {[to_numpy(old_pt), to_numpy(pt)]}."
                 )
@@ -191,7 +206,7 @@ def place_all_angle_route(
             a_f = 0.0
             bend = None
 
-        straight_len = xp.linalg.norm(pt - old_pt) - effective_radius - start_offset
+        straight_len = seg_len - effective_radius - start_offset
         if to_float(straight_len) > 0:
             s = c.add_ref(straight_func(width=width, length=straight_len))
             length_straights = length_straights + straight_len
@@ -211,7 +226,8 @@ def place_all_angle_route(
         old_pt = pt
         pt = new_pt
 
-    straight_len = xp.linalg.norm(pt - old_pt) - effective_radius
+    last_v = pt - old_pt
+    straight_len = safe_hypot(last_v[0], last_v[1]) - effective_radius
     if to_float(straight_len) < -(dbu * tolerance):
         raise ValueError(
             f"Not enough space to place bends at points {[to_numpy(old_pt), to_numpy(pt)]}."
@@ -223,7 +239,7 @@ def place_all_angle_route(
         insts.append(s)
 
     pts_np = to_numpy(pts)
-    return ManhattanRoute(
+    return OpticalAllAngleRoute(
         backbone=[kdb.DPoint(float(x), float(y)) for x, y in pts_np],
         backbone_um=pts,
         start_port=start_port,
@@ -291,15 +307,18 @@ class _Router:
 
     def partial_route(self, theta: Any, ps: _P, pe: _P) -> tuple[Any, Any, Any]:
         """Traced kfactory ``_get_partial_route2`` (signed r2)."""
-        bend_angle = xp.mod(180 - theta + ps.a, 180)
-        radius = self.eff_radius(ps.w, xp.abs(bend_angle))
+        d1 = 180 - theta + ps.a
+        bend_angle = d1 - 180 * stop_gradient(xp.floor(d1 / 180))
+        radius = self.eff_radius(ps.w, bend_angle)
         rp = ps.c + radius * ps.dir()
         xe = _cut(rp, _dir(theta), pe.c, pe.dir())
         if xe is None:
             return rp, None, None
-        bend2_angle = xp.abs(xp.mod(-theta + pe.a + 180, 360) - 180)
+        d2 = -theta + pe.a + 180
+        wrapped2 = d2 - 360 * stop_gradient(xp.floor(d2 / 360)) - 180
+        bend2_angle = xp.where(wrapped2 >= 0, wrapped2, -wrapped2)
         er2 = self.eff_radius(ps.w, bend2_angle)
-        r2 = xp.sqrt(xp.sum((xe - pe.c) ** 2)) - er2
+        r2 = safe_sqrt(xp.sum((xe - pe.c) ** 2)) - er2
         return rp, xe, r2
 
     def optimal_angle(self, kps: Any, kpe: Any, ps: _P, pe: _P) -> Any:
@@ -308,39 +327,111 @@ class _Router:
         import klayout.db as kdb
         from scipy.optimize import minimize_scalar
 
+        from gdsfactory.routing._kf_router import mirror
+
         p0 = kdb.DPoint(0, 0)
         p1 = kdb.DPoint(1, 0)
 
-        def obj(angle: float) -> float:
-            return aa._get_partial_route(
-                angle=angle,
-                bend_factory=self.kf_bend,
-                bend_ports=self.bend_ports,
-                start_port=kps,
-                end_port=kpe,
-                _p0=p0,
-                _p1=p1,
-            )[2]
+        def _r2_scalar(
+            th: Any,
+            ps_c: Any,
+            ps_a: Any,
+            ps_w: Any,
+            pe_c: Any,
+            pe_a: Any,
+            pe_w: Any,
+        ) -> Any:
+            r2_val = self.partial_route(th, _P(ps_c, ps_a, ps_w), _P(pe_c, pe_a, pe_w))[
+                2
+            ]
+            return 0.0 if r2_val is None else r2_val
 
-        theta = float(minimize_scalar(obj, bounds=(-180, 180)).x)
-        traced = any(is_tracer(v) for v in (ps.c, ps.a, ps.w, pe.c, pe.a, pe.w))
-        if not traced:
-            return theta
+        vals = (ps.c, ps.a, ps.w, pe.c, pe.a, pe.w)
+        if not any(is_tracer(v) for v in vals):
+            return float(
+                minimize_scalar(
+                    lambda angle: aa._get_partial_route(
+                        angle=angle,
+                        bend_factory=self.kf_bend,
+                        bend_ports=self.bend_ports,
+                        start_port=kps,
+                        end_port=kpe,
+                        _p0=p0,
+                        _p1=p1,
+                    )[2],
+                    bounds=(-180, 180),
+                ).x
+            )
 
-        # kfactory minimizes |r2|; at its solution r2(theta, inputs) = 0, so
-        # dtheta/dinputs = -(dr2/dinputs) / (dr2/dtheta)  (implicit function theorem)
-        def r2(th: Any, ps_: _P, pe_: _P) -> Any:
-            return self.partial_route(th, ps_, pe_)[2]
+        float_dtypes = [
+            jnp.asarray(v).dtype
+            for v in vals
+            if isinstance(v, jax.Array | np.ndarray)
+            and np.issubdtype(jnp.asarray(v).dtype, np.floating)
+        ]
+        out_dtype = jnp.result_type(*float_dtypes) if float_dtypes else _jax_float_dtype()
 
-        concrete = lambda q: _P(to_numpy(q.c), to_float(q.a), to_float(q.w))  # noqa: E731
-        psc, pec = concrete(ps), concrete(pe)
-        if r2(theta, psc, pec) is None:
-            return theta
-        dr2 = float(jax.grad(lambda th: r2(th, psc, pec))(theta))
-        if abs(dr2) < 1e-12:
-            return theta
-        r = r2(theta, ps, pe)
-        return theta - (r - stop_gradient(r)) / dr2
+        @jax.custom_jvp
+        def _solve_theta(
+            ps_c: Any, ps_a: Any, ps_w: Any, pe_c: Any, pe_a: Any, pe_w: Any
+        ) -> Any:
+            def _cb(c1: Any, a1: Any, w1: Any, c2: Any, a2: Any, w2: Any) -> np.ndarray:
+                with mirror().scratch() as cell_cb:
+                    r_cb = _Router(cell_cb, self.bend_func, self.bend_ports, self.layer)
+                    kps_cb = r_cb.kport(_P(np.asarray(c1), float(a1), float(w1)))
+                    kpe_cb = r_cb.kport(_P(np.asarray(c2), float(a2), float(w2)))
+                    th = float(
+                        minimize_scalar(
+                            lambda angle: aa._get_partial_route(
+                                angle=angle,
+                                bend_factory=r_cb.kf_bend,
+                                bend_ports=self.bend_ports,
+                                start_port=kps_cb,
+                                end_port=kpe_cb,
+                                _p0=p0,
+                                _p1=p1,
+                            )[2],
+                            bounds=(-180, 180),
+                        ).x
+                    )
+                return np.asarray(th, dtype=np.dtype(out_dtype))
+
+            return jax.pure_callback(
+                _cb,
+                jax.ShapeDtypeStruct((), out_dtype),
+                ps_c,
+                ps_a,
+                ps_w,
+                pe_c,
+                pe_a,
+                pe_w,
+            )
+
+        @_solve_theta.defjvp
+        def _solve_theta_jvp(primals: Any, tangents: Any) -> tuple[Any, Any]:
+            theta = _solve_theta(*primals)
+            _, dr2_dth = jax.jvp(
+                lambda th: _r2_scalar(th, *primals),
+                (theta,),
+                (xp.ones_like(theta),),
+            )
+            _, dr2_din = jax.jvp(
+                lambda *args: _r2_scalar(theta, *args),
+                primals,
+                tangents,
+            )
+            safe_denom = xp.where(xp.abs(dr2_dth) < 1e-12, 1.0, dr2_dth)
+            dtheta = xp.where(xp.abs(dr2_dth) < 1e-12, 0.0, -dr2_din / safe_denom)
+            return theta, dtheta
+
+        return _solve_theta(
+            jnp.asarray(ps.c, dtype=out_dtype),
+            jnp.asarray(ps.a, dtype=out_dtype),
+            jnp.asarray(ps.w, dtype=out_dtype),
+            jnp.asarray(pe.c, dtype=out_dtype),
+            jnp.asarray(pe.a, dtype=out_dtype),
+            jnp.asarray(pe.w, dtype=out_dtype),
+        )
 
     def connection(self, ps: _P, pe: _P, backbone: list[Any]) -> list[Any]:
         """Traced kfactory ``_get_connection_between_ports``."""
@@ -488,8 +579,10 @@ def _backbones(
             for ps, pe, pts in zip(p1s, p2s, bundles, strict=False):
                 v_start = pts[0] - pts[1]
                 v_end = pts[-1] - pts[-2]
-                psb = _P(pts[0], xp.rad2deg(xp.arctan2(v_start[1], v_start[0])), ps.w)
-                peb = _P(pts[-1], xp.rad2deg(xp.arctan2(v_end[1], v_end[0])), pe.w)
+                psb = _P(
+                    pts[0], xp.rad2deg(safe_arctan2(v_start[1], v_start[0])), ps.w
+                )
+                peb = _P(pts[-1], xp.rad2deg(safe_arctan2(v_end[1], v_end[0])), pe.w)
                 pts_ = r.connection(ps, psb, list(pts))
                 pts_.reverse()
                 pts_ = r.connection(pe, peb, pts_)
@@ -529,7 +622,7 @@ def route_bundle_all_angle(
     bend_ports: tuple[str, str] = ("o1", "o2"),
     straight_ports: tuple[str, str] = ("o1", "o2"),
     cross_section: CrossSectionSpec | None = None,
-) -> list[ManhattanRoute]:
+) -> list[OpticalAllAngleRoute]:
     """Route a bundle of ports to another bundle of ports with non manhattan ports.
 
     Differentiable with respect to port positions, orientations and widths,

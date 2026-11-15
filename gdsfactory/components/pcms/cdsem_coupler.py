@@ -7,6 +7,7 @@ __all__ = ["cdsem_coupler"]
 from collections.abc import Sequence
 
 import gdsfactory as gf
+from gdsfactory._jax import to_float
 from gdsfactory.component import Component
 from gdsfactory.typings import ComponentSpec, CrossSectionSpec
 
@@ -35,23 +36,26 @@ def cdsem_coupler(
         text_size: size of the text.
     """
     c = Component()
-    if width:
+    if width is not None:
         xs = gf.get_cross_section(cross_section, width=width)
     else:
         xs = gf.get_cross_section(cross_section)
     p = 0.0
 
     if positions is not None:
-        positions = positions or [None] * len(gaps)
+        positions = positions if len(positions) > 0 else [None] * len(gaps)
     else:
         positions = [i * spacing for i in range(len(gaps))]
 
     for gap, position in zip(gaps, positions, strict=False):
         line = c << gf.c.coupler_straight(length=length, cross_section=xs, gap=gap)
-        p = position or p
+        if position is not None:
+            p = position
         line.ymin = p
-        if text:
-            t = c << gf.get_component(text, text=str(int(gap * 1e3)), size=text_size)
+        if text is not None:
+            t = c << gf.get_component(
+                text, text=str(int(to_float(gap) * 1e3)), size=text_size
+            )
             t.xmin = line.xmax + 5
             t.ymin = p
 

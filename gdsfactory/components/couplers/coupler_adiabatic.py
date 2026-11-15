@@ -3,6 +3,7 @@ from __future__ import annotations
 __all__ = ["coupler_adiabatic"]
 
 import gdsfactory as gf
+from gdsfactory._jax import maybe_float
 from gdsfactory.component import Component
 from gdsfactory.typings import CrossSectionSpec
 
@@ -84,7 +85,7 @@ def coupler_adiabatic(
     c = Component()
 
     x = gf.get_cross_section(cross_section)
-    width = float(x.width)
+    width = maybe_float(x.width)
     width_top = width + dw
     width_bot = width - dw
     x_top = x.copy(width=width_top)

@@ -525,6 +525,89 @@ def _trig_deg(
     return float(out) if a_arr.ndim == 0 else out
 
 
+def _brentq_1d(
+    residual_fn: Any,
+    a: Any,
+    b: Any,
+    *params: Any,
+    xtol: float = 1e-12,
+) -> Any:
+    """Solve 1D ``residual_fn(x, *params) = 0`` via ``brentq`` with implicit JVP.
+
+    Runs ``scipy.optimize.brentq`` in float64 on concrete inputs (directly when
+    untraced, or via ``jax.pure_callback`` under JAX tracing) and differentiates
+    using the implicit function theorem ``dx/dp = -(df/dp) / (df/dx)``.
+    """
+    from scipy.optimize import brentq
+
+    def _solve_concrete(a_val: Any, b_val: Any, *p_vals: Any) -> float:
+        a_f = float(np.asarray(a_val, dtype=np.float64))
+        b_f = float(np.asarray(b_val, dtype=np.float64))
+        p_concrete = tuple(
+            float(np.asarray(p, dtype=np.float64))
+            if np.ndim(p) == 0
+            else np.asarray(p, dtype=np.float64)
+            for p in p_vals
+        )
+        return float(
+            brentq(lambda x: float(residual_fn(x, *p_concrete)), a_f, b_f, xtol=xtol)
+        )
+
+    float_dtypes = [
+        jnp.asarray(v).dtype
+        for v in (a, b, *params)
+        if isinstance(v, jax.Array | np.ndarray)
+        and np.issubdtype(jnp.asarray(v).dtype, np.floating)
+    ]
+    out_dtype = jnp.result_type(*float_dtypes) if float_dtypes else _jax_float_dtype()
+
+    if not has_tracers((a, b, *params)):
+        has_jax_array = any(isinstance(v, jax.Array) for v in (a, b, *params))
+        root = _solve_concrete(a, b, *params)
+        return jnp.asarray(root, dtype=out_dtype) if has_jax_array else root
+
+    a_arr = jnp.asarray(a, dtype=out_dtype)
+    b_arr = jnp.asarray(b, dtype=out_dtype)
+    p_arrs = tuple(jnp.asarray(p) for p in params)
+
+    @jax.custom_jvp
+    def _solve(a_in: Any, b_in: Any, *ps: Any) -> Any:
+        def _cb(a_cb: Any, b_cb: Any, *ps_cb: Any) -> np.ndarray:
+            return np.asarray(
+                _solve_concrete(a_cb, b_cb, *ps_cb), dtype=np.dtype(out_dtype)
+            )
+
+        return jax.pure_callback(
+            _cb,
+            jax.ShapeDtypeStruct((), out_dtype),
+            a_in,
+            b_in,
+            *ps,
+            vmap_method="sequential",
+        )
+
+    @_solve.defjvp
+    def _solve_jvp(primals: Any, tangents: Any) -> tuple[Any, Any]:
+        a_p, b_p, *ps_p = primals
+        _a_t, _b_t, *ps_t = tangents
+        x_star = _solve(a_p, b_p, *ps_p)
+
+        def _res_of_ps(*ps_inner: Any) -> Any:
+            return jnp.asarray(residual_fn(x_star, *ps_inner), dtype=out_dtype)
+
+        def _res_of_x(x_inner: Any) -> Any:
+            return jnp.asarray(residual_fn(x_inner, *ps_p), dtype=out_dtype)
+
+        _, df_dp_dot = jax.jvp(_res_of_ps, tuple(ps_p), tuple(ps_t))
+        _, df_dx = jax.jvp(_res_of_x, (x_star,), (jnp.ones_like(x_star),))
+        nonzero = jnp.abs(df_dx) > 1e-30
+        safe_denom = jnp.where(nonzero, df_dx, jnp.ones_like(df_dx))
+        x_dot = jnp.where(nonzero, -df_dp_dot / safe_denom, jnp.zeros_like(x_star))
+        return x_star, jnp.asarray(x_dot, dtype=out_dtype)
+
+    return _solve(a_arr, b_arr, *p_arrs)
+
+
 __all__ = [
     "DBU",
     "Array",

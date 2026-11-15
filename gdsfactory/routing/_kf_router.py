@@ -23,6 +23,7 @@ import contextlib
 import contextvars
 import functools
 import itertools
+import threading
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -30,8 +31,18 @@ from typing import TYPE_CHECKING, Any
 import jax
 import numpy as np
 
-from gdsfactory._jax import Array, asarray, get_dbu, is_tracer, to_float, to_numpy, xp
+from gdsfactory._jax import (
+    Array,
+    asarray,
+    get_dbu,
+    is_tracer,
+    safe_sqrt,
+    to_float,
+    to_numpy,
+    xp,
+)
 from gdsfactory._ports import Port
+from gdsfactory.routing.utils import _port_from_kport, to_dbu
 from gdsfactory.transform import Transform
 
 if TYPE_CHECKING:
@@ -97,7 +108,7 @@ class ManhattanRoute:
         if pts is None:
             pts = asarray([[p.x * dbu, p.y * dbu] for p in self.backbone])
         d = xp.diff(pts, axis=0)
-        return xp.sum(xp.sqrt(xp.sum(d**2, axis=1))) / dbu
+        return xp.sum(safe_sqrt(xp.sum(d**2, axis=1))) / dbu
 
     @property
     def length_um(self) -> Any:
@@ -245,6 +256,32 @@ class _Record:
     end: Any
 
 
+_ACTIVE_HOOK: contextvars.ContextVar[_Hook | None] = contextvars.ContextVar(
+    "_active_kf_hook", default=None
+)
+_HOOK_LOCK = threading.Lock()
+_HOOK_REFCOUNT = 0
+_HOOK_ORIGINALS: tuple[Any, Any] | None = None
+
+
+def _make_hook_wrapper(orig: Callable[..., Any]) -> Callable[..., Any]:
+    """Wrap kfactory's ``route_bundle_generic`` to forward to the context's active hook."""
+
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        hook = _ACTIVE_HOOK.get()
+        if hook is not None and "placer_function" in kwargs:
+            placer = kwargs["placer_function"]
+
+            def recording_placer(c: Any, p1: Any, p2: Any, pts: Any, **kw: Any) -> Any:
+                hook.records.append(_Record(list(pts), p1, p2))
+                return placer(c, p1, p2, pts, **kw)
+
+            kwargs["placer_function"] = recording_placer
+        return orig(*args, **kwargs)
+
+    return wrapped
+
+
 class _Hook:
     """Wraps kfactory's generic route_bundle to record the placed backbones."""
 
@@ -259,25 +296,23 @@ class _Hook:
         import kfactory.routing.electrical as kfe
         import kfactory.routing.optical as kfo
 
-        originals = (kfo.route_bundle_generic, kfe.route_bundle_generic)
-        hook = self
-
-        def wrapped(*args: Any, **kwargs: Any) -> Any:
-            placer = kwargs["placer_function"]
-
-            def recording_placer(c: Any, p1: Any, p2: Any, pts: Any, **kw: Any) -> Any:
-                hook.records.append(_Record(list(pts), p1, p2))
-                return placer(c, p1, p2, pts, **kw)
-
-            kwargs["placer_function"] = recording_placer
-            return originals[0](*args, **kwargs)
-
-        kfo.route_bundle_generic = wrapped
-        kfe.route_bundle_generic = wrapped
+        global _HOOK_REFCOUNT, _HOOK_ORIGINALS
+        with _HOOK_LOCK:
+            if _HOOK_REFCOUNT == 0:
+                _HOOK_ORIGINALS = (kfo.route_bundle_generic, kfe.route_bundle_generic)
+                kfo.route_bundle_generic = _make_hook_wrapper(_HOOK_ORIGINALS[0])
+                kfe.route_bundle_generic = _make_hook_wrapper(_HOOK_ORIGINALS[1])
+            _HOOK_REFCOUNT += 1
+        token = _ACTIVE_HOOK.set(self)
         try:
             yield self
         finally:
-            kfo.route_bundle_generic, kfe.route_bundle_generic = originals
+            _ACTIVE_HOOK.reset(token)
+            with _HOOK_LOCK:
+                _HOOK_REFCOUNT -= 1
+                if _HOOK_REFCOUNT == 0 and _HOOK_ORIGINALS is not None:
+                    kfo.route_bundle_generic, kfe.route_bundle_generic = _HOOK_ORIGINALS
+                    _HOOK_ORIGINALS = None
 
 
 _CONCRETE_CACHE_VAR: contextvars.ContextVar[dict[int, tuple[Any, Any]] | None] = (
@@ -389,9 +424,21 @@ def route_bundle_kf(
     def num(v: Any) -> Any:
         if v is None:
             return None
-        if isinstance(v, list | tuple):
-            return [to_float(x) if _is_number(x) else x for x in v]
+        if isinstance(v, list | tuple) or (
+            (isinstance(v, np.ndarray | jax.Array) or is_tracer(v))
+            and getattr(v, "ndim", 0) > 0
+        ):
+            return [num(x) for x in v]
         return to_float(v) if _is_number(v) else v
+
+    allow_sbend = bool(kf_kwargs.pop("allow_sbend", False))
+    if allow_sbend and sbend_factory is None:
+        from gdsfactory.components.bends.bend_s import bend_s
+
+        def _default_sbend(*, offset: Any, length: Any, width: Any) -> Component:
+            return bend_s(size=(length, offset), width=width)
+
+        sbend_factory = _default_sbend
 
     base = {
         "start_ports": [port_dict(p) for p in ports1],
@@ -551,7 +598,7 @@ def route_bundle_kf(
                 waypoints=waypoints,
                 route_width=route_width,
                 bboxes=bboxes,
-                sbend=sbend_factory is not None,
+                sbend=bool(allow_sbend or sbend_factory is not None),
                 kf_kwargs=kf_kwargs,
             )
 
@@ -564,10 +611,8 @@ def route_bundle_kf(
         end_lookup = {_key(p): p for p in ports2}
         for i, (rk, rec) in enumerate(zip(routes_kf, route_records, strict=False)):
             bb = traced_backbone(i)
-            p_start = (
-                start_lookup.get(_kkey(rec.start)) or ports1[min(i, len(ports1) - 1)]
-            )
-            p_end = end_lookup.get(_kkey(rec.end)) or ports2[min(i, len(ports2) - 1)]
+            p_start = _resolve_rec_port(rec.start, "s", ports1, start_lookup, i)
+            p_end = _resolve_rec_port(rec.end, "e", ports2, end_lookup, i)
             if router == "optical":
                 route = _rebuild_optical(
                     component,
@@ -636,10 +681,12 @@ def place_manhattan_kf(
             straight_cells[kc.cell_index()] = (width * dbu, length * dbu)
             return m.kcl[kc.cell_index()]
 
-        pts_dbu = [
+        pts_list = list(pts)
+        pts_dbu_raw = [
             kdb.Point(round(to_float(x) / dbu), round(to_float(y) / dbu))
-            for x, y in pts
+            for x, y in pts_list
         ]
+        pts_list, pts_dbu = _clean_pts_pair(pts_list, pts_dbu_raw)
         rk = place_manhattan(
             m.kcl[cell.cell_index()],
             p1=m.kcl[cell.cell_index()].ports[kp1.name],
@@ -653,7 +700,7 @@ def place_manhattan_kf(
             if route_width is not None
             else None,
         )
-        backbone = xp.stack([xp.stack([asarray(x), asarray(y)]) for x, y in pts])
+        backbone = xp.stack([xp.stack([asarray(x), asarray(y)]) for x, y in pts_list])
         traced = (
             is_tracer(backbone)
             or _has_traced_geometry(bend90)
@@ -727,7 +774,6 @@ class PortBox:
 
     def dual(self) -> Any:
         from gdsfactory.routing._dual import Box, Point
-        from gdsfactory.routing._traced_router import to_dbu
 
         b = Box()
         for x, y in self.points:
@@ -771,17 +817,176 @@ def _traced_bend_radius(bend90: Component | None, kb: Any, port_type: str) -> An
         return DNum(v)
     p1, p2 = ports
     if manhattan_index(p1) == manhattan_index(p2):
-        r = xp.sqrt(xp.sum((p1.center_array - p2.center_array) ** 2)) / dbu
+        r = safe_sqrt(xp.sum((p1.center_array - p2.center_array) ** 2)) / dbu
     else:
         c = _virtual_corner(p1, p2)
-        r1 = xp.sqrt(xp.sum((p1.center_array - c) ** 2))
-        r2 = xp.sqrt(xp.sum((p2.center_array - c) ** 2))
+        r1 = safe_sqrt(xp.sum((p1.center_array - c) ** 2))
+        r2 = safe_sqrt(xp.sum((p2.center_array - c) ** 2))
         r = (r1 if to_float(r1) >= to_float(r2) else r2) / dbu
     return DNum.traced(r, v)
 
 
 def manhattan_index(p: Port) -> int:
     return round(to_float(p.orientation) / 90) % 4
+
+
+def _clean_pts_pair(
+    pts: Sequence[Any], pts_dbu: list[Any]
+) -> tuple[list[Any], list[Any]]:
+    """Remove duplicate and collinear interior vertices identically on traced/DBU points."""
+    pts_list = list(pts)
+    if len(pts_dbu) < 2:
+        return pts_list, list(pts_dbu)
+    dedup = [i for i in range(len(pts_dbu)) if i == 0 or pts_dbu[i] != pts_dbu[i - 1]]
+    pts_list = [pts_list[i] for i in dedup]
+    pts_d = [pts_dbu[i] for i in dedup]
+    if len(pts_d) < 3:
+        return pts_list, pts_d
+    keep = list(range(len(pts_d)))
+    p_p, p = pts_d[0], pts_d[1]
+    del_idx: list[int] = []
+    for i, p_n in enumerate(pts_d[2:], 2):
+        v1 = p - p_p
+        v2 = p_n - p
+        sx1, sy1 = (v1.x > 0) - (v1.x < 0), (v1.y > 0) - (v1.y < 0)
+        sx2, sy2 = (v2.x > 0) - (v2.x < 0), (v2.y > 0) - (v2.y < 0)
+        if (sx1 == sx2 and sy1 == sy2) or (v2.x == 0 and v2.y == 0):
+            del_idx.append(i - 1)
+        else:
+            p_p, p = p, p_n
+    for i in reversed(del_idx):
+        del keep[i]
+    return [pts_list[i] for i in keep], [pts_d[i] for i in keep]
+
+
+def _resolve_rec_port(
+    rec_port: Any,
+    prefix: str,
+    ports: Sequence[Port],
+    lookup: dict[tuple[int, int], Port],
+    fallback_idx: int,
+) -> Port:
+    """Resolve kfactory hook port back to original Port using ``s{i}``/``e{i}`` name."""
+    name = getattr(rec_port, "name", None)
+    if isinstance(name, str) and name.startswith(prefix):
+        suffix = name[len(prefix) :]
+        if suffix.isdigit():
+            idx = int(suffix)
+            if 0 <= idx < len(ports):
+                return ports[idx]
+    return lookup.get(_kkey(rec_port)) or ports[min(fallback_idx, len(ports) - 1)]
+
+
+def _st_coord(coord_um: Any, concrete_um: float) -> Any:
+    if is_tracer(coord_um):
+        return xp.asarray(concrete_um, dtype=coord_um.dtype) + _tangent(coord_um)
+    return asarray(concrete_um)
+
+
+def _fast_traced_backbones(
+    hook: _Hook,
+    ports1: list[Port],
+    ports2: list[Port],
+    *,
+    bend90: Component | None,
+    separation: Any,
+    starts: Any,
+    ends: Any,
+    waypoints: Any,
+    route_width: Any,
+    bboxes: Any,
+    kf_kwargs: dict[str, Any],
+) -> list[Array] | None:
+    """Direct endpoint-tangent backbones for trivial 2/3-pt Manhattan routes."""
+    if _CHECK_TRACED_ROUTER or waypoints is not None or bboxes:
+        return None
+    if _has_tracers_any(separation, starts, ends, route_width):
+        return None
+    if _has_traced_geometry(bend90):
+        return None
+    if kf_kwargs.get("constraints") or kf_kwargs.get("sort_ports", False):
+        return None
+    if len(hook.records) != len(ports1):
+        return None
+
+    dbu = get_dbu()
+    start_lookup = {_key(p): p for p in ports1}
+    end_lookup = {_key(p): p for p in ports2}
+    out: list[Array] = []
+    for i, rec in enumerate(hook.records):
+        pts = rec.pts
+        if len(pts) not in (2, 3):
+            return None
+        sd = rec.start.trans.disp
+        ed = rec.end.trans.disp
+        if (pts[0].x, pts[0].y) != (sd.x, sd.y) or (
+            pts[-1].x,
+            pts[-1].y,
+        ) != (ed.x, ed.y):
+            return None
+        p_s = _resolve_rec_port(rec.start, "s", ports1, start_lookup, i)
+        p_e = _resolve_rec_port(rec.end, "e", ports2, end_lookup, i)
+        if len(pts) == 2:
+            dx = pts[1].x - pts[0].x
+            dy = pts[1].y - pts[0].y
+            if (dx != 0 and dy != 0) or (dx == 0 and dy == 0):
+                return None
+            out.append(
+                xp.stack(
+                    [
+                        xp.stack(
+                            [
+                                _st_coord(p_s.x, pts[0].x * dbu),
+                                _st_coord(p_s.y, pts[0].y * dbu),
+                            ]
+                        ),
+                        xp.stack(
+                            [
+                                _st_coord(p_e.x, pts[1].x * dbu),
+                                _st_coord(p_e.y, pts[1].y * dbu),
+                            ]
+                        ),
+                    ]
+                )
+            )
+            continue
+        dx0, dy0 = pts[1].x - pts[0].x, pts[1].y - pts[0].y
+        dx1, dy1 = pts[2].x - pts[1].x, pts[2].y - pts[1].y
+        if (dx0 != 0 and dy0 != 0) or (dx1 != 0 and dy1 != 0):
+            return None
+        if (dx0 == 0 and dy0 == 0) or (dx1 == 0 and dy1 == 0):
+            return None
+        if (dx0 == 0) == (dx1 == 0):
+            return None
+        if dx0 == 0:
+            mx, my = p_s.x, p_e.y
+        else:
+            mx, my = p_e.x, p_s.y
+        out.append(
+            xp.stack(
+                [
+                    xp.stack(
+                        [
+                            _st_coord(p_s.x, pts[0].x * dbu),
+                            _st_coord(p_s.y, pts[0].y * dbu),
+                        ]
+                    ),
+                    xp.stack(
+                        [
+                            _st_coord(mx, pts[1].x * dbu),
+                            _st_coord(my, pts[1].y * dbu),
+                        ]
+                    ),
+                    xp.stack(
+                        [
+                            _st_coord(p_e.x, pts[2].x * dbu),
+                            _st_coord(p_e.y, pts[2].y * dbu),
+                        ]
+                    ),
+                ]
+            )
+        )
+    return out
 
 
 def _traced_backbones(
@@ -801,8 +1006,24 @@ def _traced_backbones(
     kf_kwargs: dict[str, Any],
 ) -> list[Array]:
     """Backbones from the traced port of kfactory's router (checked against kfactory)."""
+    fast = _fast_traced_backbones(
+        hook,
+        ports1,
+        ports2,
+        bend90=bend90,
+        separation=separation,
+        starts=starts,
+        ends=ends,
+        waypoints=waypoints,
+        route_width=route_width,
+        bboxes=bboxes,
+        kf_kwargs=kf_kwargs,
+    )
+    if fast is not None:
+        return fast
+
     from gdsfactory.routing._dual import Box, DNum, Point
-    from gdsfactory.routing._traced_router import to_dbu, traced_route_bundle
+    from gdsfactory.routing._traced_router import traced_route_bundle
 
     dbu = get_dbu()
     port_type = kf_kwargs.get("place_port_type", "optical")
@@ -870,9 +1091,9 @@ def _traced_backbones(
 
 def _is_number(v: Any) -> bool:
     return (
-        isinstance(v, int | float)
-        or is_tracer(v)
-        or type(v).__module__.startswith("jax")
+        isinstance(v, int | float | np.number)
+        or (isinstance(v, np.ndarray | jax.Array) and v.ndim == 0)
+        or (is_tracer(v) and getattr(v, "ndim", 0) == 0)
     )
 
 
@@ -1013,10 +1234,17 @@ def _rebuild_optical(
         elif taper is not None and ci == special.get("taper"):
             elements.append(dict(kind="rigid", t=conc_t, comp=taper, bend=False))
         elif ci in sbend_cells:
-            _offset, length, width = sbend_cells[ci]
-            assert sbend_factory is not None
+            offset, length, width = sbend_cells[ci]
             elements.append(
-                dict(kind="rigid", t=conc_t, comp=m.by_index[ci], bend=False)
+                dict(
+                    kind="sbend",
+                    t=conc_t,
+                    comp=m.by_index[ci],
+                    offset=offset,
+                    length=length,
+                    width=width,
+                    bend=False,
+                )
             )
         elif ci in m.by_index:
             elements.append(
@@ -1039,7 +1267,14 @@ def _rebuild_optical(
 
     if traced:
         _add_tangents(
-            elements, backbone, p_start, p_end, straight_factory, width_traced, rk
+            elements,
+            backbone,
+            p_start,
+            p_end,
+            straight_factory,
+            sbend_factory,
+            width_traced,
+            rk,
         )
 
     refs = []
@@ -1064,8 +1299,8 @@ def _rebuild_optical(
         length = length_kf + (dl + dls) / dbu
         length_straights = length_straights_kf + dls / dbu
 
-    sp = _port_from_kport(rk.start_port)
-    ep = _port_from_kport(rk.end_port)
+    sp = _traced_kport(rk.start_port, p_start, width_traced if traced else None)
+    ep = _traced_kport(rk.end_port, p_end, width_traced if traced else None)
     return ManhattanRoute(
         backbone=list(rk.backbone),
         backbone_um=backbone,
@@ -1081,20 +1316,54 @@ def _rebuild_optical(
     )
 
 
-def _port_from_kport(p: Any) -> Port:
-    from gdsfactory.pdk import get_layer
+def _traced_kport(kport: Any, ref_port: Port, width_traced: Any = None) -> Port:
+    """Convert a kfactory endpoint port while preserving traced center and width."""
+    t = kport.dcplx_trans
+    center = None
+    if is_tracer(ref_port.x) or is_tracer(ref_port.y):
+        center = (
+            asarray(t.disp.x) + _tangent(ref_port.x),
+            asarray(t.disp.y) + _tangent(ref_port.y),
+        )
+    w_src = ref_port.width if is_tracer(ref_port.width) else width_traced
+    width = None
+    if w_src is not None and is_tracer(w_src):
+        conc_w = kport.width * get_dbu() if isinstance(kport.width, int) else kport.width
+        width = asarray(conc_w) + _tangent(w_src)
+    return _port_from_kport(kport, center=center, width=width)
 
-    t = p.dcplx_trans
-    li = p.layer_info
-    width = p.width * get_dbu() if isinstance(p.width, int) else p.width
-    return Port(
-        name=p.name,
-        center=(t.disp.x, t.disp.y),
-        width=width,
-        orientation=t.angle,
-        layer=get_layer((li.layer, li.datatype)),
-        port_type=p.port_type,
+
+def _assign_in_out(
+    e: dict[str, Any], cur_conc: Any, port_type: str
+) -> tuple[Any, Any]:
+    """Identify local in/out ports for element ``e`` by nearest concrete position."""
+    lp = _local_ports(e["comp"], port_type)
+    t: Transform = e["t"]
+    pos = [to_numpy(t.apply(q.center_array)) for q in lp]
+    d = [np.linalg.norm(pp - cur_conc) for pp in pos]
+    i_in = int(np.argmin(d))
+    others = [k for k in range(len(lp)) if k != i_in]
+    i_out = (
+        max(others, key=lambda k: np.linalg.norm(pos[k] - pos[i_in]))
+        if others
+        else i_in
     )
+    e["in"] = lp[i_in]
+    e["out"] = lp[i_out]
+    return pos[i_in], pos[i_out]
+
+
+def _chain_elements(seg: list[dict[str, Any]], cur: Any) -> Any:
+    """Propagate traced translations through ``seg`` starting from ``cur``."""
+    for e in seg:
+        t: Transform = e["t"]
+        trans_tr = cur - t.apply_vector(e["in"].center_array)
+        nt = t.copy()
+        nt.x = t.x + _tangent(trans_tr[0])
+        nt.y = t.y + _tangent(trans_tr[1])
+        e["t"] = nt
+        cur = trans_tr + t.apply_vector(e["out"].center_array)
+    return cur
 
 
 def _add_tangents(
@@ -1103,65 +1372,100 @@ def _add_tangents(
     p_start: Port,
     p_end: Port,
     straight_factory: Callable[..., Component] | None,
+    sbend_factory: Callable[..., Component] | None,
     width_traced: Any,
     rk: Any,
 ) -> None:
     """Chains the elements with traced geometry and adds tangents to transforms/lengths."""
     port_type = p_start.port_type
-    # local in/out ports (traced) and concrete transformed positions
-    cur = p_start.center_array  # traced
+    cur = p_start.center_array
     cur_conc = to_numpy(p_start.center_array)
-    corners = backbone  # traced (N, 2)
+    corners = backbone
     corners_np = to_numpy(corners)
+    n_edges = len(corners_np) - 1
+    if n_edges <= 0 or not elements:
+        return
 
-    # group elements per segment: bends terminate a segment
-    segments: list[list[dict[str, Any]]] = [[]]
-    for e in elements:
-        segments[-1].append(e)
-        if e.get("bend"):
-            segments.append([])
+    ei = 0
+    for k in range(n_edges):
+        d_edge = corners_np[k + 1] - corners_np[k]
+        is_diag = abs(d_edge[0]) > 0 and abs(d_edge[1]) > 0
+        if is_diag:
+            if ei >= len(elements):
+                break
+            e = elements[ei]
+            ei += 1
+            pos_in, pos_out = _assign_in_out(e, cur_conc, port_type)
+            cur_conc = pos_out
+            if e["kind"] == "sbend":
+                diff_conc = pos_out - pos_in
+                along_axis = 0 if abs(diff_conc[0]) >= abs(diff_conc[1]) else 1
+                perp_axis = 1 - along_axis
+                sign_along = 1.0 if diff_conc[along_axis] >= 0 else -1.0
+                sign_perp = 1.0 if diff_conc[perp_axis] >= 0 else -1.0
+                target_corner = (
+                    p_end.center_array if k == n_edges - 1 else corners[k + 1]
+                )
+                delta_tr = target_corner - cur
+                length_tr = e["length"] + _tangent(sign_along * delta_tr[along_axis])
+                offset_tr = e["offset"] + _tangent(sign_perp * delta_tr[perp_axis])
+                width_tr = width_traced if width_traced is not None else e["width"]
+                if (
+                    is_tracer(length_tr)
+                    or is_tracer(offset_tr)
+                    or is_tracer(width_tr)
+                ) and sbend_factory is not None:
+                    e["comp"] = sbend_factory(
+                        offset=offset_tr, length=length_tr, width=width_tr
+                    )
+                    lp = _local_ports(e["comp"], port_type)
+                    e["in"] = next(q for q in lp if q.name == e["in"].name)
+                    e["out"] = next(q for q in lp if q.name == e["out"].name)
+            cur = _chain_elements([e], cur)
+            continue
 
-    for s_idx, seg in enumerate(segments):
-        if not seg and s_idx == len(segments) - 1:
-            break
-        # direction of this segment (concrete)
-        a = corners_np[s_idx]
-        b = corners_np[min(s_idx + 1, len(corners_np) - 1)]
-        u_np = b - a
-        nrm = np.linalg.norm(u_np)
-        u = asarray(u_np / nrm) if nrm > 0 else asarray([1.0, 0.0])
-
-        # identify in/out local ports for each element (concrete matching)
-        for e in seg:
-            comp = e["comp"]
-            lp = _local_ports(comp, port_type)
-            t: Transform = e["t"]
-            pos = [to_numpy(t.apply(q.center_array)) for q in lp]
-            d = [np.linalg.norm(pp - cur_conc) for pp in pos]
-            i_in = int(np.argmin(d))
-            others = [k for k in range(len(lp)) if k != i_in]
-            i_out = (
-                max(others, key=lambda k: np.linalg.norm(pos[k] - pos[i_in]))
-                if others
-                else i_in
-            )
-            e["in"] = lp[i_in]
-            e["out"] = lp[i_out]
-            cur_conc = pos[i_out]
-
-        # target position for the end of this segment
-        last = seg[-1] if seg else None
-        if last is not None and last.get("bend"):
-            v_local = _virtual_corner(last["in"], last["out"])
-            t = last["t"]
-            corner_tr = corners[s_idx + 1]
-            target = corner_tr + t.apply_vector(last["in"].center_array - v_local)
-            body = seg[:-1]
+        seg: list[dict[str, Any]] = []
+        if k == n_edges - 1:
+            seg = elements[ei:]
+            ei = len(elements)
         else:
+            next_d = corners_np[k + 2] - corners_np[k + 1]
+            next_is_diag = abs(next_d[0]) > 0 and abs(next_d[1]) > 0
+            if next_is_diag:
+                while ei < len(elements) and elements[ei]["kind"] != "sbend":
+                    seg.append(elements[ei])
+                    ei += 1
+            else:
+                while ei < len(elements):
+                    el = elements[ei]
+                    seg.append(el)
+                    ei += 1
+                    if el.get("bend"):
+                        break
+
+        if not seg:
+            continue
+
+        nrm = np.linalg.norm(d_edge)
+        u = asarray(d_edge / nrm) if nrm > 0 else asarray([1.0, 0.0])
+
+        for e in seg:
+            _, cur_conc = _assign_in_out(e, cur_conc, port_type)
+
+        last = seg[-1]
+        if k == n_edges - 1:
             target = p_end.center_array
             body = seg
+        elif last.get("bend"):
+            v_local = _virtual_corner(last["in"], last["out"])
+            target = corners[k + 1] + last["t"].apply_vector(
+                last["in"].center_array - v_local
+            )
+            body = seg[:-1]
+        else:
+            target = corners[k + 1]
+            body = seg
 
-        # traced lengths of rigid elements along u; concrete straight lengths
         rigid_len = 0.0
         for e in body:
             if e["kind"] == "rigid":
@@ -1172,7 +1476,7 @@ def _add_tangents(
         conc_len = sum(e["length"] for e in straights)
         required = xp.dot(target - cur, u)
         residual = required - rigid_len - conc_len
-        residual = residual - _sg(residual)  # tangent only
+        residual = residual - _sg(residual)
         if straights:
             longest = max(straights, key=lambda e: e["length"])
             for e in straights:
@@ -1183,19 +1487,10 @@ def _add_tangents(
                     assert straight_factory is not None
                     e["comp"] = straight_factory(width=width_tr, length=length_tr)
                     lp = _local_ports(e["comp"], port_type)
-                    # keep in/out mapping by name
                     e["in"] = next(q for q in lp if q.name == e["in"].name)
                     e["out"] = next(q for q in lp if q.name == e["out"].name)
 
-        # chain placement with traced geometry
-        for e in seg:
-            t: Transform = e["t"]
-            trans_tr = cur - t.apply_vector(e["in"].center_array)
-            nt = t.copy()
-            nt.x = t.x + _tangent(trans_tr[0])
-            nt.y = t.y + _tangent(trans_tr[1])
-            e["t"] = nt
-            cur = trans_tr + t.apply_vector(e["out"].center_array)
+        cur = _chain_elements(seg, cur)
 
 
 def _rebuild_electrical(
@@ -1222,10 +1517,11 @@ def _rebuild_electrical(
         poly = xp.concatenate([p1, p2[::-1]])
         layer = place_layer if place_layer is not None else p_start.layer
         component.add_polygon(poly, layer=layer)
-    sp = _port_from_kport(rk.start_port)
-    ep = _port_from_kport(rk.end_port)
+    width_traced = route_width if is_tracer(route_width) else None
+    sp = _traced_kport(rk.start_port, p_start, width_traced)
+    ep = _traced_kport(rk.end_port, p_end, width_traced)
     d = xp.diff(pts, axis=0)
-    length = xp.sum(xp.sqrt(xp.sum(d**2, axis=1))) / get_dbu()
+    length = xp.sum(safe_sqrt(xp.sum(d**2, axis=1))) / get_dbu()
     return ManhattanRoute(
         backbone=list(rk.backbone),
         backbone_um=pts,

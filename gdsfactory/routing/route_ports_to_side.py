@@ -2,10 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Literal, cast
 
-import kfactory as kf
-import numpy as np
-
 from gdsfactory import typings
+from gdsfactory._jax import asarray, to_float, xp
 from gdsfactory.component import Component
 from gdsfactory.port import flipped
 from gdsfactory.routing._kf_router import ManhattanRoute
@@ -14,19 +12,19 @@ from gdsfactory.typings import CrossSectionSpec, Ports
 
 
 def sort_key_west_to_east(port: typings.Port) -> float:
-    return port.x
+    return float(to_float(port.x))
 
 
 def sort_key_east_to_west(port: typings.Port) -> float:
-    return -port.x
+    return float(-to_float(port.x))
 
 
 def sort_key_south_to_north(port: typings.Port) -> float:
-    return port.y
+    return float(to_float(port.y))
 
 
 def sort_key_north_to_south(port: typings.Port) -> float:
-    return -port.y
+    return float(-to_float(port.y))
 
 
 def route_ports_to_side(
@@ -34,10 +32,10 @@ def route_ports_to_side(
     cross_section: CrossSectionSpec,
     ports: Ports | None = None,
     side: Literal["north", "east", "south", "west"] = "north",
-    x: float | None | Literal["east", "west"] = None,
-    y: float | None | Literal["north", "south"] = None,
+    x: float | Literal["east", "west"] | None = None,
+    y: float | Literal["north", "south"] | None = None,
     **kwargs: Any,
-) -> tuple[list[ManhattanRoute], list[kf.DPort]]:
+) -> tuple[list[ManhattanRoute], list[typings.Port]]:
     """Routes ports to a given side.
 
     Args:
@@ -171,44 +169,46 @@ def route_ports_to_x(
     4. north ports
 
     """
-    north_ports = [p for p in ports if p.orientation == 90]
-    south_ports = [p for p in ports if p.orientation == 270]
-    east_ports = [p for p in ports if p.orientation == 0]
-    west_ports = [p for p in ports if p.orientation == 180]
+    north_ports = [p for p in ports if round(to_float(p.orientation or 0)) % 360 == 90]
+    south_ports = [p for p in ports if round(to_float(p.orientation or 0)) % 360 == 270]
+    east_ports = [p for p in ports if round(to_float(p.orientation or 0)) % 360 == 0]
+    west_ports = [p for p in ports if round(to_float(p.orientation or 0)) % 360 == 180]
 
     epsilon = 1.0
-    a = epsilon + max(radius, separation)
-    bx = epsilon + max(radius, dx_start) if dx_start else a
-    by = epsilon + max(radius, dy_start) if dy_start else a
+    a = epsilon + max(radius, separation, key=to_float)
+    bx = epsilon + max(radius, dx_start, key=to_float) if dx_start is not None else a
+    by = epsilon + max(radius, dy_start, key=to_float) if dy_start is not None else a
 
     xs = [p.x for p in ports]
     ys = [p.y for p in ports]
 
     if y0_bottom is None:
-        y0_bottom = min(ys) - by
+        y0_bottom = min(ys, key=to_float) - by
 
     y0_bottom -= extend_bottom
 
     if y0_top is None:
-        y0_top = max(ys) + (max(radius, dy_start) if dy_start else a)
+        y0_top = max(ys, key=to_float) + (
+            max(radius, dy_start, key=to_float) if dy_start is not None else a
+        )
     y0_top += extend_top
 
-    if x == "west" and extension_length > 0:
+    if x == "west" and to_float(extension_length) > 0:
         extension_length = -extension_length
 
     if x == "east":
-        x = max(p.x for p in ports) + bx
+        x = max(xs, key=to_float) + bx
     elif x == "west":
-        x = min(p.x for p in ports) - bx
+        x = min(xs, key=to_float) - bx
 
-    if x < min(xs):
+    if to_float(x) < to_float(min(xs, key=to_float)):
         sort_key_north = sort_key_west_to_east
         sort_key_south = sort_key_west_to_east
         forward_ports = west_ports
         backward_ports = east_ports
         angle = 0
 
-    elif x > max(xs):
+    elif to_float(x) > to_float(max(xs, key=to_float)):
         sort_key_south = sort_key_east_to_west
         sort_key_north = sort_key_east_to_west
         forward_ports = east_ports
@@ -280,14 +280,14 @@ def route_ports_to_x(
         y_optical_top += separation
 
     start_straight_length_section = start_straight_length
-    max_x = max(xs)
-    min_x = min(xs)
+    max_x = max(xs, key=to_float)
+    min_x = min(xs, key=to_float)
 
     for p in backward_ports_thru_north:
         # Extend new_ports if necessary
-        if angle == 0 and p.x < max_x:
+        if angle == 0 and to_float(p.x) < to_float(max_x):
             start_straight_length_section = max_x - p.x
-        elif angle == 180 and p.x > min_x:
+        elif angle == 180 and to_float(p.x) > to_float(min_x):
             start_straight_length_section = p.x - min_x
         else:
             start_straight_length_section = 0
@@ -305,9 +305,9 @@ def route_ports_to_x(
     start_straight_length_section = start_straight_length
     for p in backward_ports_thru_south:
         # Extend new_ports if necessary
-        if angle == 0 and p.x < max_x:
+        if angle == 0 and to_float(p.x) < to_float(max_x):
             start_straight_length_section = max_x - p.x
-        elif angle == 180 and p.x > min_x:
+        elif angle == 180 and to_float(p.x) > to_float(min_x):
             start_straight_length_section = p.x - min_x
         else:
             start_straight_length_section = 0
@@ -386,56 +386,75 @@ def route_ports_to_y(
     then the front ports
     then the north ports
     """
-    if y == "south" and extension_length > 0:
+    if y == "south" and to_float(extension_length) > 0:
         extension_length = -extension_length
 
     da = 45
     north_ports = [
-        p for p in ports if p.orientation > 90 - da and p.orientation < 90 + da
+        p
+        for p in ports
+        if 90 - da < to_float(p.orientation) % 360 < 90 + da
     ]
     south_ports = [
-        p for p in ports if p.orientation > 270 - da and p.orientation < 270 + da
+        p
+        for p in ports
+        if 270 - da < to_float(p.orientation) % 360 < 270 + da
     ]
-    east_ports = [p for p in ports if p.orientation < da or p.orientation > 360 - da]
+    east_ports = [
+        p
+        for p in ports
+        if to_float(p.orientation) % 360 < da
+        or to_float(p.orientation) % 360 > 360 - da
+    ]
     west_ports = [
-        p for p in ports if p.orientation < 180 + da and p.orientation > 180 - da
+        p
+        for p in ports
+        if 180 - da < to_float(p.orientation) % 360 < 180 + da
     ]
 
     epsilon = 1.0
-    a = radius + max(radius, separation)
-    bx = epsilon + max(radius, dx_start) if dx_start else a
-    by = epsilon + max(radius, dy_start) if dy_start else a
+    a = radius + max(radius, separation, key=to_float)
+    bx = epsilon + max(radius, dx_start, key=to_float) if dx_start is not None else a
+    by = epsilon + max(radius, dy_start, key=to_float) if dy_start is not None else a
 
     xs = [p.x for p in ports]
     ys = [p.y for p in ports]
 
     if x0_left is None:
-        x0_left = min(xs) - bx
+        x0_left = min(xs, key=to_float) - bx
     x0_left -= extend_left
 
     if x0_right is None:
-        x0_right = max(xs) + (max(radius, dx_start) if dx_start else a)
+        x0_right = max(xs, key=to_float) + (
+            max(radius, dx_start, key=to_float) if dx_start is not None else a
+        )
     x0_right += extend_right
 
     if y == "north":
-        y_float = (
-            max(p.y + a * np.abs(np.cos(p.orientation * np.pi / 180)) for p in ports)
+        y_float: Any = (
+            max(
+                (p.y + a * xp.abs(xp.cos(p.orientation * xp.pi / 180)) for p in ports),
+                key=to_float,
+            )
             + by
         )
     elif y == "south":
         y_float = (
-            min(p.y - a * np.abs(np.cos(p.orientation * np.pi / 180)) for p in ports)
+            min(
+                (p.y - a * xp.abs(xp.cos(p.orientation * xp.pi / 180)) for p in ports),
+                key=to_float,
+            )
             - by
         )
-    elif isinstance(y, float | int):
+    else:
         y_float = y
-    if y_float <= min(ys):
+    if to_float(y_float) <= to_float(min(ys, key=to_float)):
         sort_key_east = sort_key_south_to_north
         sort_key_west = sort_key_south_to_north
         forward_ports = south_ports
         backward_ports = north_ports
 
-    elif y_float >= max(ys):
+    elif to_float(y_float) >= to_float(max(ys, key=to_float)):
         sort_key_west = sort_key_north_to_south
         sort_key_east = sort_key_north_to_south
         forward_ports = north_ports
@@ -475,7 +494,14 @@ def route_ports_to_y(
         new_port.orientation = angle
         new_port.center = (x, y_float + extension_length)
 
-        if np.sum(np.abs((np.array(new_port.center) - port.center) ** 2)) < 1:
+        if (
+            to_float(
+                xp.sum(
+                    xp.abs((asarray(new_port.center) - asarray(port.center)) ** 2)
+                )
+            )
+            < 1
+        ):
             l_ports += [flipped(new_port)]
             return
 

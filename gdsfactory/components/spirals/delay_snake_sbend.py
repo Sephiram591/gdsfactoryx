@@ -99,7 +99,7 @@ def delay_snake_sbend(
     length2 = length23 / 2
     length3 = length23 / 2
 
-    if length2 < 0:
+    if to_float(length2) < 0:
         raise ValueError(
             f"length2 = {length2} < 0. You need to reduce length1 = {length1} "
             f"or length3 = {length3} or increase length = {length}\n" + diagram
@@ -132,7 +132,7 @@ def delay_snake_sbend(
 
     # delete any straights with zero length
     for inst in s1, s2, s3, s4:
-        if inst.cell.settings["length"] == 0:
+        if to_float(inst.cell.settings["length"]) == 0:
             del c.insts[inst]
 
     # Calculate the actual total physical length

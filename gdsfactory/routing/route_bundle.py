@@ -23,7 +23,7 @@ from kfactory.routing.optical import PathLengthConfig
 from kfactory.schematic import Constraint
 
 import gdsfactory as gf
-from gdsfactory._jax import to_float
+from gdsfactory._jax import is_abstract_tracer, to_float
 from gdsfactory._ports import Pin as _Pin
 from gdsfactory._ports import Port as _Port
 from gdsfactory.config import CONF
@@ -72,7 +72,11 @@ def get_min_spacing(
     if len(ports1) != len(ports2):
         raise ValueError(f"ports1={len(ports1)} and ports2={len(ports2)} must be equal")
 
-    axis = "X" if ports1[0].orientation in [0, 180] else "Y"
+    axis = (
+        "X"
+        if round(to_float(ports1[0].orientation or 0)) % 360 in [0, 180]
+        else "Y"
+    )
     j = 0
     min_j = 0
     max_j = 0
@@ -86,11 +90,11 @@ def get_min_spacing(
 
     for port1, port2 in zip(ports1, ports2, strict=False):
         if axis in {"X", "x"}:
-            x1 = get_port_y(port1)
-            x2 = get_port_y(port2)
+            x1 = to_float(get_port_y(port1))
+            x2 = to_float(get_port_y(port2))
         else:
-            x1 = get_port_x(port1)
-            x2 = get_port_x(port2)
+            x1 = to_float(get_port_x(port1))
+            x2 = to_float(get_port_x(port2))
         if x2 >= x1:
             j += 1
         else:
@@ -397,13 +401,24 @@ def route_bundle(
         raise ValueError(
             f"ports1={len(ports1_)} and ports2={len(ports2_)} must be equal"
         )
-    if route_width:
+    _is_seq_width = (
+        isinstance(route_width, list | tuple) or getattr(route_width, "ndim", 0) > 0
+    )
+    _has_scalar_width = (
+        route_width is not None
+        and not _is_seq_width
+        and (is_abstract_tracer(route_width) or to_float(route_width) != 0)
+    )
+    _has_radius = radius is not None and (
+        is_abstract_tracer(radius) or to_float(radius) != 0
+    )
+    if _has_scalar_width:
         xs = gf.get_cross_section(cross_section, width=route_width)
     else:
         xs = gf.get_cross_section(cross_section)
-    width = route_width or xs.width
+    width = route_width if (_is_seq_width or _has_scalar_width) else xs.width
 
-    radius = radius or xs.radius
+    radius = radius if _has_radius else xs.radius
     taper_cell = gf.get_component(taper) if taper else None
 
     if collision_check_layers:
@@ -524,7 +539,10 @@ def route_bundle(
         bend
         if isinstance(bend, gf.Component)
         else gf.get_component(
-            bend, cross_section=cross_section, radius=radius, width=width
+            bend,
+            cross_section=cross_section,
+            radius=radius,
+            width=xs.width if _is_seq_width else width,
         )
     )
 
@@ -653,10 +671,16 @@ def route_bundle(
 
     if layer_label:
         for route_i in route:
+            if route_i.instances:
+                pos = route_i.instances[0].dcenter
+            elif route_i.backbone_um is not None and len(route_i.backbone_um) > 0:
+                pos = tuple(to_float(v) for v in route_i.backbone_um[0])
+            else:
+                pos = route_i.start_port.center
             c.add_label(
                 text=f"{to_float(route_i.length) * c.kcl.dbu:.3f}",
                 layer=layer_label,
-                position=route_i.instances[0].dcenter,
+                position=pos,
             )
 
     return route

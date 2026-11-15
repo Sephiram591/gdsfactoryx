@@ -107,7 +107,7 @@ def route_fiber_array(
         route_width: width of the route. If None, defaults to cross_section.width.
         start_straight_length: length of the start straight.
         end_straight_length: length of the end straight.
-        auto_taper: taper length for the IO.
+        auto_taper: if True, auto-tapers ports to the cross-section.
         waypoints: waypoints for the route.
         steps: steps for the route.
         bboxes: list bounding boxes to avoid for routing.
@@ -156,7 +156,7 @@ def route_fiber_array(
     # - grating_couplers is a list of grating couplers
     # Define the route filter to apply to connection methods
 
-    if radius:
+    if radius is not None:
         bend90 = gf.get_component(bend, cross_section=cross_section, radius=radius)
     else:
         bend90 = gf.get_component(bend, cross_section=cross_section)
@@ -167,7 +167,7 @@ def route_fiber_array(
     delta_gr_min = 2 * dy + 1
 
     # Get the center along x axis
-    x_c = round(sum(p.x for p in to_route) / n, 1)
+    x_c = round(sum(to_float(p.x) for p in to_route) / n, 1)
 
     # Sort the list of optical ports:
     direction_ports = direction_ports_from_list_ports(cast(Sequence[gf.Port], to_route))
@@ -180,8 +180,11 @@ def route_fiber_array(
     pxs = [p.x for p in to_route]
     is_big_component = (
         (k > 2)
-        or (max(pxs) - min(pxs) > pitch - delta_gr_min)
-        or (component_to_route.xsize > pitch)
+        or (
+            to_float(max(pxs, key=to_float)) - to_float(min(pxs, key=to_float))
+            > to_float(pitch) - to_float(delta_gr_min)
+        )
+        or (to_float(component_to_route.xsize) > to_float(pitch))
     )
 
     def has_p(side: str) -> bool:
@@ -206,15 +209,15 @@ def route_fiber_array(
         # We need 3 bends in that case to connect the most bottom port to the grating couplers
         if has_ew_ports and is_big_component:
             # print('big')
-            fanout_length = max(fanout_length, 3 * dy + 1.0)
+            fanout_length = max((fanout_length, 3 * dy + 1.0), key=to_float)
 
         if has_ns_ports or is_one_sided_horizontal:
             # print('one sided')
-            fanout_length = max(fanout_length, 2 * dy + 1.0)
+            fanout_length = max((fanout_length, 2 * dy + 1.0), key=to_float)
 
         if has_ew_ports and not is_big_component:
             # print('east_west_ports')
-            fanout_length = max(fanout_length, dy + 1.0)
+            fanout_length = max((fanout_length, dy + 1.0), key=to_float)
 
     fanout_length += dy
 
@@ -228,7 +231,7 @@ def route_fiber_array(
     y0_optical += -k / 2 * separation
 
     if max_y0_optical is not None:
-        y0_optical = round(min(max_y0_optical, y0_optical), 1)
+        y0_optical = round(min(to_float(max_y0_optical), to_float(y0_optical)), 1)
 
     # - First connect half of the north ports going from middle of list
     # down to first elements
@@ -254,7 +257,7 @@ def route_fiber_array(
     gr_coupler_y_sep = grating_coupler.ysize + y_gr_gap + dy
     offset = (nb_ports_per_line - 1) * pitch / 2 - x_grating_offset
     io_gratings_lines: list[
-        list[Component | kf.DInstance]
+        list[Component | ComponentReference]
     ] = []  # [[gr11, gr12, gr13...], [gr21, gr22, gr23...] ...]
 
     grating_coupler_port_names = [p.name for p in grating_coupler.ports]
@@ -266,7 +269,7 @@ def route_fiber_array(
         assert len(grating_indices) == nb_ports_per_line
 
     # add grating couplers
-    io_gratings: list[Component | kf.DInstance] = []
+    io_gratings: list[Component | ComponentReference] = []
     gc_ports: list[gf.Port] = []
     for j in range(nb_optical_ports_lines):
         for i, gc in zip(grating_indices, grating_couplers, strict=False):
@@ -292,9 +295,9 @@ def route_fiber_array(
             for gr in io_gratings:
                 for p in to_route:
                     dist = gr.x - p.x
-                    if abs(dist) < abs(min_dist):
+                    if abs(to_float(dist)) < abs(to_float(min_dist)):
                         min_dist = dist
-            if abs(min_dist) < min_dist_threshold:
+            if abs(to_float(min_dist)) < to_float(min_dist_threshold):
                 for gr in io_gratings:
                     gr.movex(-min_dist)
 
@@ -312,7 +315,7 @@ def route_fiber_array(
     )
     delta_y = abs(to_route[0].y - gc_ports_tmp[0].y)
 
-    if min_y > delta_y:
+    if to_float(min_y) > to_float(delta_y):
         for io_gratings in io_gratings_lines:
             for gr in io_gratings:
                 gr.y += delta_y - min_y
@@ -389,7 +392,11 @@ def route_fiber_array(
 
         port0 = gca1[gc_port_name]
         port1 = gca2[gc_port_name]
-        radius = radius_loopback or radius or x.radius
+        radius = (
+            radius_loopback
+            if radius_loopback is not None
+            else (radius if radius is not None else x.radius)
+        )
         assert radius is not None
         radius_dbu = round(to_float(radius) * 1000)
         d_loop = straight_to_grating_spacing + radius + gca1.ysize

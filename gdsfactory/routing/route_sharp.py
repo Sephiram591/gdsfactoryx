@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-import numpy as np
-
 import gdsfactory as gf
 from gdsfactory import typings
+from gdsfactory._jax import asarray, to_float, xp
 from gdsfactory.component import Component
 from gdsfactory.cross_section import CrossSection, Section
 from gdsfactory.path import Path, transition
@@ -25,20 +24,20 @@ def path_straight(port1: typings.Port, port2: typings.Port) -> Path:
         port2: end port.
 
     """
-    delta_orientation = np.round(
-        np.abs(np.mod(port1.orientation - port2.orientation, 360)), 3
+    delta_orientation = round(
+        abs(to_float(port1.orientation) - to_float(port2.orientation)) % 360, 3
     )
     e1, e2 = _get_rotated_basis(port1.orientation)
-    displacement = np.asarray(port2.center) - np.asarray(port1.center)
-    xrel = np.round(
-        np.dot(displacement, e1), 3
+    displacement = asarray(port2.center) - asarray(port1.center)
+    xrel = round(
+        to_float(xp.dot(displacement, e1)), 3
     )  # relative position of port 2, forward/backward
-    yrel = np.round(
-        np.dot(displacement, e2), 3
+    yrel = round(
+        to_float(xp.dot(displacement, e2)), 3
     )  # relative position of port 2, left/right
     if (delta_orientation not in (0, 180, 360)) or (yrel != 0) or (xrel <= 0):
         raise ValueError("path_straight(): ports must point directly at each other.")
-    return Path(np.array([port1.center, port2.center]))
+    return Path(xp.stack([asarray(port1.center), asarray(port2.center)]))
 
 
 def path_L(port1: typings.Port, port2: typings.Port) -> Path:
@@ -51,19 +50,19 @@ def path_L(port1: typings.Port, port2: typings.Port) -> Path:
         port2: end port.
 
     """
-    delta_orientation = np.round(
-        np.abs(np.mod(port1.orientation - port2.orientation, 360)), 3
+    delta_orientation = round(
+        abs((to_float(port1.orientation) - to_float(port2.orientation)) % 360), 3
     )
     if delta_orientation not in (90, 270):
         raise ValueError("path_L(): ports must be orthogonal.")
     e1, _e2 = _get_rotated_basis(port1.orientation)
 
     # assemble waypoints
-    pt1 = np.asarray(port1.center)
-    pt3 = port2.center
+    pt1 = asarray(port1.center)
+    pt3 = asarray(port2.center)
     delta_vec = pt3 - pt1
-    pt2 = pt1 + np.dot(delta_vec, e1) * e1
-    return Path(np.array([pt1, pt2, pt3]))
+    pt2 = pt1 + xp.dot(delta_vec, e1) * e1
+    return Path(xp.stack([pt1, pt2, pt3]))
 
 
 def path_U(port1: typings.Port, port2: typings.Port, length1: float = 200) -> Path:
@@ -77,21 +76,21 @@ def path_U(port1: typings.Port, port2: typings.Port, length1: float = 200) -> Pa
         length1: Length of segment exiting port1. Should be larger than bend radius.
 
     """
-    delta_orientation = np.round(
-        np.abs(np.mod(port1.orientation - port2.orientation, 360)), 3
+    delta_orientation = round(
+        abs((to_float(port1.orientation) - to_float(port2.orientation)) % 360), 3
     )
     if delta_orientation not in (0, 180, 360):
         raise ValueError("path_U(): ports must be parallel.")
-    theta = np.radians(port1.orientation)
-    e1 = np.array([np.cos(theta), np.sin(theta)])
-    e2 = np.array([-1 * np.sin(theta), np.cos(theta)])
+    theta = xp.radians(port1.orientation)
+    e1 = xp.stack([xp.cos(theta), xp.sin(theta)])
+    e2 = xp.stack([-1 * xp.sin(theta), xp.cos(theta)])
     # assemble waypoints
-    pt1 = port1.center
-    pt4 = port2.center
+    pt1 = asarray(port1.center)
+    pt4 = asarray(port2.center)
     pt2 = pt1 + length1 * e1  # outward by length1 distance
     delta_vec = pt4 - pt2
-    pt3 = pt2 + np.dot(delta_vec, e2) * e2
-    return Path(np.array([pt1, pt2, pt3, pt4]))
+    pt3 = pt2 + xp.dot(delta_vec, e2) * e2
+    return Path(xp.stack([pt1, pt2, pt3, pt4]))
 
 
 def path_J(
@@ -107,21 +106,21 @@ def path_J(
         length1: Length of segment exiting port1. Should be larger than bend radius.
         length2: Length of segment exiting port2. Should be larger than bend radius.
     """
-    delta_orientation = np.round(
-        np.abs(np.mod(port1.orientation - port2.orientation, 360)), 3
+    delta_orientation = round(
+        abs((to_float(port1.orientation) - to_float(port2.orientation)) % 360), 3
     )
     if delta_orientation not in (90, 270):
         raise ValueError("path_J(): ports must be orthogonal.")
     e1, _ = _get_rotated_basis(port1.orientation)
     e2, _ = _get_rotated_basis(port2.orientation)
     # assemble waypoints
-    pt1 = port1.center
+    pt1 = asarray(port1.center)
     pt2 = pt1 + length1 * e1  # outward from port1 by length1
-    pt5 = port2.center
+    pt5 = asarray(port2.center)
     pt4 = pt5 + length2 * e2  # outward from port2 by length2
     delta_vec = pt4 - pt2
-    pt3 = pt2 + np.dot(delta_vec, e2) * e2  # move orthogonally in e2 direction
-    return Path(np.array([pt1, pt2, pt3, pt4, pt5]))
+    pt3 = pt2 + xp.dot(delta_vec, e2) * e2  # move orthogonally in e2 direction
+    return Path(xp.stack([pt1, pt2, pt3, pt4, pt5]))
 
 
 def path_C(
@@ -141,22 +140,22 @@ def path_C(
         length2: Length of route segment coming out of port2. Should be larger than bend radius.
 
     """
-    delta_orientation = np.round(
-        np.abs(np.mod(port1.orientation - port2.orientation, 360)), 3
+    delta_orientation = round(
+        abs((to_float(port1.orientation) - to_float(port2.orientation)) % 360), 3
     )
     if delta_orientation not in (0, 180, 360):
         raise ValueError("path_C(): ports must be parallel.")
     e1, e_left = _get_rotated_basis(port1.orientation)
     e2, _ = _get_rotated_basis(port2.orientation)
     # assemble route points
-    pt1 = port1.center
+    pt1 = asarray(port1.center)
     pt2 = pt1 + length1 * e1  # outward from port1 by length1
     pt3 = pt2 + left1 * e_left  # leftward by left1
-    pt6 = port2.center
+    pt6 = asarray(port2.center)
     pt5 = pt6 + length2 * e2  # outward from port2 by length2
     delta_vec = pt5 - pt3
-    pt4 = pt3 + np.dot(delta_vec, e1) * e1  # move orthogonally in e1 direction
-    return Path(np.array([pt1, pt2, pt3, pt4, pt5, pt6]))
+    pt4 = pt3 + xp.dot(delta_vec, e1) * e1  # move orthogonally in e1 direction
+    return Path(xp.stack([pt1, pt2, pt3, pt4, pt5, pt6]))
 
 
 def path_manhattan(port1: typings.Port, port2: typings.Port, radius: float) -> Path:
@@ -170,17 +169,16 @@ def path_manhattan(port1: typings.Port, port2: typings.Port, radius: float) -> P
         port2: end port.
         radius: Bend radius for 90 degree bend.
     """
-    radius += 0.1
+    radius = radius + 0.1
+    radius_f = to_float(radius)
     e1, e2 = _get_rotated_basis(port1.orientation)
-    displacement = np.asarray(port2.center) - np.asarray(port1.center)
-    xrel = np.round(
-        np.dot(displacement, e1), 3
-    )  # port2 position, forward(+)/backward(-) from port 1
-    yrel = np.round(
-        np.dot(displacement, e2), 3
-    )  # port2 position, left(+)/right(-) from port1
-    orel = np.round(
-        np.abs(np.mod(port2.orientation - port1.orientation, 360)), 3
+    displacement = asarray(port2.center) - asarray(port1.center)
+    xrel = xp.dot(displacement, e1)  # port2 position, forward(+)/backward(-) from port 1
+    yrel = xp.dot(displacement, e2)  # port2 position, left(+)/right(-) from port1
+    xrel_f = round(to_float(xrel), 3)
+    yrel_f = round(to_float(yrel), 3)
+    orel = round(
+        abs((to_float(port2.orientation) - to_float(port1.orientation)) % 360), 3
     )  # relative orientation
     if orel not in (0, 90, 180, 270, 360):
         raise ValueError(
@@ -189,48 +187,54 @@ def path_manhattan(port1: typings.Port, port2: typings.Port, radius: float) -> P
     if orel in (90, 270):
         # Orthogonal case
         if (
-            (orel == 90 and yrel < -1 * radius) or (orel == 270 and yrel > radius)
-        ) and xrel > radius:
+            (orel == 90 and yrel_f < -radius_f) or (orel == 270 and yrel_f > radius_f)
+        ) and xrel_f > radius_f:
             pts = path_L(port1, port2)
         else:
             # Adjust length1 and length2 to ensure intermediate segments fit bend radius
             direction = -1 if (orel == 270) else 1
             length2 = (
                 2 * radius - direction * yrel
-                if (np.abs(radius + direction * yrel) < 2 * radius)
+                if (abs(radius_f + direction * yrel_f) < 2 * radius_f)
                 else radius
             )
             length1 = (
-                2 * radius + xrel if (np.abs(radius - xrel) < 2 * radius) else radius
+                2 * radius + xrel
+                if (abs(radius_f - xrel_f) < 2 * radius_f)
+                else radius
             )
-            pts = path_J(port1, port2, length1=float(length1), length2=float(length2))
-    elif orel == 180 and yrel == 0 and xrel > 0:
+            pts = path_J(port1, port2, length1=length1, length2=length2)
+    elif orel == 180 and yrel_f == 0 and xrel_f > 0:
         pts = path_straight(port1, port2)
-    elif (orel == 180 and xrel <= 2 * radius) or (np.abs(yrel) < 2 * radius):
+    elif (orel == 180 and xrel_f <= 2 * radius_f) or (abs(yrel_f) < 2 * radius_f):
         # Adjust length1 and left1 to ensure intermediate segments fit bend radius
-        left1 = np.abs(yrel) + 2 * radius if (np.abs(yrel) < 4 * radius) else 2 * radius
-        y_direction = -1 if (yrel < 0) else 1
+        left1 = (
+            xp.abs(yrel) + 2 * radius
+            if (abs(yrel_f) < 4 * radius_f)
+            else 2 * radius
+        )
+        y_direction = -1 if (yrel_f < 0) else 1
         left1 = y_direction * left1
         length2 = radius
         x_direction = -1 if (orel == 180) else 1
-        segmentx_length = np.abs(xrel + x_direction * length2 - radius)
+        segmentx_length = abs(to_float(xrel) + x_direction * to_float(length2) - radius_f)
         length1 = (
             xrel + x_direction * length2 + 2 * radius
-            if segmentx_length < 2 * radius
+            if segmentx_length < 2 * radius_f
             else radius
         )
 
         pts = path_C(
             port1,
             port2,
-            length1=float(length1),
-            length2=float(length2),
-            left1=float(left1),
+            length1=length1,
+            length2=length2,
+            left1=left1,
         )
     else:
         # Adjust length1 to ensure segment comes out of port2
-        length1 = radius + xrel if (orel == 0 and xrel > 0) else radius
-        pts = path_U(port1, port2, length1=float(length1))
+        length1 = radius + xrel if (orel == 0 and xrel_f > 0) else radius
+        pts = path_U(port1, port2, length1=length1)
     return pts
 
 
@@ -252,11 +256,11 @@ def path_Z(
     e1, _ = _get_rotated_basis(port1.orientation)
     e2, _ = _get_rotated_basis(port2.orientation)
     # assemble route  points
-    pt1 = port1.center
+    pt1 = asarray(port1.center)
     pt2 = pt1 + length1 * e1  # outward from port1 by length1
-    pt4 = port2.center
+    pt4 = asarray(port2.center)
     pt3 = pt4 + length2 * e2  # outward from port2 by length2
-    return Path(np.array([pt1, pt2, pt3, pt4]))
+    return Path(xp.stack([pt1, pt2, pt3, pt4]))
 
 
 def path_V(port1: typings.Port, port2: typings.Port) -> Path:
@@ -273,14 +277,14 @@ def path_V(port1: typings.Port, port2: typings.Port) -> Path:
     e2, _ = _get_rotated_basis(port2.orientation)
 
     # Assemble route points
-    pt1 = port1.center
-    pt3 = port2.center
+    pt1 = asarray(port1.center)
+    pt3 = asarray(port2.center)
 
     # Solve for intersection
-    e = np.column_stack((e1, -1 * e2))
-    distance = np.linalg.solve(e, np.asarray(pt3) - pt1)[0]
+    e = xp.column_stack((e1, -1 * e2))
+    distance = xp.linalg.solve(e, pt3 - pt1)[0]
     pt2 = distance * e1 + pt1
-    return Path(np.array([pt1, pt2, pt3]))
+    return Path(xp.stack([pt1, pt2, pt3]))
 
 
 def route_sharp(
@@ -366,7 +370,7 @@ def route_sharp(
             "{'manhattan', 'L', 'U', 'J', 'C', 'V', 'Z', 'straight', 'manual'}"
         )
 
-    if cross_section:
+    if cross_section is not None:
         cross_section = gf.get_cross_section(cross_section)
         d = p.extrude(cross_section=cross_section)
     elif width is None:

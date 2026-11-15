@@ -4,10 +4,8 @@ from __future__ import annotations
 
 __all__ = ["crossing", "crossing45", "crossing_etched", "crossing_linear_taper"]
 
-import numpy as np
-from kfactory.conf import CheckInstances
-
 import gdsfactory as gf
+from gdsfactory._jax import is_abstract_tracer, round_st, to_float
 from gdsfactory.component import Component
 from gdsfactory.typings import ComponentSpec, CrossSectionSpec, Delta, LayerSpec
 
@@ -47,7 +45,7 @@ def crossing_arm(
     assert xs.layer is not None
     layer_wg = gf.get_layer(xs.layer)
 
-    a = np.round(L + w / 2, 3)
+    a = round_st(L + w / 2, decimals=3)
     h = width / 2
 
     taper_pts = [
@@ -203,7 +201,7 @@ def crossing_etched(
 
 
 @gf.cell(
-    check_instances=CheckInstances.IGNORE,
+    check_instances="ignore",
     with_module_name=True,
     schematic_function=crossing_schematic,
     tags=["waveguides"],
@@ -249,7 +247,7 @@ def crossing45(
     x.rotate(45)
 
     p_e = x.ports["o3"].center
-    dx = dx or port_spacing
+    dx = dx if dx is not None else port_spacing
     dy = port_spacing / 2
 
     start_angle = 45
@@ -272,10 +270,14 @@ def crossing45(
     )
 
     tol = 1e-2
-    assert abs(bend.info["start_angle"] - start_angle) < tol, (
-        f"{bend.info['start_angle']} differs from {start_angle}"
-    )
-    assert abs(bend.info["end_angle"] - end_angle) < tol, bend.info["end_angle"]
+    if not is_abstract_tracer(bend.info["start_angle"]):
+        assert abs(to_float(bend.info["start_angle"]) - start_angle) < tol, (
+            f"{to_float(bend.info['start_angle'])} differs from {start_angle}"
+        )
+    if not is_abstract_tracer(bend.info["end_angle"]):
+        assert abs(to_float(bend.info["end_angle"]) - end_angle) < tol, to_float(
+            bend.info["end_angle"]
+        )
 
     b_tr = c.add_ref_off_grid(bend)
     b_tl = c.add_ref_off_grid(bend)

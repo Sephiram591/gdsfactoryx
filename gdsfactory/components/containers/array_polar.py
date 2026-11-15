@@ -4,8 +4,6 @@ __all__ = ["array_polar"]
 
 import math
 
-from kfactory.conf import CheckInstances
-
 import gdsfactory as gf
 from gdsfactory._jax import to_float, xp
 from gdsfactory.component import Component
@@ -15,7 +13,7 @@ from gdsfactory.typings import ComponentSpec
 
 @gf.cell(
     with_module_name=True,
-    check_instances=CheckInstances.IGNORE,
+    check_instances="ignore",
     tags=["containers"],
 )
 def array_polar(

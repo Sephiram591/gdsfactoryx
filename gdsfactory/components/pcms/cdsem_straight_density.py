@@ -5,6 +5,7 @@ from __future__ import annotations
 __all__ = ["cdsem_straight_density", "gaps", "widths"]
 
 import gdsfactory as gf
+from gdsfactory._jax import to_float
 from gdsfactory.component import Component, ComponentReference
 from gdsfactory.typings import ComponentSpec, CrossSectionSpec, Floats
 
@@ -34,7 +35,7 @@ def cdsem_straight_density(
         text_size: size of the text.
     """
     c = Component()
-    label = label or f"{int(widths[0] * 1e3)} {int(gaps[0] * 1e3)}"
+    label = label or f"{int(to_float(widths[0]) * 1e3)} {int(to_float(gaps[0]) * 1e3)}"
 
     ymin = 0.0
     tooth_ref: ComponentReference | None = None
@@ -45,7 +46,7 @@ def cdsem_straight_density(
         tooth_ref.ymin = ymin
         ymin += width + gap
 
-    if text and tooth_ref is not None:
+    if text is not None and tooth_ref is not None:
         marker_label = c << gf.get_component(text, text=f"{label}", size=text_size)
         marker_label.xmin = tooth_ref.xmax + 5
     return c

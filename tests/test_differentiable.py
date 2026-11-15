@@ -170,7 +170,7 @@ def _all_angle_route(case: str, v: Any) -> Any:
             backbone=[(37.0, -2.5), (54.0, 48.0), (100.0, 64.0)],
             separation=v,
         )
-    return sum(r.length for r in routes) * 1e-3 + sum(
+    return sum(r.length_um for r in routes) * 1e-3 + sum(
         jnp.sum(r.backbone_um[1]) for r in routes
     )
 
@@ -183,6 +183,46 @@ def test_route_bundle_all_angle_gradients(case: str, x0: float, rtol: float) -> 
     # "optimized": the value is scipy's bounded minimizer (xatol 1e-5), the
     # derivative its implicit derivative, so FD carries the optimizer's noise.
     check_grad(lambda v: _all_angle_route(case, v), x0, rtol=rtol, h=0.01)
+
+
+def test_route_bundle_all_angle_length_um() -> None:
+    from gdsfactory.routing.route_astar import get_route_bend_count
+    from gdsfactory.routing.route_dubins import dubins_path_length, route_dubins
+    from gdsfactory.typings import OpticalAllAngleRoute
+
+    def length_fn(dx: Any) -> Any:
+        c = gf.ComponentAllAngle()
+        a = c.add_ref_off_grid(gf.components.straight(length=5))
+        b = c.add_ref_off_grid(gf.components.straight(length=5))
+        b.move((5.0 + dx, 0.0))
+        routes = gf.routing.route_bundle_all_angle(c, [a.ports["o2"]], [b.ports["o1"]])
+        assert isinstance(routes[0], OpticalAllAngleRoute)
+        assert routes[0].length == routes[0].length_um
+        assert get_route_bend_count(routes[0]) == 100
+        return routes[0].length_um
+
+    val, g = jax.value_and_grad(length_fn)(40.0)
+    assert float(val) == pytest.approx(40.0, rel=1e-6)
+    assert float(g) == pytest.approx(1.0, rel=1e-5)
+
+    def dubins_fn(dy: Any) -> Any:
+        c = gf.ComponentAllAngle()
+        a = c.add_ref_off_grid(gf.components.straight(length=5))
+        b = c.add_ref_off_grid(gf.components.straight(length=5))
+        b.rotate(90.0)
+        b.move((30.0, dy))
+        r = route_dubins(c, a.ports["o2"], b.ports["o1"], cross_section="strip")
+        assert isinstance(r, OpticalAllAngleRoute)
+        assert get_route_bend_count(r) == 100
+        return r.length_um
+
+    check_grad(dubins_fn, 20.0, rtol=1e-4, h=0.01)
+    # Curve length must exceed Euclidean chord distance (~sqrt(25^2 + 20^2) = 32.0156)
+    assert float(dubins_fn(20.0)) > 33.0
+    xs = gf.get_cross_section("strip")
+    assert float(dubins_path_length((5.0, 0.0, 0.0), (30.0, 20.0, 90.0), xs)) == pytest.approx(
+        float(dubins_fn(20.0)), rel=1e-6
+    )
 
 
 def test_spiral_fixed_length_gradient() -> None:

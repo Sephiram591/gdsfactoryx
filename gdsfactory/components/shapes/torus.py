@@ -3,7 +3,7 @@ from __future__ import annotations
 __all__ = ["torus"]
 
 import gdsfactory as gf
-from gdsfactory._jax import xp
+from gdsfactory._jax import to_float, xp
 from gdsfactory.component import Component
 from gdsfactory.typings import LayerSpec
 
@@ -29,14 +29,14 @@ def torus(
         layer: layer spec.
         port_type: None, optical, or electrical.
     """
-    if inner_radius < 0:
+    if to_float(inner_radius) < 0:
         raise ValueError(f"inner_radius={inner_radius} must be >= 0")
-    if outer_radius <= inner_radius:
+    if to_float(outer_radius) <= to_float(inner_radius):
         raise ValueError("outer_radius must be > inner_radius")
 
     c = Component()
     sweep = end_angle - start_angle
-    n_points = max(int(abs(sweep) / angle_resolution), 2) + 1
+    n_points = max(int(abs(to_float(sweep)) / to_float(angle_resolution)), 2) + 1
     theta = xp.deg2rad(xp.linspace(start_angle, end_angle, n_points, endpoint=True))
 
     outer_x = outer_radius * xp.cos(theta)
@@ -44,16 +44,15 @@ def torus(
     inner_x = inner_radius * xp.cos(theta[::-1])
     inner_y = inner_radius * xp.sin(theta[::-1])
 
-    points = list(
-        zip(
+    points = xp.column_stack(
+        [
             xp.concatenate([outer_x, inner_x]),
             xp.concatenate([outer_y, inner_y]),
-            strict=False,
-        )
+        ]
     )
     c.add_polygon(points, layer=layer)
 
-    if port_type and abs(sweep) < 360:
+    if port_type and abs(to_float(sweep)) < 360:
         width = outer_radius - inner_radius
         mid_r = (inner_radius + outer_radius) / 2
         prefix = "o" if port_type == "optical" else "e"

@@ -41,8 +41,8 @@ def spiral_fermat(
     dr = a / (2 * xp.sqrt(theta))
     tx = dr * xp.cos(theta) - r_center * xp.sin(theta)
     ty = dr * xp.sin(theta) + r_center * xp.cos(theta)
-    t_len = xp.sqrt(tx**2 + ty**2)
-    t_len = xp.where(t_len == 0, 1.0, t_len)
+    sq = tx**2 + ty**2
+    t_len = xp.sqrt(xp.where(sq == 0, 1.0, sq))
     nx = -ty / t_len
     ny = tx / t_len
 

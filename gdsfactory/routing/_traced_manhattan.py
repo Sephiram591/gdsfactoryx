@@ -844,6 +844,29 @@ def _place_dl_path_length(
         pmin += separation + router.width // 2
 
 
+def _merge_interacting_bboxes(
+    bbox: Box,
+    bboxes: Sequence[Box],
+    box_region: kdb.Region,
+    *,
+    overlap_only: bool = False,
+) -> Box:
+    """Expand ``bbox`` with interacting obstacle ``bboxes``, preserving dual tangents."""
+    if box_region.is_empty():
+        return bbox
+    q_reg = kdb.Region(bbox.to_kdb())
+    if overlap_only and (q_reg & box_region).is_empty():
+        return bbox
+    inter = box_region.interacting(q_reg)
+    if inter.is_empty():
+        return bbox
+    merged = bbox.dup()
+    for b in bboxes:
+        if not inter.interacting(kdb.Region(b.to_kdb())).is_empty():
+            merged = merged + b
+    return merged
+
+
 def route_smart(
     *,
     start_ports: Sequence[BasePort | Trans],
@@ -1356,9 +1379,11 @@ def route_smart(
                 if overlap_complete.empty():
                     bundled_bboxes.append(bundle_bbox)
                     bundle_bbox = bbox.dup()
-                    bundle_region = kdb.Region(bundle_bbox.to_kdb())
-                    if not (bundle_region & box_region).is_empty():
-                        bundle_bbox += box_region.interacting(bundle_region).bbox()
+                    merged_bbox = _merge_interacting_bboxes(
+                        bundle_bbox, bboxes, box_region, overlap_only=True
+                    )
+                    if merged_bbox is not bundle_bbox:
+                        bundle_bbox += merged_bbox
                     bundle = [router]
                     bundled_routers.append(bundle)
                 else:
@@ -1374,9 +1399,11 @@ def route_smart(
                     else:
                         bundled_bboxes.append(bundle_bbox)
                         bundle_bbox = bbox.dup()
-                        bundle_region = kdb.Region(bundle_bbox.to_kdb())
-                        if not (bundle_region & box_region).is_empty():
-                            bundle_bbox += box_region.interacting(bundle_region).bbox()
+                        merged_bbox = _merge_interacting_bboxes(
+                            bundle_bbox, bboxes, box_region, overlap_only=True
+                        )
+                        if merged_bbox is not bundle_bbox:
+                            bundle_bbox += merged_bbox
                         bundle = [router]
                         bundled_routers.append(bundle)
                         continue
@@ -1447,14 +1474,8 @@ def route_smart(
                 )
 
             if box_region:
-                start_bbox = (
-                    Box(box_region.interacting(kdb.Region(start_bbox.to_kdb())).bbox())
-                    + start_bbox
-                )
-                end_bbox = (
-                    Box(box_region.interacting(kdb.Region(end_bbox.to_kdb())).bbox())
-                    + end_bbox
-                )
+                start_bbox = _merge_interacting_bboxes(start_bbox, bboxes, box_region)
+                end_bbox = _merge_interacting_bboxes(end_bbox, bboxes, box_region)
             route_to_bbox(
                 (router.start for router in sorted_routers),
                 start_bbox,

@@ -7,6 +7,7 @@ __all__ = ["cdsem_straight"]
 from collections.abc import Sequence
 
 import gdsfactory as gf
+from gdsfactory._jax import to_float
 from gdsfactory.component import Component
 from gdsfactory.typings import ComponentSpec, CrossSectionSpec
 
@@ -37,7 +38,7 @@ def cdsem_straight(
     c = Component()
     p = 0.0
     if positions is not None:
-        positions = positions or [None] * len(widths)
+        positions = positions if len(positions) > 0 else [None] * len(widths)
     else:
         positions = [i * spacing for i in range(len(widths))]
 
@@ -45,10 +46,13 @@ def cdsem_straight(
         line = c << gf.c.straight(
             length=length, cross_section=cross_section, width=width
         )
-        p = position or p
+        if position is not None:
+            p = position
         line.ymin = p
-        if text:
-            t = c << gf.get_component(text, text=str(int(width * 1e3)), size=text_size)
+        if text is not None:
+            t = c << gf.get_component(
+                text, text=str(int(to_float(width) * 1e3)), size=text_size
+            )
             t.xmin = line.xmax + 5
             t.ymin = p
 
