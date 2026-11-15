@@ -83,12 +83,14 @@ def optimal_step(
         idx = 0 if y_desired is None else 1
         target = y_desired if y_desired is not None else x_desired
 
-        def _solve_concrete(t_v: float, w_v: float, a_v: float) -> float:
+        def _solve_concrete(
+            t_v: float, w_v: float, a_v: float, xtol: float = 1e-5
+        ) -> float:
             def fh(eta: float) -> float:
                 pt = step_points(eta, W=w_v + 0j, a=a_v + 0j)
                 return float((to_float(pt[idx]) - t_v) ** 2)
 
-            return float(fminbound(fh, 0.0, np.pi))
+            return float(fminbound(fh, 0.0, np.pi, xtol=xtol))
 
         if not has_tracers((target, W, a)):
             found_eta = _solve_concrete(to_float(target), to_float(W), to_float(a))
@@ -107,7 +109,7 @@ def optimal_step(
         def _solve(t_in: Any, w_in: Any, a_in: Any) -> Any:
             def _cb(t_cb: Any, w_cb: Any, a_cb: Any) -> np.ndarray:
                 return np.asarray(
-                    _solve_concrete(float(t_cb), float(w_cb), float(a_cb)),
+                    _solve_concrete(float(t_cb), float(w_cb), float(a_cb), xtol=1e-11),
                     dtype=np.dtype(out_dtype),
                 )
 

@@ -2,18 +2,18 @@
 
 ## Supported Versions
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 9.x     | Latest minor only  |
-| < 9.0   | :x:                |
+| Version                | Supported             |
+| ---------------------- | --------------------- |
+| 9.51.x (`gdsfactoryx`) | Latest release only   |
+| < 9.51                 | :x:                   |
 
-Only the latest minor release of the current major version receives security updates.
+Only the latest release receives security updates.
 
 ## Reporting a Vulnerability
 
 **Please do not report security vulnerabilities through public GitHub issues.**
 
-Instead, please report them via email to **security@gdsfactory.com** with the subject line: `[SECURITY] <brief description>`.
+Instead, please report them privately through [GitHub Security Advisories](https://github.com/Sephiram591/gdsfactoryx/security/advisories).
 
 Include as much of the following as possible:
 
@@ -22,7 +22,7 @@ Include as much of the following as possible:
 - Affected version(s)
 - Potential impact
 
-You should receive an initial response within **72 hours** acknowledging receipt. We will work with you to understand the issue and provide a timeline for a fix.
+We will acknowledge receipt, work with you to understand the issue, and coordinate a timeline for a fix.
 
 ## Disclosure Policy
 
@@ -32,10 +32,10 @@ You should receive an initial response within **72 hours** acknowledging receipt
 
 ## Scope
 
-This policy applies to the `gdsfactory` Python package and its official dependencies maintained under the [gdsfactory GitHub organization](https://github.com/gdsfactory).
+This policy applies to the `gdsfactoryx` Python package (providing the `gdsfactory` module) maintained at [Sephiram591/gdsfactoryx](https://github.com/Sephiram591/gdsfactoryx). For vulnerabilities specific to upstream `gdsfactory`, see [gdsfactory/gdsfactory](https://github.com/gdsfactory/gdsfactory/security).
 
 ## Security Best Practices for Users
 
 - Pin your dependencies to specific versions in production environments.
-- Keep gdsfactory updated to the latest supported version.
+- Keep `gdsfactoryx` updated to the latest supported version.
 - Be cautious when loading GDS files or cell definitions from untrusted sources, as they may execute arbitrary Python code.

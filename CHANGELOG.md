@@ -1,9 +1,20 @@
 # [Changelog](https://keepachangelog.com/en/1.0.0/)
-## [Unreleased](https://github.com/gdsfactory/gdsfactory/compare/v9.51.0...main)
-
-- Moved the fdtdx integration (`gdsfactory.fdtdx_*`) and the viewer (`gdsfactory.viewer`) to [bifrost](https://github.com/Sephiram591/bifrost) (`import bifrost as bf`); removed the docs site, use the gdsfactory docs.
+## [Unreleased](https://github.com/Sephiram591/gdsfactoryx/compare/v9.51.0.post2...main)
 
 <!-- towncrier release notes start -->
+
+## [9.51.0.post2](https://github.com/Sephiram591/gdsfactoryx/releases/tag/v9.51.0.post2)
+
+- **JAX & `jax.jit` differentiability fixes**: Fixed `jax.jit` tracing in `@gf.cell`, `cos_deg`/`sin_deg`, `ComponentReference` transforms/`connect`/bounding boxes, `Component.flatten`, `CrossSection`/`Section`, `grid`, and `extrude_path`; fixed `float32` AD in `path.fresnel` and runtime `jax_enable_x64` checks; prevented tracer leaks into `@cell` caches and `PDK.cross_sections` via recursive `has_tracers`.
+- **Path, routing & component AD fixes**: Fixed `smooth()` double-rotation and duplicate vertices, `_inset_path`, `extrude`, `arc(0)`, `euler(180)`, `transition_adiabatic`, and `sqrt(0)`/`arctan2(0, 0)` `NaN` gradients; fixed traced `radius`/`route_width`/per-route `starts`/`ends`, obstacle `bboxes`, `start_port`/`end_port`, S-bend rebuilding, `_Hook` reentrancy, `route_bundle_all_angle` / `route_dubins` `OpticalAllAngleRoute` µm units, and component `to_float`/`xp` tracer handling.
+- **Upstream `v9.51.0` parity & memory fixes**: Fixed `Port.name_original`, layer `0` handling, `Port.to_dict` JSON serialization, `InstancePorts.__contains__`, `Component.over_under` default distance (`0.001` µm), `@gf.cell` hooks (`post_process`, `info`, `check_ports`, `snap_ports`), 2-arg `movex`/`movey`, `mirror`/`dmirror*`/`drotate`/`dmove`, `Path` coordinate setters, all-angle virtual netlisting, `write_gds` options, `from_kfactory` `dbu` scaling, and temporary `KCLayout`/routing cache cleanup.
+- **Boundary cleanup (`I-BND-01`–`I-BND-04`)**: Removed non-upstream `gdsfactory.rasterize` / `Component.to_array()`, `gdsfactory/samples/differentiable_optimization.py`, and unused `plot_polygons()`, and privatized internal helpers (`_fresnel`, `_place_manhattan_points`, `_transformed`) to keep the public API aligned with upstream `gdsfactory` `v9.51.0`.
+- **Packaging, CI & docs**: Removed `gplugins` from `[project.optional-dependencies].full` (use `pip install --no-deps` for packages depending on upstream `gdsfactory`), removed global `fix = true` from `[tool.ruff]`, updated `pyproject.toml`/`Makefile`/`asv.conf.json`/pre-commit/CI ruff checks, updated `SECURITY.md` and `.agents/skills/`, and overhauled `README.md` for `gdsfactoryx` and `bifrost`.
+
+## [9.51.0.post1](https://github.com/Sephiram591/gdsfactoryx/releases/tag/v9.51.0.post1)
+
+- **JAX-differentiable `gdsfactory` port**: Ported upstream `gdsfactory` `v9.51.0` layouts, ports, references, paths, cross-sections, and routers to a pure-Python/JAX array backend (`gdsfactory._jax.xp`) with reverse/forward AD (`jax.grad`, `jax.jvp`, `jax.jacfwd`) and straight-through DBU snapping (`gf.snap.SNAP_ENABLED`).
+- **Package split with `bifrost`**: Moved the `fdtdx` simulation integration (`gdsfactory.fdtdx_*`) and 3D viewer (`gdsfactory.viewer`) to [bifrost](https://github.com/Sephiram591/bifrost) (`import bifrost as bf`), keeping `gdsfactoryx` focused on differentiable layout generation while retaining `klayout.db` for GDS/OASIS I/O, viewing, and discrete boolean/DRC operations.
 
 ## [9.51.0](https://github.com/gdsfactory/gdsfactory/releases/tag/v9.51.0) - 2026-09-14
 

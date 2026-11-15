@@ -9,18 +9,20 @@ description: >
   "assemble" photonic structures. Do not wait for an explicit mention of
   "gdsfactory" – if the task involves photonic layout or PICs, this is the
   required tool.
-compatibility: Requires Python >=3.11, gdsfactory, and matplotlib.
+compatibility: Requires Python >=3.12, gdsfactoryx (imported as gdsfactory), jax, and matplotlib.
 metadata:
   author: gdsfactory
   version: "1.1"
 allowed-tools: bash python uv
 ---
 
-# gdsfactory Component Designer Skill
+# gdsfactoryx Component Designer Skill
 
 This skill lets an LLM agent **generate**, **visualize**, and **iteratively
 modify** photonic-IC components using the
-[gdsfactory](https://github.com/gdsfactory/gdsfactory) Python library.
+[gdsfactoryx](https://github.com/Sephiram591/gdsfactoryx) Python library (the
+JAX-differentiable port of [gdsfactory](https://github.com/gdsfactory/gdsfactory),
+imported as `gdsfactory`).
 
 ---
 
@@ -50,7 +52,7 @@ whatever Python environment the user has set up. Common alternatives:
 |---|---|
 | System / venv / conda | `python` |
 | uv project | `uv run python` |
-| pipx-installed gdsfactory | `pipx run --spec gdsfactory python` |
+| pipx-installed gdsfactoryx | `pipx run --spec gdsfactoryx python` |
 | Nix shell | `nix develop -c python` |
 
 Probe the environment first (e.g. check for a `pyproject.toml` with
@@ -180,21 +182,41 @@ When the user asks for a component, follow this streamlined loop:
 
 ## 8 — When you are unsure: consult the docs and samples
 
-The full gdsfactory docs are at **<https://gdsfactory.github.io/gdsfactory/>**.
-Browse tutorial notebooks under `docs/notebooks/` or over 100 sample Python
-scripts under `gdsfactory/samples/` for worked examples.
+`gdsfactoryx` mirrors the upstream gdsfactory API documented at **<https://gdsfactory.github.io/gdsfactory/>** (see `README.md` in this repository for `gdsfactoryx`-specific differentiability notes).
+Browse the sample Python scripts under `gdsfactory/samples/` and unit tests under `tests/` for worked examples.
 
 **Don't guess – search the repo for examples first.**
 
 ---
 
-## 9 — KLayout API: transformations with `DCplxTrans`
+## 9 — Differentiable geometry backend & transformations
 
-gdsfactory's geometry backend is [kfactory](https://github.com/gdsfactory/kfactory/), built on KLayout's Python `db` module.  Full API docs: <https://www.klayout.de/doc-qt5/code/module_db.html>
+Unlike upstream `gdsfactory`, `gdsfactoryx`'s geometry backend is **pure Python + JAX** (`gdsfactory._jax.xp`), not `kfactory` C++ `KCell`s:
 
-### 9.1 `DCplxTrans` constructor
+- `gdsfactory._jax.xp` switches transparently between NumPy on concrete values and `jax.numpy` on JAX tracers, keeping polygons, ports, references, paths, cross-sections, and routes differentiable under `jax.grad`, `jax.jvp`, and `jax.jacfwd`.
+- `Component` and `ComponentReference` are `gdsfactoryx` classes; use `component.to_kfactory()` only when a concrete `kfactory` cell is needed.
+- `klayout.db` (`kdb`) is used for concrete operations (GDS/OASIS I/O, viewing, booleans, sizing, DRC fixes, fill, merged areas) and concrete coordinate conversions.
+- **DBU snapping (`gf.snap.SNAP_ENABLED`)**: Manufacturing-grid snapping uses straight-through rounding (snapped primal coordinates, identity gradient in AD). Set `gf.snap.SNAP_ENABLED = False` when comparing analytical gradients against finite differences.
+- **Fixed-topology `jax.jit`**: `jax.jit` works when the layout's discrete topology (vertex counts, Python branches, routing topology) does not depend on traced values; discrete/KLayout-backed operations require concrete inputs.
 
-[`klayout.db.DCplxTrans`](https://www.klayout.de/doc-qt5/code/class_DCplxTrans.html) represents a rotation + mirror + translation on µm-unit coordinates. Positional and keyword arguments are both supported:
+### 9.1 Differentiable `ComponentReference` placement (preferred)
+
+For parametric and differentiable layouts, use `ComponentReference` methods and coordinate properties—they operate through `gdsfactory._jax.xp` and preserve JAX tracers:
+
+```python
+import gdsfactory as gf
+
+circuit = gf.Component("circuit")
+ref = circuit.add_ref(gf.components.mmi1x2())
+ref.rotate(45.0).mirror_y().move((10.0, 5.0))
+# Or align via ports / bounding-box setters:
+# ref.connect("o1", other_ref.ports["o2"])
+# ref.xmin = 0.0
+```
+
+### 9.2 Concrete `klayout.db.DCplxTrans` API
+
+When working exclusively with concrete float coordinates, `ComponentReference.dcplx_trans` also accepts [`klayout.db.DCplxTrans`](https://www.klayout.de/doc-qt5/code/class_DCplxTrans.html) (rotation + mirror + translation in µm):
 
 ```python
 import klayout.db as kdb
@@ -217,24 +239,11 @@ Parameters (application order: mirror → rotate → translate):
 
 > ⚠️ **Never set `mag != 1.0`.** No foundry accepts scaled instances. Use component factory parameters to create differently-sized variants.
 
-> ℹ️ `ComponentReference.dcplx_trans` snaps to the manufacturing grid via `ICplxTrans`, so off-grid placements are silently adjusted.
+> ℹ️ On concrete placements with `gf.snap.SNAP_ENABLED = True`, `ComponentReference.dcplx_trans` snaps to the manufacturing grid via `ICplxTrans`. `kdb.DCplxTrans` does not accept JAX tracers—use `ref.move()`, `ref.rotate()`, `ref.mirror()`, or `ref.connect()` instead when differentiating.
 
-### 9.2 Setting `ComponentReference.dcplx_trans`
+### 9.3 Composing `DCplxTrans` transformations
 
-```python
-import gdsfactory as gf
-import klayout.db as kdb
-
-circuit = gf.Component("circuit")
-ref = circuit.add_ref(gf.components.mmi1x2())
-
-# rotate 45°, mirror, translate to (10, 5) µm
-ref.dcplx_trans = kdb.DCplxTrans(mag=1.0, angle=45.0, mirror=True, u=kdb.DVector(10.0, 5.0))
-```
-
-### 9.3 Composing transformations
-
-`DCplxTrans` objects compose with `*` (right-hand operand applied first):
+Concrete `DCplxTrans` objects compose with `*` (right-hand operand applied first):
 
 ```python
 rotate      = kdb.DCplxTrans(angle=90.0)
@@ -245,10 +254,10 @@ ref.dcplx_trans = translation * rotate   # rotate first, then translate
 
 ### 9.4 Quick-reference
 
-| Goal | Example |
-|---|---|
-| Translate | `kdb.DCplxTrans(u=kdb.DVector(dx, dy))` |
-| Rotate 90° CCW | `kdb.DCplxTrans(angle=90.0)` |
-| Mirror about x-axis | `kdb.DCplxTrans(mirror=True)` |
-| Rotate then translate | `translation * rotate` |
-| Read / modify in place | `ref.dcplx_trans` / `ref.dcplx_trans = t * ref.dcplx_trans` |
+| Goal | Differentiable (`ComponentReference`) | Concrete (`DCplxTrans`) |
+|---|---|---|
+| Translate | `ref.move((dx, dy))` | `kdb.DCplxTrans(u=kdb.DVector(dx, dy))` |
+| Rotate 90° CCW | `ref.rotate(90.0)` | `kdb.DCplxTrans(angle=90.0)` |
+| Mirror about x-axis | `ref.mirror()` | `kdb.DCplxTrans(mirror=True)` |
+| Connect ports | `ref.connect("o1", dst_port)` | — |
+| Read / modify concrete trans | `ref.transform` | `ref.dcplx_trans` / `ref.dcplx_trans = t * ref.dcplx_trans` |

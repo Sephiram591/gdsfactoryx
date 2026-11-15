@@ -12,12 +12,15 @@ bypassed so derivative information flows through the geometry.
 
 from __future__ import annotations
 
+import copy as _copy
 import functools
 import inspect
 from collections.abc import Callable, Iterable
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, ParamSpec, Protocol, cast
 
-from gdsfactory._jax import has_abstract_tracers, has_tracers
+from gdsfactory._jax import has_abstract_tracers, has_tracers, snap_dbu
+from gdsfactory.transform import manhattan_angle
 
 if TYPE_CHECKING:
     from gdsfactory.component import Component
@@ -29,6 +32,9 @@ _CACHES: list[dict[Any, Any]] = []
 _BY_NAME: dict[str, Any] = {}
 factories: dict[str, Callable[..., Any]] = {}
 """Registry of cell functions (name -> decorated function)."""
+_SNAP_PORTS_OVERRIDE: ContextVar[bool | None] = ContextVar(
+    "_SNAP_PORTS_OVERRIDE", default=None
+)
 
 
 class ComponentFunc(Protocol[ComponentParams]):
@@ -186,6 +192,7 @@ def cell(
     /,
     *,
     set_settings: bool = True,
+    add_settings: bool | None = None,
     set_name: bool = True,
     check_ports: bool = True,
     check_instances: Any = None,
@@ -206,19 +213,23 @@ def cell(
     ports: Any = None,
     schematic_function: Callable[..., Any] | None = None,
     output_type: Any = None,
+    validate_with_pydantic: bool = False,
 ) -> Any:
     """Decorator to convert a function into a (cached, differentiable) Component factory."""
     drop = set(drop_params if drop_params is not None else ["self", "cls"])
-    post = list(post_process or [])
+    post = [post_process] if callable(post_process) else list(post_process or [])
+    should_set_settings = set_settings if add_settings is None else add_settings
 
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         sig = inspect.signature(func)
         _cache: dict[Any, Any] = cache if cache is not None else {}
         _CACHES.append(_cache)
         _basename = basename or (_module_basename(func) if with_module_name else None)
+        _validated_func: Callable[..., Any] | None = None
 
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Component:
+            nonlocal _validated_func
             from gdsfactory.component import Component
 
             bound = sig.bind(*args, **kwargs)
@@ -241,7 +252,10 @@ def cell(
                     key = None
                 if key is not None and key in _cache:
                     return cast("Component", _cache[key])
-                if set_name and _layout_cache_enabled():
+                use_layout_cache = (
+                    _layout_cache_enabled() if layout_cache is None else layout_cache
+                )
+                if set_name and use_layout_cache:
                     # like upstream (CONF.cell_layout_cache): reuse an existing cell
                     # with the same name (e.g. a function passed by its name)
                     name = get_cell_name(_basename or func.__name__, **params)
@@ -251,7 +265,20 @@ def cell(
                             _cache[key] = existing
                         return cast("Component", existing)
 
-            c = func(*bound.args, **bound.kwargs)
+            _snap_token = _SNAP_PORTS_OVERRIDE.set(snap_ports)
+            try:
+                if validate_with_pydantic and not traced:
+                    if _validated_func is None:
+                        import pydantic
+
+                        _validated_func = pydantic.validate_call(
+                            config=pydantic.ConfigDict(arbitrary_types_allowed=True)
+                        )(func)
+                    c = _validated_func(*bound.args, **bound.kwargs)
+                else:
+                    c = func(*bound.args, **bound.kwargs)
+            finally:
+                _SNAP_PORTS_OVERRIDE.reset(_snap_token)
             if not isinstance(c, Component):
                 raise TypeError(
                     f"{func.__name__} must return a Component, got {type(c)}"
@@ -259,8 +286,6 @@ def cell(
             if c.locked:
                 # returned a cached cell from another factory: wrap a copy
                 c = c.copy()
-            if check_ports:
-                _check_ports(c)
 
             function_name = func.__name__
             if set_name:
@@ -268,19 +293,35 @@ def cell(
                     c._name = f"{_basename or function_name}_traced"
                 else:
                     c._name = get_cell_name(_basename or function_name, **params)
-            if set_settings:
+            if should_set_settings:
                 c.settings = type(c.settings)(
-                    {k: _metadata(v) for k, v in params.items()}
+                    dict(params)
+                    if traced
+                    else {k: _metadata(v) for k, v in params.items()}
                 )
                 c.function_name = function_name
                 c.basename = _basename
                 c.module = func.__module__
             if info:
-                c.info.update(info)
+                c.info.update(_copy.deepcopy(info))
+            if tags:
+                c.tags = list(tags)
             if lvs_equivalent_ports:
                 c.lvs_equivalent_ports = lvs_equivalent_ports
-            for pp in post:
-                pp(c)
+            if not traced:
+                if snap_ports and not c._virtual:
+                    for port in c.ports:
+                        if (
+                            port._orientation is None
+                            or manhattan_angle(port._orientation) is not None
+                        ):
+                            port._center = snap_dbu(port._center)
+                            if port._width is not None:
+                                port._width = snap_dbu(port._width)
+                for pp in post:
+                    pp(c)
+                if check_ports:
+                    _check_ports(c)
             if schematic_function is not None:
                 c._schematic_function = schematic_function  # type: ignore[attr-defined]
             c.locked = True

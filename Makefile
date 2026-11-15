@@ -19,6 +19,8 @@ UV_INSTALLED := $(shell command -v uv)
 	upload-devpi \
 	upload-twine \
 	lint \
+	format \
+	pre-commit \
 	git-rm-merged \
 	clean \
 	help
@@ -29,11 +31,11 @@ ifndef UV_INSTALLED
 endif
 
 install: uv ## Install all dependencies using uv
-	uv sync --all-extras --no-extra full
+	uv sync --all-extras
 
 dev: uv ## Set up dev environment and install pre-commit
 	uv venv -p 3.12
-	uv sync --all-extras --no-extra full
+	uv sync --all-extras
 	uv run pre-commit install
 	uv run gf install-klayout-genericpdk
 	uv run gf install-git-diff
@@ -89,7 +91,15 @@ upload-devpi: ## Upload package to devpi
 upload-twine: build ## Upload package to PyPI using twine
 	uv tool run twine upload dist/*
 
-lint: ## Run linting and formatting checks
+lint: ## Run non-mutating lint and format checks
+	uv run --extra maintainer ruff check --no-fix gdsfactory tests
+	uv run --extra maintainer ruff format --check gdsfactory tests
+
+format: ## Auto-fix lint issues and format code
+	uv run --extra maintainer ruff check --fix gdsfactory tests
+	uv run --extra maintainer ruff format gdsfactory tests
+
+pre-commit: ## Run all pre-commit hooks
 	uv run pre-commit run --all-files
 
 git-rm-merged: ## Delete merged git branches
@@ -98,10 +108,10 @@ git-rm-merged: ## Delete merged git branches
 
 clean: ## Remove build, cache and temporary files
 	rm -rf .venv
-	find src -name "*.c" | xargs rm -rf
-	find src -name "*.pyc" | xargs rm -rf
-	find src -name "*.so" | xargs rm -rf
-	find src -name "*.pyd" | xargs rm -rf
+	find gdsfactory tests -name "*.c" | xargs rm -rf
+	find gdsfactory tests -name "*.pyc" | xargs rm -rf
+	find gdsfactory tests -name "*.so" | xargs rm -rf
+	find gdsfactory tests -name "*.pyd" | xargs rm -rf
 	find . -name "*.egg_info" | xargs rm -rf
 	find . -name ".ipynb_checkpoints" | xargs rm -rf
 	find . -name ".mypy_cache" | xargs rm -rf

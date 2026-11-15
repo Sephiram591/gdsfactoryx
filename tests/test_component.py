@@ -1,14 +1,21 @@
+import pathlib
 from collections.abc import Callable
 from typing import Any
 
+import jax
+import jax.numpy as jnp
 import kfactory as kf
 import klayout.db as kdb
 import numpy as np
 import pytest
+import yaml
 from kfactory.exceptions import LockedError
 
 import gdsfactory as gf
 from gdsfactory.component import (
+    AddPortError,
+    Box,
+    Info,
     container,
     copy,
     ensure_tuple_of_tuples,
@@ -18,6 +25,7 @@ from gdsfactory.component import (
 from gdsfactory.config import GDSDIR_TEMP
 from gdsfactory.gpdk import LAYER
 from gdsfactory.pdk import get_layer
+from gdsfactory.transform import Transform
 
 
 def test_component_copy() -> None:
@@ -551,6 +559,21 @@ def test_over_under() -> None:
     assert c.dbbox(get_layer((1, 0))) == kdb.Box(0, 0, 10, 5)
 
 
+def test_over_under_default_distance() -> None:
+    c_heal = gf.Component()
+    c_heal.add_polygon([(0, 0), (0, 5), (5, 5), (5, 0)], layer=(1, 0))
+    c_heal.add_polygon([(5.002, 0), (5.002, 5), (10, 5), (10, 0)], layer=(1, 0))
+    c_heal.over_under((1, 0))
+    assert len(c_heal.shapes(get_layer((1, 0)))) == 1
+    assert c_heal.dbbox(get_layer((1, 0))) == kdb.Box(0, 0, 10, 5)
+
+    c_gap = gf.Component()
+    c_gap.add_polygon([(0, 0), (0, 5), (5, 5), (5, 0)], layer=(1, 0))
+    c_gap.add_polygon([(5.1, 0), (5.1, 5), (10, 5), (10, 0)], layer=(1, 0))
+    c_gap.over_under((1, 0))
+    assert len(c_gap.shapes(get_layer((1, 0)))) == 2
+
+
 def test_component_to_3d() -> None:
     c = gf.Component()
     c.add_polygon([(0, 0), (0, 10), (10, 10), (10, 0)], layer=(1, 0))
@@ -890,3 +913,312 @@ def test_fill() -> None:
     assert np.isclose(fill_area, expected_fill_area), (
         f"{fill_area} != {expected_fill_area}"
     )
+
+
+def test_cell_decorator_kwargs() -> None:
+    pp_calls: list[str] = []
+
+    def mark_pp(comp: gf.Component) -> None:
+        pp_calls.append(comp.name)
+        comp.info["post_processed"] = True
+
+    @gf.cell(
+        post_process=[mark_pp],
+        info={"kind": "wg", "nested": {"v": 1}},
+        tags=["wg", "test"],
+        add_settings=True,
+    )
+    def wg_pp(length: float = 10.0) -> gf.Component:
+        c = gf.Component()
+        c.add_polygon([(0, 0), (length, 0), (length, 1), (0, 1)], layer=(1, 0))
+        return c
+
+    c = wg_pp(length=5.0)
+    assert c.info["post_processed"] is True
+    assert c.info["kind"] == "wg"
+    assert c.tags == ["wg", "test"]
+    assert c.settings["length"] == 5.0
+    assert len(pp_calls) == 1
+
+    # Concrete post_process is skipped under jax.grad (traced=True).
+    grad_len = jax.grad(lambda x: wg_pp(length=x).xsize)(5.0)
+    assert np.isclose(grad_len, 1.0)
+    assert len(pp_calls) == 1
+
+    @gf.cell(add_settings=False)
+    def wg_no_settings(length: float = 4.0) -> gf.Component:
+        c = gf.Component()
+        c.add_polygon([(0, 0), (length, 0), (length, 1), (0, 1)], layer=(1, 0))
+        return c
+
+    c_no_settings = wg_no_settings()
+    assert dict(c_no_settings.settings) == {}
+
+    @gf.cell(check_ports=True)
+    def dup_unnamed_checked() -> gf.Component:
+        c = gf.Component()
+        c.add_port(center=(0, 0), width=0.5, orientation=0, layer=(1, 0))
+        c.add_port(center=(1, 0), width=0.5, orientation=0, layer=(1, 0))
+        return c
+
+    with pytest.raises(ValueError, match="duplicate port names"):
+        dup_unnamed_checked()
+
+    @gf.cell(check_ports=False)
+    def dup_unnamed_unchecked() -> gf.Component:
+        c = gf.Component()
+        c.add_port(center=(0, 0), width=0.5, orientation=0, layer=(1, 0))
+        c.add_port(center=(1, 0), width=0.5, orientation=0, layer=(1, 0))
+        return c
+
+    c_unchecked = dup_unnamed_unchecked()
+    assert len(c_unchecked.ports) == 2
+
+    @gf.cell(snap_ports=False)
+    def unsnapped_port_cell() -> gf.Component:
+        c = gf.Component()
+        c.add_port("o1", center=(0.0004, 0.0), width=0.5, orientation=0, layer=(1, 0))
+        return c
+
+    assert np.isclose(unsnapped_port_cell().ports["o1"].x, 0.0004)
+
+    @gf.cell(validate_with_pydantic=True)
+    def pydantic_wg(length: float = 10.0) -> gf.Component:
+        c = gf.Component()
+        c.add_polygon([(0, 0), (length, 0), (length, 1), (0, 1)], layer=(1, 0))
+        return c
+
+    assert np.isclose(pydantic_wg(length=6.0).xsize, 6.0)
+    with pytest.raises(ValueError):
+        pydantic_wg(length="not_a_float")  # type: ignore[arg-type]
+    assert np.isclose(jax.grad(lambda x: pydantic_wg(length=x).xsize)(6.0), 1.0)
+
+
+def test_add_port_duplicate_raises() -> None:
+    c = gf.Component()
+    p1 = c.add_port("o1", center=(0, 0), width=0.5, orientation=0, layer=(1, 0))
+
+    with pytest.raises(AddPortError):
+        c.add_port("o1", center=(1, 0), width=0.5, orientation=0, layer=(1, 0))
+
+    with pytest.raises(ValueError):
+        c.add_port(port=p1)
+
+    c.add_port(
+        "o1", center=(2, 0), width=0.5, orientation=0, layer=(1, 0), overwrite=True
+    )
+    assert len(c.ports) == 1
+    assert np.isclose(c.ports["o1"].x, 2.0)
+
+
+def test_two_arg_movex_movey_and_aliases() -> None:
+    c = gf.Component()
+    c.add_polygon([(0, 0), (2, 0), (2, 1), (0, 1)], layer=(1, 0))
+    c.shapes((1, 0)).insert(kdb.DPath([kdb.DPoint(0, 0), kdb.DPoint(2, 0)], 0.5))
+
+    c.movex(1.0, 4.0)
+    c.movey(origin=2.0, destination=5.0)
+    assert np.isclose(c.xmin, 3.0)
+    assert np.isclose(c.ymin, 2.75)
+    paths = c.get_paths((1, 0))
+    assert len(paths) == 1
+    pts = [(p.x, p.y) for p in paths[0].each_point()]
+    assert np.allclose(pts, [(3.0, 3.0), (5.0, 3.0)])
+
+    c.transform(Transform(0.0, 0.0, 0.0, magnification=2.0))
+    scaled_paths = c.get_paths((1, 0))
+    assert np.isclose(scaled_paths[0].width, 1.0)
+
+    c.drotate(90)
+    c.dmirror()
+    c.dmirror_x()
+    c.dmirror_y()
+    c.dmove((1.0, -1.0))
+
+    parent = gf.Component()
+    base = gf.components.rectangle(size=(2, 1), layer=(1, 0))
+    ref = parent << base
+    ref.movex(1.0, 6.0).movey(origin=2.0, destination=5.0)
+    assert np.isclose(ref.xmin, 5.0)
+    assert np.isclose(ref.ymin, 3.0)
+    ref.drotate(90).dmirror().dmirror_x().dmirror_y().dmove(1.0, 2.0)
+
+    p = gf.Path([(0, 0), (2, 0)])
+    p.movex(1.0, 4.0).movey(origin=2.0, destination=5.0)
+    assert np.isclose(p.xmin, 3.0)
+    assert np.isclose(p.ymin, 3.0)
+    p.drotate(90).dmirror().dmirror_x().dmirror_y().dmove((1.0, 1.0))
+
+    def loss(dst: jax.Array) -> jax.Array:
+        cc = gf.Component()
+        cc.add_polygon([(0, 0), (1, 0), (1, 1), (0, 1)], layer=(1, 0))
+        cc.movex(1.0, dst)
+        pp = gf.Path([(0, 0), (1, 0)])
+        pp.movey(0.5, dst)
+        return cc.xmin + pp.ymin
+
+    assert np.isclose(jax.grad(loss)(3.0), 2.0)
+
+
+def test_path_copy_isolation_and_setters() -> None:
+    arr = np.array([[0.0, 0.0], [10.0, 2.0]])
+    p1 = gf.Path(arr)
+    arr[0, 0] = 999.0
+    assert np.isclose(p1.points[0, 0], 0.0)
+
+    p2 = gf.Path(p1)
+    p3 = p1.copy()
+    assert p2.points is not p1.points
+    assert p3.points is not p1.points
+    p2.points[0, 0] = 42.0
+    p3.points[0, 0] = 77.0
+    assert np.isclose(p1.points[0, 0], 0.0)
+
+    p3.xmin = 2.0
+    assert np.isclose(p3.xmin, 2.0)
+    p3.xmax = 12.0
+    assert np.isclose(p3.xmax, 12.0)
+    p3.ymin = 3.0
+    assert np.isclose(p3.ymin, 3.0)
+    p3.ymax = 5.0
+    assert np.isclose(p3.ymax, 5.0)
+    p3.x = 7.0
+    p3.y = 4.0
+    assert np.isclose(p3.x, 7.0)
+    assert np.isclose(p3.y, 4.0)
+    p3.center = (1.0, 2.0)
+    assert np.allclose(p3.center, [1.0, 2.0])
+    p3.dxmin = -3.0
+    assert np.isclose(p3.xmin, -3.0)
+
+    def path_grad(val: jax.Array) -> jax.Array:
+        pt = gf.Path([jnp.array([0.0, 0.0]), jnp.array([2.0, 1.0])]).copy()
+        pt.xmin = val
+        return pt.xmax
+
+    assert np.isclose(jax.grad(path_grad)(4.0), 1.0)
+
+
+def test_trim_locked_and_container_copy_ports_false() -> None:
+    locked_wg = gf.components.straight(length=10)
+    assert locked_wg.locked
+    trimmed = gf.functions.trim(
+        locked_wg, domain=[(0, -2), (0, 2), (5, 2), (5, -2)]
+    )
+    assert np.isclose(locked_wg.xmax, 10.0)
+    assert np.isclose(trimmed.xmax, 5.0)
+    assert len(trimmed.ports) == len(locked_wg.ports)
+
+    c_src = gf.Component()
+    c_src.add_polygon([(0, 0), (2, 0), (2, 1), (0, 1)], layer=(1, 0))
+    c_src.add_port("o1", center=(0, 0.5), width=0.5, orientation=180, layer=(1, 0))
+    c_src.info["length"] = 2.0
+
+    c_no_ports = gf.functions.container(c_src, copy_ports=False)
+    assert len(c_no_ports.ports) == 0
+    assert c_no_ports.info["length"] == 2.0
+
+
+def test_size_info_cc_and_pack() -> None:
+    r1 = gf.components.rectangle(size=(4, 2), layer=(1, 0), port_type=None).copy()
+    r1.add_port("o1", center=(0, 1), width=0.5, orientation=180, layer=(1, 0))
+    r2 = gf.components.rectangle(size=(4, 2), layer=(1, 0), port_type=None).copy()
+    r2.add_port("o1", center=(0, 1), width=0.5, orientation=180, layer=(1, 0))
+    r2.add_port("x1", center=(4, 1), width=0.5, orientation=0, layer=(1, 0))
+
+    assert np.allclose(r1.dsize_info.cc + np.array([1.0, 2.0]), [3.0, 3.0])
+
+    packed = gf.pack(
+        [r1, r2],
+        text=gf.components.text,
+        text_anchors=("cc",),
+        add_ports_prefix=False,
+    )
+    assert len(packed) == 1
+    assert len(packed[0].ports) == 3
+    assert "o1" in packed[0].ports
+    assert "o1_1" in packed[0].ports
+    assert "x1_1" in packed[0].ports
+
+
+def test_get_boxes_with_child_refs_and_merge() -> None:
+    r1 = gf.components.rectangle(size=(2, 2), layer=(1, 0))
+    r2 = gf.components.rectangle(size=(3, 2), layer=(1, 0))
+    c = gf.Component()
+    c << r1
+    ref2 = c << r2
+    ref2.movex(2.0)
+
+    unmerged = c.get_boxes((1, 0), merge=False)
+    assert len(unmerged) == 2
+
+    merged = c.get_boxes((1, 0), merge=True)
+    assert len(merged) == 1
+    assert merged[0] == kdb.DBox(0, 0, 5, 2)
+
+    assert len(c.get_boxes((1, 0), recursive=False)) == 0
+
+
+def test_write_gds_conf_max_vertex_metadata_and_add_pins(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    wg = gf.components.straight(length=5.0)
+    gds_meta = wg.write_gds(gdspath=tmp_path / "with_meta.gds", with_metadata=True)
+    gds_nometa = wg.write_gds(gdspath=tmp_path / "no_meta.gds", with_metadata=False)
+    assert gds_nometa.stat().st_size < gds_meta.stat().st_size
+
+    monkeypatch.setattr(gf.CONF, "max_vertex_count", 8, raising=False)
+    poly32 = gf.Component("poly32")
+    angles = np.linspace(0.0, 2.0 * np.pi, 32, endpoint=False)
+    poly32.add_polygon(
+        [(5.0 * np.cos(a), 5.0 * np.sin(a)) for a in angles], layer=(1, 0)
+    )
+    gds_poly = poly32.write_gds(gdspath=tmp_path / "poly32.gds")
+    layout = kdb.Layout()
+    layout.read(str(gds_poly))
+    li = layout.layer(1, 0)
+    shapes = list(layout.top_cell().shapes(li).each())
+    assert shapes
+    assert all(sum(1 for _ in sh.polygon.each_point_hull()) <= 8 for sh in shapes)
+
+    monkeypatch.setattr(gf.CONF, "add_pins", True, raising=False)
+    gds_pins = wg.write_gds(gdspath=tmp_path / "with_pins.gds")
+    layout_pins = kdb.Layout()
+    layout_pins.read(str(gds_pins))
+    assert layout_pins.top_cell().name == wg.name
+    pin_count = sum(
+        layout_pins.top_cell().shapes(layer_idx).size()
+        for layer_idx in layout_pins.layer_indexes()
+    )
+    layout_plain = kdb.Layout()
+    layout_plain.read(str(gds_nometa))
+    plain_count = sum(
+        layout_plain.top_cell().shapes(layer_idx).size()
+        for layer_idx in layout_plain.layer_indexes()
+    )
+    assert pin_count > plain_count
+
+
+def test_to_dict_and_pprint_yaml_safe() -> None:
+    c = gf.Component("yaml_test")
+    c.add_port("o1", center=(0.0, 0.0), width=0.5, orientation=0, layer=(1, 0))
+    c.info["sub"] = Info(val=np.float64(2.5))
+    c.info["box"] = Box(0.0, 0.0, 3.0, 4.0)
+    c.info["arr"] = np.array([1.0, 2.0])
+    c.info["jarr"] = jnp.array([3.0, 4.0])
+    c.settings["width"] = np.float64(0.5)
+
+    d = c.to_dict(with_ports=True)
+    dumped = yaml.safe_dump(d)
+    loaded = yaml.safe_load(dumped)
+    assert loaded["info"]["sub"] == {"val": 2.5}
+    assert loaded["info"]["box"] == {
+        "left": 0.0,
+        "bottom": 0.0,
+        "right": 3.0,
+        "top": 4.0,
+    }
+    assert loaded["info"]["arr"] == [1.0, 2.0]
+    assert loaded["info"]["jarr"] == [3.0, 4.0]
+    assert loaded["settings"]["width"] == 0.5
+    c.pprint(with_ports=True)

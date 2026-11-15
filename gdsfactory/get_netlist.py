@@ -17,11 +17,11 @@ import gdsfactory as gf
 import gdsfactory.schematic as scm
 from gdsfactory._jax import to_float, to_numpy
 from gdsfactory._ports import Port
-from gdsfactory.component import Component
+from gdsfactory.component import Component, ComponentAllAngle, ComponentReference
 from gdsfactory.name import get_instance_name_from_alias as legacy_namer  # noqa: F401
 from gdsfactory.serialization import DEFAULT_SERIALIZATION_MAX_DIGITS, clean_value_json
 
-type Instance = kf.DInstance | kf.VInstance | kf.Instance
+type Instance = kf.DInstance | kf.VInstance | kf.Instance | ComponentReference
 type ErrorBehavior = Literal["ignore", "warn", "error"]
 
 
@@ -240,11 +240,22 @@ class SmartPortMatcher:
             return False
 
         # Check width
-        if abs(to_float(port1.width) - to_float(port2.width)) > self.width_tolerance:
+        if (port1.width is None) != (port2.width is None):
+            return False
+        if (
+            port1.width is not None
+            and abs(to_float(port1.width) - to_float(port2.width))
+            > self.width_tolerance
+        ):
             return False
 
-        # Skip orientation check for electrical ports
-        if port1.port_type == "electrical" or port2.port_type == "electrical":
+        # Skip orientation check for electrical or un-oriented ports
+        if (
+            port1.port_type == "electrical"
+            or port2.port_type == "electrical"
+            or port1.orientation is None
+            or port2.orientation is None
+        ):
             return True
 
         # Check orientation: ports should face each other (180° apart)
@@ -288,20 +299,25 @@ class FlexiblePortMatcher:
         ):
             return False
 
-        # Skip orientation check for electrical ports
-        if port1.port_type != "electrical":
+        # Skip orientation check for electrical or un-oriented ports
+        if (
+            port1.port_type != "electrical"
+            and port1.orientation is not None
+            and port2.orientation is not None
+        ):
             # Check orientation: ports should face each other (180° apart)
             angle_diff = abs(_angle_difference(port1.orientation, port2.orientation))
             if abs(angle_diff - 180) > self.angle_tolerance:
                 return False
 
         # Check for width mismatch - record but don't reject
-        width_diff = abs(to_float(port1.width) - to_float(port2.width))
-        if width_diff > 0.001:  # small tolerance for floating point
-            return {
-                "width1": to_float(port1.width),
-                "width2": to_float(port2.width),
-            }
+        if port1.width is not None and port2.width is not None:
+            width_diff = abs(to_float(port1.width) - to_float(port2.width))
+            if width_diff > 0.001:  # small tolerance for floating point
+                return {
+                    "width1": to_float(port1.width),
+                    "width2": to_float(port2.width),
+                }
 
         return True
 
@@ -448,12 +464,13 @@ def _insert_netlist(
     }
     _all_ports: dict[str, kf.DPort | kf.Port] = {}
     for _inst in sorted(
-        chain(cell.insts, cell.vinsts), key=lambda i: getattr(i, "name", "") or ""
+        chain(cell.insts, getattr(cell, "vinsts", ())),
+        key=lambda i: getattr(i, "name", "") or "",
     ):
         inst = cast(Instance, _inst)
         inst_cell = _instcell(inst)
         inst_name = instance_namer(inst)
-        if _is_pure_vinst(inst):
+        if _is_virtual_instance(inst):
             if _is_array_inst(inst):
                 msg = (
                     "Cannot export netlist: virtual array instances are not supported."
@@ -633,8 +650,21 @@ def _is_array_inst(inst: Instance) -> bool:
     return getattr(inst, "na", 0) > 1 or getattr(inst, "nb", 0) > 1
 
 
-def _is_pure_vinst(inst: Instance) -> bool:
-    return isinstance(inst, kf.VInstance)
+def _is_virtual_instance(inst: Instance) -> bool:
+    """Return True if *inst* is a virtual or all-angle instance."""
+    if isinstance(inst, kf.VInstance):
+        return True
+    if isinstance(inst, ComponentReference):
+        return bool(
+            inst.virtual
+            or isinstance(inst.cell, ComponentAllAngle)
+            or getattr(inst.cell, "_virtual", False)
+        )
+    return False
+
+
+is_virtual_instance = _is_virtual_instance
+_is_pure_vinst = _is_virtual_instance
 
 
 def _is_flattened_vinst(inst: Instance) -> bool:
@@ -891,23 +921,20 @@ def _width_mismatch_circuit() -> Component:
 
 def _instname(inst: Instance) -> str:
     cell = _instcell(inst)
-    h = md5(
-        repr(
-            (
-                cell.name,
-                (
-                    inst.trans.disp.x,
-                    inst.trans.disp.y,
-                    inst.trans.angle,
-                    inst.trans.mirror,
-                ),
-                tuple(to_numpy(inst.a).tolist()),
-                tuple(to_numpy(inst.b).tolist()),
-                inst.na,
-                inst.nb,
-            )
-        ).encode()
-    ).hexdigest()[:8]
+    if _is_virtual_instance(inst):
+        dt = inst.dcplx_trans
+        trans_key: tuple[Any, ...] = (dt.disp.x, dt.disp.y, dt.angle, dt.is_mirror())
+        arr_key: tuple[Any, ...] = (0, 0, 1, 1)
+    else:
+        t = inst.trans
+        trans_key = (t.disp.x, t.disp.y, t.angle, t.mirror)
+        arr_key = (
+            tuple(to_numpy(inst.a).tolist()),
+            tuple(to_numpy(inst.b).tolist()),
+            inst.na,
+            inst.nb,
+        )
+    h = md5(repr((cell.name, trans_key, *arr_key)).encode()).hexdigest()[:8]
     return inst.name or f"{cell.name}__{h}"
 
 

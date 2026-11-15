@@ -235,6 +235,8 @@ def to_kfactory(
                 kinst.set_property(PROPID.NAME, r.name)
         if add_ports:
             for p in c.ports:
+                if p.width is None or round(to_float(p.width) / dbu) <= 0:
+                    continue
                 orientation = (
                     to_float(p.orientation) if p.orientation is not None else 0.0
                 )
@@ -243,7 +245,9 @@ def to_kfactory(
                 )
                 kp = kc.create_port(
                     name=p.name,
-                    width=round(to_float(p.width) / dbu) * dbu,
+                    width=round(to_float(p.width) / dbu) * dbu
+                    if p.width is not None
+                    else 0.0,
                     layer=layer_index(p.layer),
                     port_type=p.port_type,
                     dcplx_trans=trans,
@@ -356,12 +360,16 @@ def to_kfactory(
         if add_ports:
             for p in c.ports:
                 q = p.copy(rt, on_grid=False)
+                if q.width is None or round(to_float(q.width) / dbu) <= 0:
+                    continue
                 orientation = (
                     to_float(q.orientation) if q.orientation is not None else 0.0
                 )
                 kp = kc.create_port(
                     name=q.name,
-                    width=round(to_float(q.width) / dbu) * dbu,
+                    width=round(to_float(q.width) / dbu) * dbu
+                    if q.width is not None
+                    else 0.0,
                     layer=layer_index(q.layer),
                     port_type=q.port_type,
                     dcplx_trans=kdb.DCplxTrans(
@@ -503,28 +511,94 @@ def _clean(d: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def write(
-    component: Component,
-    gdspath: str | pathlib.Path,
+def _resolve_save_options(
     save_options: Any = None,
     with_metadata: bool = True,
-    exclude_layers: Any = None,
-) -> pathlib.Path:
-    from gdsfactory._kcl import temporary_kcl
-
-    gdspath = pathlib.Path(gdspath)
-    opts = save_options
-    if opts is None:
+    max_vertex_count: int | None = None,
+) -> Any:
+    """Return configured KLayout save options for GDS/OASIS export."""
+    if save_options is None:
         from kfactory.utilities import save_layout_options
 
         opts = save_layout_options()
-    if not with_metadata:
+    else:
+        opts = save_options
+    if not with_metadata and hasattr(opts, "write_context_info"):
         opts.write_context_info = False
+    mvc = max_vertex_count
+    if mvc is None:
+        from gdsfactory.config import CONF
+
+        mvc = getattr(CONF, "max_vertex_count", None)
+    if mvc is not None:
+        mvc_int = int(mvc)
+        if hasattr(opts, "gds2_max_vertex_count"):
+            opts.gds2_max_vertex_count = mvc_int
+        elif hasattr(opts, "max_vertex_count"):
+            opts.max_vertex_count = mvc_int
+    return opts
+
+
+def _resolve_pin_function(add_pins_function: Any, pins: Any) -> Any:
+    """Resolve optional export-time pin callback from arguments or CONF."""
+    from gdsfactory.config import CONF
+
+    if add_pins_function is not None:
+        return add_pins_function
+    if callable(pins):
+        return pins
+    if pins is False:
+        return None
+    conf_pins = getattr(CONF, "add_pins", None)
+    if callable(conf_pins):
+        return conf_pins
+    if pins is True or conf_pins is True:
+        from gdsfactory.add_pins import add_pins
+
+        return add_pins
+    return None
+
+
+def write(
+    component: Component,
+    gdspath: str | pathlib.Path | None = None,
+    save_options: Any = None,
+    with_metadata: bool = True,
+    exclude_layers: Any = None,
+    max_vertex_count: int | None = None,
+    add_pins_function: Any = None,
+    pins: Any = None,
+) -> pathlib.Path:
+    """Export *component* to a GDS/OASIS file via KLayout."""
+    from gdsfactory._kcl import temporary_kcl
+    from gdsfactory.config import GDSDIR_TEMP
+
+    gdspath = (
+        pathlib.Path(gdspath)
+        if gdspath is not None
+        else pathlib.Path(GDSDIR_TEMP) / f"{component.name}.gds"
+    )
+    gdspath.parent.mkdir(parents=True, exist_ok=True)
+    opts = _resolve_save_options(
+        save_options=save_options,
+        with_metadata=with_metadata,
+        max_vertex_count=max_vertex_count,
+    )
+    pin_fn = _resolve_pin_function(add_pins_function=add_pins_function, pins=pins)
+    export_comp = component
+    if pin_fn is not None:
+        export_comp = component.copy()
+        res = pin_fn(export_comp)
+        if res is not None:
+            export_comp = res
     with temporary_kcl(f"gdsfactoryx_export_{next(_EXPORT_COUNTER)}") as kcl:
         kcl.layout.dbu = get_dbu()
-        kc = to_kfactory(component, kcl=kcl, exclude_layers=exclude_layers)
+        kc = to_kfactory(export_comp, kcl=kcl, exclude_layers=exclude_layers)
         kc.write(str(gdspath), save_options=opts, set_meta_data=with_metadata)
     return gdspath
+
+
+export_gds = write
 
 
 def show(component: Any, **kwargs: Any) -> None:
@@ -657,6 +731,7 @@ def _label(text: str, x: float, y: float, layer: int) -> Any:
 __all__ = [
     "array_to_kpolygon",
     "arrays_to_region",
+    "export_gds",
     "from_kfactory",
     "kpolygon_to_array",
     "merge_arrays",

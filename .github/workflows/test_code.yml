@@ -111,5 +111,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
+      - name: Run ruff check
+        run: uv run --extra maintainer ruff check --no-fix gdsfactory tests
       - name: Run ty check
         run: uv run --extra dev ty check gdsfactory || true

@@ -30,6 +30,7 @@ import jax
 if os.environ.get("JAX_ENABLE_X64", "1").lower() not in ("0", "false", "no"):
     jax.config.update("jax_enable_x64", True)
 
+import jax.extend.core
 import jax.numpy as jnp
 import numpy as np
 import numpy.typing as npt
@@ -245,11 +246,21 @@ def primal(x: Any) -> Any:
     while is_tracer(x):
         if hasattr(x, "primal"):
             x = x.primal
-        elif hasattr(x, "val"):
+        elif hasattr(x, "val") and isinstance(
+            x.val,
+            jax.core.Tracer
+            | jax.Array
+            | np.ndarray
+            | np.generic
+            | int
+            | float
+            | bool
+            | complex,
+        ):
             x = x.val
         else:
             try:
-                return jax.core.concrete_or_error(np.asarray, x)
+                val = jax.extend.core.concrete_or_error(np.asarray, x)
             except Exception as e:  # pragma: no cover
                 raise TypeError(
                     f"Cannot get a concrete value from {type(x).__name__}. "
@@ -258,6 +269,11 @@ def primal(x: Any) -> Any:
                     "Under jax.jit, gdsfactoryx supports geometry whose structure does "
                     "not depend on the traced values; use eager jax.grad/jvp/vjp otherwise."
                 ) from e
+            else:
+                x = val
+                break
+    if type(x).__name__ == "Var":
+        raise TypeError(f"Non-concrete JAX value {type(x).__name__}")
     return x
 
 
@@ -381,11 +397,13 @@ def round_st(x: Any, decimals: int = 0, step: float | None = None) -> Any:
             )
         return np.round(x, decimals) if np.ndim(x) else float(np.round(x, decimals))
     xa = asarray(x)
+    sg = jax.lax.stop_gradient(xa)
     if step is not None:
-        rounded = jnp.round(jax.lax.stop_gradient(xa) / step) * step
+        rounded = jnp.round(sg / step) * step
     else:
-        rounded = jnp.round(jax.lax.stop_gradient(xa), decimals)
-    return xa + jax.lax.stop_gradient(rounded - xa)
+        rounded = jnp.round(sg, decimals)
+    delta = jnp.where(jnp.isfinite(sg), rounded - sg, 0.0)
+    return xa + jax.lax.stop_gradient(delta)
 
 
 DBU = 1e-3

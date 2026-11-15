@@ -3,7 +3,13 @@ from __future__ import annotations
 import pytest
 
 import gdsfactory as gf
-from gdsfactory.get_netlist import PortCenterMatcher, SmartPortMatcher, legacy_namer
+from gdsfactory.get_netlist import (
+    PortCenterMatcher,
+    SmartPortMatcher,
+    _is_virtual_instance,
+    get_netlist_recursive,
+    legacy_namer,
+)
 
 
 def test_netlist_simple() -> None:
@@ -370,3 +376,62 @@ def test_get_netlist_array_roundtrip(rotation: int, mirror: bool) -> None:
         f"  Before: {pl1}\n"
         f"  After:  {pl2}"
     )
+
+
+def test_is_virtual_instance_all_angle_and_non_orthogonal() -> None:
+    gf.gpdk.PDK.activate()
+
+    c = gf.Component()
+    ortho = c.add_ref(gf.components.straight(length=5), name="ortho")
+    off_grid = c.add_ref_off_grid(
+        gf.components.straight(length=5), name="off_grid"
+    )
+    all_angle = c.add_ref(
+        gf.components.bend_euler_all_angle(angle=33), name="all_angle"
+    )
+    rotated = c.add_ref(gf.components.straight(length=5), name="rotated")
+    rotated.rotate(35)
+
+    aa_parent = gf.ComponentAllAngle()
+    in_aa = aa_parent.add_ref(gf.components.straight(length=5), name="in_aa")
+
+    assert not _is_virtual_instance(ortho)
+    assert not _is_virtual_instance(rotated)
+    assert _is_virtual_instance(off_grid)
+    assert _is_virtual_instance(all_angle)
+    assert _is_virtual_instance(in_aa)
+
+
+def test_get_netlist_all_angle_virtual_flags_and_recursive() -> None:
+    gf.gpdk.PDK.activate()
+
+    sub = gf.ComponentAllAngle()
+    s1 = sub.add_ref(gf.components.straight(length=5), name="s1")
+    bend = sub.add_ref(
+        gf.components.bend_euler_all_angle(angle=33), name="bend"
+    )
+    bend.connect("o1", s1.ports["o2"])
+    sub.add_port("o1", port=s1.ports["o1"])
+    sub.add_port("o2", port=bend.ports["o2"])
+
+    top = gf.Component()
+    sub_ref = top.add_ref(sub, name="sub_ref")
+    s_end = top.add_ref_off_grid(
+        gf.components.straight(length=4), name="s_end"
+    )
+    s_end.connect("o1", sub_ref.ports["o2"])
+    top.add_port("o1", port=sub_ref.ports["o1"])
+    top.add_port("o2", port=s_end.ports["o2"])
+
+    flat = top.get_netlist()
+    assert flat["instances"]["sub_ref"]["virtual"] is True
+    assert flat["instances"]["s_end"]["virtual"] is True
+    assert flat["placements"]["s_end"]["rotation"] % 360 == pytest.approx(33.0)
+    assert len(flat["nets"]) == 1
+    assert flat["ports"] == {"o1": "sub_ref,o1", "o2": "s_end,o2"}
+
+    rec = get_netlist_recursive(top)
+    assert top.name in rec
+    sub_net = rec[rec[top.name]["instances"]["sub_ref"]["component"]]
+    assert sub_net["instances"]["bend"]["virtual"] is True
+    assert len(sub_net["nets"]) == 1

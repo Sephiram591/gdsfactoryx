@@ -78,7 +78,6 @@ dev = [
   "ty"
 ]
 full = [
-  "gplugins[devsim,femwell,gmsh,meow,sax,schematic,tidy3d]>=1.1,<3.0",
   "scikit-rf",
   "omegaconf",
   "autograd"
@@ -98,7 +97,11 @@ gf = "gdsfactory.cli:app"
 
 [project.urls]
 Homepage = "https://github.com/Sephiram591/gdsfactoryx"
+Repository = "https://github.com/Sephiram591/gdsfactoryx"
+Documentation = "https://github.com/Sephiram591/gdsfactoryx#readme"
+Changelog = "https://github.com/Sephiram591/gdsfactoryx/blob/main/CHANGELOG.md"
 Issues = "https://github.com/Sephiram591/gdsfactoryx/issues"
+Bifrost = "https://github.com/Sephiram591/bifrost"
 "Upstream documentation" = "https://gdsfactory.github.io/gdsfactory/"
 "Upstream project" = "https://github.com/gdsfactory/gdsfactory"
 
@@ -116,8 +119,7 @@ disable_error_code = ["import-untyped", "has-type", "no-untyped-call"]
 exclude = [
   "gdsfactory/export/to_svg.py",
   "test-data-gds/.",
-  "gdsfactory/samples/demo/layers_sky130.py",
-  "docs/notebooks/*"
+  "gdsfactory/samples/demo/layers_sky130.py"
 ]
 explicit_package_bases = true
 python_version = "3.12"
@@ -162,10 +164,6 @@ norecursedirs = [
 ]
 python_files = ["gdsfactory/*.py", "tests/*.py"]
 testpaths = ["gdsfactory", "tests"]
-
-[tool.ruff]
-extend-exclude = ['docs/notebooks/']
-fix = true
 
 [tool.ruff.lint]
 ignore = [
@@ -239,7 +237,6 @@ select = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"docs/notebooks/*.py" = ["F821", "E402", "F405", "F403", "D103"]
 "gdsfactory/components/*.py" = ["F403", "F405"]  # import *
 "gdsfactory/generic_tech/*.py" = ["F403", "F405"]  # import *
 "gdsfactory/samples/*.py" = ["N999"]  # module name
@@ -248,21 +245,6 @@ select = [
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
-
-[tool.setuptools.package-data]
-mypkg = [
-  "*.gds",
-  "*.lym",
-  "*.lyp",
-  "*.lyt",
-  "*.csv",
-  "*.yaml",
-  "*.md",
-  "LICENSE"
-]
-
-[tool.setuptools.packages]
-find = {}
 
 [tool.tbump]
 
@@ -291,9 +273,6 @@ src = "pyproject.toml"
 src = "gdsfactory/config.py"
 
 [[tool.tbump.file]]
-src = "docs/notebooks/08_pdk.py"
-
-[[tool.tbump.file]]
 src = "gdsfactory/generic_tech/klayout/grain.xml"
 
 [[tool.tbump.file]]
@@ -317,11 +296,11 @@ regex = '''
 [tool.towncrier]
 directory = ".changelog.d"
 filename = "CHANGELOG.md"
-issue_format = "[#{issue}](https://github.com/gdsfactory/gdsfactory/issues/{issue})"
+issue_format = "[#{issue}](https://github.com/Sephiram591/gdsfactoryx/issues/{issue})"
 package = "gdsfactory"
 start_string = "<!-- towncrier release notes start -->\n"
 template = ".changelog.d/changelog_template.jinja"
-title_format = "## [{version}](https://github.com/gdsfactory/gdsfactory/releases/tag/v{version}) - {project_date}"
+title_format = "## [{version}](https://github.com/Sephiram591/gdsfactoryx/releases/tag/v{version}) - {project_date}"
 underlines = ["", "", ""]
 
 [[tool.towncrier.type]]

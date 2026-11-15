@@ -30,7 +30,7 @@ import functools
 import warnings
 from collections.abc import Callable, Sequence
 from functools import partial
-from typing import TYPE_CHECKING, Any, Literal, TypedDict, Unpack, cast
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, Unpack
 
 import kfactory as kf
 import numpy as np
@@ -38,7 +38,7 @@ from rich.console import Console
 from rich.table import Table
 
 from gdsfactory import typings
-from gdsfactory._jax import to_float
+from gdsfactory._jax import to_float, to_numpy
 from gdsfactory._ports import Port  # differentiable port
 from gdsfactory.typings import (
     AngleInDegrees,
@@ -101,7 +101,7 @@ def pprint_ports(ports: Ports) -> None:
             str(i)
             for i in [
                 port.name,
-                round(to_float(port.width), 3),
+                round(to_float(port.width), 3) if port.width is not None else None,
                 to_float(port.orientation) if port.orientation is not None else None,
                 port.layer_info,
                 tuple(round(to_float(v), 4) for v in port.center),
@@ -115,12 +115,20 @@ def pprint_ports(ports: Ports) -> None:
 
 def to_dict(port: Port) -> dict[str, Any]:
     """Returns dict."""
+    center = (
+        tuple(float(v) for v in to_numpy(port.center_array))
+        if hasattr(port, "center_array")
+        else tuple(float(to_float(v)) for v in port.center)
+    )
+    layer = int(port.layer) if isinstance(port.layer, np.integer) else port.layer
     return {
         "name": port.name,
-        "center": port.center,
-        "width": port.width,
-        "orientation": port.orientation,
-        "layer": port.layer,
+        "center": center,
+        "width": None if port.width is None else float(to_float(port.width)),
+        "orientation": (
+            None if port.orientation is None else float(to_float(port.orientation))
+        ),
+        "layer": layer,
         "port_type": port.port_type,
     }
 
@@ -164,7 +172,9 @@ def port_array(
             xs = get_cross_section(xs.copy(width=width))
 
         kwargs.pop("cross_section", None)
-        port_layer = kwargs.pop("layer", None) or get_layer(xs.layer)
+        port_layer = kwargs.pop("layer", None)
+        if port_layer is None:
+            port_layer = get_layer(xs.layer)
         info = kwargs.get("info", {})
         info["cross_section"] = xs.name
         kwargs["info"] = info
@@ -366,8 +376,12 @@ def select_ports(
     if layers_excluded:
         excluded_layers = {get_layer(layer) for layer in layers_excluded}
         ports_ = [p for p in ports_ if p.layer not in excluded_layers]
-    if width:
-        ports_ = [p for p in ports_ if np.isclose(to_float(p.width), to_float(width))]
+    if width is not None:
+        ports_ = [
+            p
+            for p in ports_
+            if p.width is not None and np.isclose(to_float(p.width), to_float(width))
+        ]
     if port_type:
         ports_ = [p for p in ports_ if p.port_type == port_type]
     if names:
@@ -409,6 +423,18 @@ def move_copy(port: typings.Port, x: int = 0, y: int = 0) -> typings.Port:
     return _port
 
 
+def _facing_direction(orientation: Any) -> Literal["E", "N", "W", "S"]:
+    """Classify a port orientation in degrees into cardinal side E/N/W/S."""
+    angle = to_float(orientation) % 360
+    if angle <= 45 or angle >= 315:
+        return "E"
+    if angle <= 135:
+        return "N"
+    if angle <= 225:
+        return "W"
+    return "S"
+
+
 def get_ports_facing(
     ports: Sequence[typings.Port], direction: str = "W"
 ) -> list[typings.Port]:
@@ -429,15 +455,9 @@ def get_ports_facing(
     }
 
     for p in ports:
-        angle = p.orientation % 360
-        if angle <= 45 or angle >= 315:
-            direction_ports["E"].append(p)
-        elif angle <= 135:
-            direction_ports["N"].append(p)
-        elif angle <= 225:
-            direction_ports["W"].append(p)
-        else:
-            direction_ports["S"].append(p)
+        if p.orientation is None:
+            continue
+        direction_ports[_facing_direction(p.orientation)].append(p)
 
     return direction_ports[direction]
 
@@ -590,15 +610,9 @@ def rename_ports_by_orientation(
     ports_on_layer = [p for p in ports if p.layer not in layers_excluded]
 
     for p in ports_on_layer:
-        angle = p.orientation % 360
-        if angle <= 45 or angle >= 315:
-            direction_ports["E"].append(p)
-        elif angle <= 135:
-            direction_ports["N"].append(p)
-        elif angle <= 225:
-            direction_ports["W"].append(p)
-        else:
-            direction_ports["S"].append(p)
+        if p.orientation is None:
+            continue
+        direction_ports[_facing_direction(p.orientation)].append(p)
 
     function(direction_ports, prefix=prefix)
     return component
@@ -720,19 +734,17 @@ def map_ports_layer_to_orientation(
         ports_on_layer = [p.copy() for p in selected_ports if p.layer == layer]
 
         for p in ports_on_layer:
-            p.name_original = p.name  # type: ignore[attr-defined]
-            angle = p.orientation % 360
-            if angle <= 45 or angle >= 315:
-                direction_ports["E"].append(cast(kf.DPort, p))  # type: ignore[redundant-cast]
-            elif angle <= 135 and angle >= 45:
-                direction_ports["N"].append(cast(kf.DPort, p))  # type: ignore[redundant-cast]
-            elif angle <= 225 and angle >= 135:
-                direction_ports["W"].append(cast(kf.DPort, p))  # type: ignore[redundant-cast]
-            else:
-                direction_ports["S"].append(cast(kf.DPort, p))  # type: ignore[redundant-cast]
+            p.name_original = p.name
+            if p.orientation is None:
+                continue
+            direction_ports[_facing_direction(p.orientation)].append(p)
         layer_tuple = layer if isinstance(layer, kf.LayerEnum) else (layer, 0)
         function(direction_ports, prefix=f"{layer_tuple[0]}_{layer_tuple[1]}_")
-        m |= {p.name: p.name_original for p in ports_on_layer}  # type: ignore[attr-defined,misc]
+        m |= {
+            p.name: p.name_original
+            for p in ports_on_layer
+            if p.name is not None and p.name_original is not None
+        }
     return m
 
 
@@ -763,18 +775,16 @@ def map_ports_to_orientation_cw(
     ports_on_layer = [p.copy() for p in selected_ports]
 
     for p in ports_on_layer:
-        p.name_original = p.name  # type: ignore[attr-defined]
-        angle = p.orientation % 360
-        if angle <= 45 or angle >= 315:
-            direction_ports["E"].append(p)
-        elif angle <= 135:
-            direction_ports["N"].append(p)
-        elif angle <= 225:
-            direction_ports["W"].append(p)
-        else:
-            direction_ports["S"].append(p)
+        p.name_original = p.name
+        if p.orientation is None:
+            continue
+        direction_ports[_facing_direction(p.orientation)].append(p)
     function(direction_ports)
-    return {p.name: p.name_original for p in ports_on_layer}  # type: ignore[attr-defined,misc]
+    return {
+        p.name: p.name_original
+        for p in ports_on_layer
+        if p.name is not None and p.name_original is not None
+    }
 
 
 map_ports_to_orientation_ccw = partial(
@@ -808,23 +818,17 @@ def auto_rename_ports_layer_orientation(
         ports_on_layer = [p for p in ports if p.layer == layer]
 
         for p in ports_on_layer:
-            p.name_original = p.name  # type: ignore[attr-defined]
-            angle = p.orientation % 360
-            if angle <= 45 or angle >= 315:
-                direction_ports["E"].append(cast(kf.DPort, p))  # type: ignore[redundant-cast]
-            elif angle <= 135 and angle >= 45:
-                direction_ports["N"].append(cast(kf.DPort, p))  # type: ignore[redundant-cast]
-            elif angle <= 225 and angle >= 135:
-                direction_ports["W"].append(cast(kf.DPort, p))  # type: ignore[redundant-cast]
-            else:
-                direction_ports["S"].append(cast(kf.DPort, p))  # type: ignore[redundant-cast]
+            p.name_original = p.name
+            if p.orientation is None:
+                continue
+            direction_ports[_facing_direction(p.orientation)].append(p)
 
         layer_tuple = layer if isinstance(layer, kf.LayerEnum) else (layer, 0)
 
         function(direction_ports, prefix=f"{layer_tuple[0]}_{layer_tuple[1]}_")
         new_ports.update(
             {
-                p.name: cast(kf.DPort, p)  # type: ignore[redundant-cast]
+                p.name: p
                 for p in ports_on_layer
                 if p.name is not None
             }

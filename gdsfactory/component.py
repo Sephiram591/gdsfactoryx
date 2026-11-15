@@ -30,6 +30,7 @@ from gdsfactory._jax import (
     is_tracer,
     maybe_float,
     points_array,
+    primal,
     safe_arctan2,
     snap_dbu,
     stop_gradient,
@@ -240,6 +241,78 @@ class Box:
         )
 
 
+def _mirror_transform(p1: Any = (0.0, 1.0), p2: Any = (0.0, 0.0)) -> Transform:
+    """Returns a Transform mirroring across the line through p1 and p2."""
+    if isinstance(p1, Port):
+        p1 = p1.center_array
+    if isinstance(p2, Port):
+        p2 = p2.center_array
+    p1_arr = asarray(p1)
+    p2_arr = asarray(p2)
+    d = p2_arr - p1_arr
+    theta = xp.degrees(safe_arctan2(d[1], d[0]))
+    # mirror across line at angle theta through p1: T(p1) R(theta) M R(-theta) T(-p1)
+    return (
+        Transform(p1_arr[0], p1_arr[1])
+        * Transform(0.0, 0.0, 2 * theta, mirror=True)
+        * Transform(-p1_arr[0], -p1_arr[1])
+    )
+
+
+def _to_yaml_value(value: Any, *, before_clean: bool = False) -> Any:
+    """Recursively converts Info/Box/Point2/NumPy/JAX values to YAML-safe Python types."""
+    if is_tracer(value):
+        try:
+            value = primal(value)
+        except TypeError:
+            return repr(value)
+    if type(value).__module__.startswith("jax"):
+        arr = np.asarray(value)
+        if arr.ndim == 0:
+            return arr.item()
+        return [_to_yaml_value(v, before_clean=before_clean) for v in arr.tolist()]
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return [_to_yaml_value(v, before_clean=before_clean) for v in value.tolist()]
+    if isinstance(value, dict):
+        return {
+            (
+                k.item()
+                if isinstance(k, np.generic)
+                else k
+                if isinstance(k, str | int | float | bool | type(None))
+                else str(k)
+            ): _to_yaml_value(v, before_clean=before_clean)
+            for k, v in value.items()
+        }
+    if isinstance(value, Box) or (
+        hasattr(value, "left")
+        and hasattr(value, "bottom")
+        and hasattr(value, "right")
+        and hasattr(value, "top")
+        and not callable(getattr(value, "left", None))
+    ):
+        return {
+            "left": _to_yaml_value(value.left, before_clean=before_clean),
+            "bottom": _to_yaml_value(value.bottom, before_clean=before_clean),
+            "right": _to_yaml_value(value.right, before_clean=before_clean),
+            "top": _to_yaml_value(value.top, before_clean=before_clean),
+        }
+    if isinstance(value, Point2):
+        return [
+            _to_yaml_value(value[0], before_clean=before_clean),
+            _to_yaml_value(value[1], before_clean=before_clean),
+        ]
+    if before_clean:
+        if isinstance(value, list | tuple):
+            return [_to_yaml_value(v, before_clean=True) for v in value]
+        return value
+    if isinstance(value, list | tuple | set):
+        return [_to_yaml_value(v, before_clean=False) for v in value]
+    return value
+
+
 def _box_from_points(pts: Array) -> Box:
     mn = xp.min(pts, axis=0)
     mx = xp.max(pts, axis=0)
@@ -407,7 +480,7 @@ class SizeInfo:
 
     @property
     def cc(self) -> Array:
-        return self.center
+        return xp.stack([asarray(self.center[0]), asarray(self.center[1])])
 
 
 # --------------------------------------------------------------------------
@@ -660,17 +733,15 @@ class ComponentReference(_BBoxMixin):
 
     dmove = move
 
-    def movex(self, *args: Any) -> Self:
-        if len(args) == 1:
-            return self.move(args[0], 0.0)
-        origin, destination = args
-        return self.move(destination - origin, 0.0)
+    def movex(self, origin: Any = 0.0, destination: Any = None) -> Self:
+        """Moves the reference in x by delta = origin if destination is None else destination - origin."""
+        delta = origin if destination is None else destination - origin
+        return self.move(delta, 0.0)
 
-    def movey(self, *args: Any) -> Self:
-        if len(args) == 1:
-            return self.move(0.0, args[0])
-        origin, destination = args
-        return self.move(0.0, destination - origin)
+    def movey(self, origin: Any = 0.0, destination: Any = None) -> Self:
+        """Moves the reference in y by delta = origin if destination is None else destination - origin."""
+        delta = origin if destination is None else destination - origin
+        return self.move(0.0, delta)
 
     dmovex = movex
     dmovey = movey
@@ -689,21 +760,7 @@ class ComponentReference(_BBoxMixin):
 
     def mirror(self, p1: Any = (0.0, 1.0), p2: Any = (0.0, 0.0)) -> Self:
         """Mirrors across the line through p1 and p2."""
-        if isinstance(p1, Port):
-            p1 = p1.center_array
-        if isinstance(p2, Port):
-            p2 = p2.center_array
-        p1 = asarray(p1)
-        p2 = asarray(p2)
-        d = p2 - p1
-        theta = xp.degrees(safe_arctan2(d[1], d[0]))
-        # mirror across line at angle theta through p1: T(p1) R(theta) M R(-theta) T(-p1)
-        t = (
-            Transform(p1[0], p1[1])
-            * Transform(0.0, 0.0, 2 * theta, mirror=True)
-            * Transform(-p1[0], -p1[1])
-        )
-        return self.transform_by(t)
+        return self.transform_by(_mirror_transform(p1, p2))
 
     dmirror = mirror
 
@@ -1077,6 +1134,7 @@ class Component(_BBoxMixin):
         self._has_tracers_cache: bool | None = None
         self.lvs_equivalent_ports: list[list[str]] | None = None
         self.vinsts: tuple[ComponentReference, ...] = ()
+        self.tags: list[str] = []
         if kwargs:
             for k, v in kwargs.items():
                 setattr(self, k, v)
@@ -1233,13 +1291,16 @@ class Component(_BBoxMixin):
         keep_mirror: bool = False,
         cross_section: CrossSectionSpec | None = None,
         register_cross_section: bool = False,
+        overwrite: bool = False,
     ) -> Port:
         """Adds a Port to the Component."""
         self._check_unlocked()
+        from gdsfactory._cell import _SNAP_PORTS_OVERRIDE
         from gdsfactory.pdk import get_active_pdk, get_cross_section, get_layer
 
         info: dict[str, Any] = {}
         mirror = False
+        _from_port = port is not None
         if port is not None:
             center = center if center is not None else port.center
             width = width if width is not None else port.width
@@ -1268,8 +1329,18 @@ class Component(_BBoxMixin):
 
         if port_type is None:
             port_type = "optical"
-        if orientation is None:
+        if orientation is None and not _from_port:
             orientation = 0
+
+        if (
+            port_type == "optical"
+            and name is not None
+            and name in self.ports
+            and not overwrite
+        ):
+            raise AddPortError(
+                f"Port name {name!r} already exists in component {self.name!r}."
+            )
 
         if port_type not in CONF.port_types:
             warnings.warn(
@@ -1280,11 +1351,17 @@ class Component(_BBoxMixin):
 
         if layer is None:
             raise AddPortError("Must specify layer or cross_section")
-        if width is None:
+        if width is None and not _from_port:
             raise AddPortError("Must specify width or cross_section")
         if center is None:
             raise AddPortError("Must specify center or port")
 
+        _snap_override = _SNAP_PORTS_OVERRIDE.get()
+        _on_grid = (
+            not self._virtual
+            if _snap_override is None
+            else (_snap_override and not self._virtual)
+        )
         _port = Port(
             name=name,
             center=center,
@@ -1294,7 +1371,7 @@ class Component(_BBoxMixin):
             port_type=port_type,
             info=info,
             mirror=mirror,
-            on_grid=not self._virtual,
+            on_grid=_on_grid,
         )
         if xs_name and xs is not None:
             _port.info["cross_section"] = xs_name
@@ -1309,6 +1386,8 @@ class Component(_BBoxMixin):
                 pdk = get_active_pdk()
                 if xs_name not in pdk.cross_sections:
                     pdk.register_cross_sections(**{xs_name: lambda: xs})
+        if overwrite and name is not None and name in self.ports:
+            self.ports.remove(name)
         self.ports.append(_port)
         return _port
 
@@ -1433,7 +1512,7 @@ class Component(_BBoxMixin):
             a=xp.stack([asarray(column_pitch), asarray(0.0)]),
             b=xp.stack([asarray(0.0), asarray(row_pitch)]),
         )
-        if self._virtual:
+        if self._virtual or getattr(component, "_virtual", False):
             # references in virtual (all-angle) cells are virtual (kfactory VInstance)
             ref.virtual = True
         self.insts.append(ref)
@@ -1820,6 +1899,7 @@ class Component(_BBoxMixin):
         c.info = self.info.model_copy(deep=False)
         c.settings = self.settings.model_copy(deep=False)
         c.routes = dict(self.routes)
+        c.tags = list(self.tags)
         c.vinsts = ()
         c.locked = False
         return c
@@ -1984,14 +2064,19 @@ class Component(_BBoxMixin):
         r = r.sized(d, d, corner_mode)
         self._replace_layer(key, kb.region_to_arrays(r))
 
-    def over_under(self, layer: LayerSpec, distance: float = 1.0) -> None:
-        """Grows then shrinks polygons (removes small gaps; KLayout, non-differentiable)."""
+    def over_under(self, layer: LayerSpec, distance: float = 0.001) -> None:
+        """Grows then shrinks polygons (removes small gaps; KLayout, non-differentiable).
+
+        Args:
+            layer: Layer to resize.
+            distance: Over/under sizing distance in um (default 0.001 um = 1 nm = 1 DBU).
+        """
         self._check_unlocked()
         from gdsfactory import klayout_bridge as kb
 
         key = _layer_key(layer)
         polys = self._flat_polygons(layer=layer).get(key, [])
-        d = round(to_float(distance) * 1e3)
+        d = round(to_float(distance) / get_dbu())
         r = kb.arrays_to_region(polys).sized(d).sized(-d)
         self._replace_layer(key, kb.region_to_arrays(r))
 
@@ -2274,24 +2359,48 @@ class Component(_BBoxMixin):
         """
         return self.to_kfactory().connectivity_check(*args, **kwargs)
 
-    def get_boxes(self, layer: LayerSpec, recursive: bool = True) -> list[Any]:
-        """Axis-aligned rectangles on a layer as kdb.DBox (concrete)."""
+    def get_boxes(
+        self,
+        layer: LayerSpec | None = None,
+        recursive: bool = True,
+        merge: bool = False,
+    ) -> list[Any]:
+        """Axis-aligned rectangles on a layer (or all layers) as kdb.DBox (concrete)."""
         import klayout.db as kdb
 
-        key = _layer_key(layer)
-        polys = (
-            self._flat_polygons(layer=layer).get(key, [])
-            if recursive
-            else self.polygons.get(key, [])
-        )
+        from gdsfactory import klayout_bridge as kb
+
+        if layer is not None:
+            key = _layer_key(layer)
+            by_layer: dict[int, list[Array]] = {
+                key: (
+                    self._flat_polygons(layer=layer).get(key, [])
+                    if recursive
+                    else self.polygons.get(key, [])
+                )
+            }
+        else:
+            by_layer = (
+                self._flat_polygons() if recursive else dict(self.polygons)
+            )
+
         boxes = []
-        for p in polys:
-            q = to_numpy(p)
-            if q.shape[0] == 4:
-                xs = set(np.round(q[:, 0], 9))
-                ys = set(np.round(q[:, 1], 9))
-                if len(xs) == 2 and len(ys) == 2:
-                    boxes.append(kdb.DBox(min(xs), min(ys), max(xs), max(ys)))
+        for polys in by_layer.values():
+            if merge and polys:
+                polys = kb.region_to_arrays(kb.merge_arrays(polys))
+            for p in polys:
+                q = to_numpy(p)
+                if q.shape[0] == 5 and np.allclose(q[0], q[-1], atol=1e-9):
+                    q = q[:4]
+                if q.shape[0] == 4:
+                    xs = set(np.round(q[:, 0], 9))
+                    ys = set(np.round(q[:, 1], 9))
+                    if (
+                        len(xs) == 2
+                        and len(ys) == 2
+                        and len({(round(x, 9), round(y, 9)) for x, y in q}) == 4
+                    ):
+                        boxes.append(kdb.DBox(min(xs), min(ys), max(xs), max(ys)))
         return boxes
 
     def get_paths(self, layer: LayerSpec, recursive: bool = True) -> list[Any]:
@@ -2378,11 +2487,15 @@ class Component(_BBoxMixin):
     dy = y
     dcenter = center
 
-    def movex(self, dx: Any) -> Self:
-        return self.move(dx, 0.0)
+    def movex(self, origin: Any = 0.0, destination: Any = None) -> Self:
+        """Moves the component in x by delta = origin if destination is None else destination - origin."""
+        delta = origin if destination is None else destination - origin
+        return self.move(delta, 0.0)
 
-    def movey(self, dy: Any) -> Self:
-        return self.move(0.0, dy)
+    def movey(self, origin: Any = 0.0, destination: Any = None) -> Self:
+        """Moves the component in y by delta = origin if destination is None else destination - origin."""
+        delta = origin if destination is None else destination - origin
+        return self.move(0.0, delta)
 
     dmove = move
     dmovex = movex
@@ -2392,6 +2505,19 @@ class Component(_BBoxMixin):
         self._check_unlocked()
         self.polygons = {k: [t.apply(p) for p in v] for k, v in self.polygons.items()}
         self.labels = [lab.transformed(t) for lab in self.labels]
+        scale = t.magnification
+        self._paths = {
+            k: [
+                (
+                    t.apply(pts),
+                    width * scale
+                    if is_tracer(scale) or float(scale) != 1.0
+                    else width,
+                )
+                for pts, width in v
+            ]
+            for k, v in self._paths.items()
+        }
         for r in self.insts:
             r.transform_by(t)
         for p in self.ports:
@@ -2404,13 +2530,18 @@ class Component(_BBoxMixin):
             Transform(c[0], c[1]) * Transform(0.0, 0.0, angle) * Transform(-c[0], -c[1])
         )
 
+    drotate = rotate
+
+    def mirror(self, p1: Any = (0.0, 1.0), p2: Any = (0.0, 0.0)) -> Self:
+        """Mirrors the component across the line through p1 and p2."""
+        return self.transform(_mirror_transform(p1, p2))
+
+    dmirror = mirror
+
     def mirror_x(self, x: Any = 0.0) -> Self:
-        x = asarray(x)
-        return self.transform(
-            Transform(x, 0.0)
-            * Transform(0.0, 0.0, 180.0, mirror=True)
-            * Transform(-x, 0.0)
-        )
+        return self.mirror((x, 0.0), (x, 1.0))
+
+    dmirror_x = mirror_x
 
     def mirror_y(self, y: Any = 0.0) -> Self:
         y = asarray(y)
@@ -2419,6 +2550,8 @@ class Component(_BBoxMixin):
             * Transform(0.0, 0.0, 0.0, mirror=True)
             * Transform(0.0, -y)
         )
+
+    dmirror_y = mirror_y
 
     def __getitem__(self, key: str) -> Port:
         return self.ports[key]
@@ -2440,6 +2573,9 @@ class Component(_BBoxMixin):
         save_options: Any = None,
         with_metadata: bool = True,
         exclude_layers: Sequence[Any] | None = None,
+        max_vertex_count: int | None = None,
+        add_pins_function: Any = None,
+        pins: Any = None,
         **kwargs: Any,
     ) -> pathlib.Path:
         """Writes the component to GDS (coordinates rounded to 1 nm)."""
@@ -2450,12 +2586,25 @@ class Component(_BBoxMixin):
         gdsdir = pathlib.Path(gdsdir or GDSDIR_TEMP)
         gdspath = pathlib.Path(gdspath or gdsdir / f"{self.name}.gds")
         gdspath.parent.mkdir(parents=True, exist_ok=True)
+        target = self
+        will_add_pins = (
+            add_pins_function is not None
+            or callable(pins)
+            or pins is True
+            or (pins is None and bool(getattr(CONF, "add_pins", False)))
+        )
+        if will_add_pins and self.locked:
+            target = self.copy()
+            target._name = self.name
         write(
-            self,
+            target,
             gdspath,
             save_options=save_options,
             with_metadata=with_metadata,
             exclude_layers=exclude_layers,
+            max_vertex_count=max_vertex_count,
+            add_pins_function=add_pins_function,
+            pins=pins,
         )
         return gdspath
 
@@ -2513,9 +2662,16 @@ class Component(_BBoxMixin):
             d["ports"] = {
                 port.name: to_dict(port) for port in self.ports if port.name is not None
             }
-        res = clean_value_json(d)
+        prepared = _to_yaml_value(d, before_clean=True)
+        res = _to_yaml_value(clean_value_json(prepared), before_clean=False)
         assert isinstance(res, dict)
         return res
+
+    def pprint(self, with_ports: bool = False) -> None:
+        """Prints a YAML summary of the Component."""
+        import yaml
+
+        print(yaml.safe_dump(self.to_dict(with_ports=with_ports), sort_keys=False))
 
     def get_netlist(self, recursive: bool = False, **kwargs: Any) -> dict[str, Any]:
         """Returns the netlist (recursive=True: netlists of all hierarchy levels)."""
@@ -2857,6 +3013,7 @@ boolean_operations = {
 def container(
     component: Any,
     function: Callable[..., None] | None = None,
+    copy_ports: bool = True,
     **kwargs: Any,
 ) -> Component:
     """Returns new component with a component reference.
@@ -2864,6 +3021,7 @@ def container(
     Args:
         component: to add to container.
         function: function to apply to component.
+        copy_ports: if True, copies ports from the referenced component.
         kwargs: keyword arguments to pass to function.
     """
     import gdsfactory as gf
@@ -2871,7 +3029,8 @@ def container(
     component = gf.get_component(component)
     c = Component()
     cref = c << component
-    c.add_ports(cref.ports)
+    if copy_ports:
+        c.add_ports(cref.ports)
     if function:
         function(c, **kwargs)
     c.copy_child_info(component)

@@ -458,6 +458,8 @@ def trim(
 
     # Clipping is a (non-differentiable) KLayout boolean: the component is
     # flattened and every layer is AND-ed with the domain bounding box.
+    if component.locked:
+        component = component.copy()
     component.flatten()
     box = gf.kdb.Box(
         round(to_float(left) / gf.kcl.dbu),
@@ -570,3 +572,6 @@ def remove_shapes_near_exclusion(
     # Clear target layer and add cleaned geometry
     c.polygons[target_layer_kdb] = kb.region_to_arrays(cleaned_region)
     return c
+
+
+from gdsfactory.component import container  # noqa: E402, F401

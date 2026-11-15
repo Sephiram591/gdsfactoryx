@@ -159,9 +159,10 @@ class Path:
         self.info: dict[str, Any] = {}
         if path is not None:
             if isinstance(path, Path):
-                self.points = path.points
+                self.points = _copy_points(path.points)
                 self.start_angle = path.start_angle
                 self.end_angle = path.end_angle
+                self.info = path.info.copy()
             elif _is_points_like(path):
                 self.points = _as_points(path)
                 if len(self.points) > 1:
@@ -238,29 +239,62 @@ class Path:
     def xmin(self) -> Any:
         return xp.min(self.points[:, 0])
 
+    @xmin.setter
+    def xmin(self, value: Any) -> None:
+        self.move(value - self.xmin, 0.0)
+
     @property
     def xmax(self) -> Any:
         return xp.max(self.points[:, 0])
+
+    @xmax.setter
+    def xmax(self, value: Any) -> None:
+        self.move(value - self.xmax, 0.0)
 
     @property
     def ymin(self) -> Any:
         return xp.min(self.points[:, 1])
 
+    @ymin.setter
+    def ymin(self, value: Any) -> None:
+        self.move(0.0, value - self.ymin)
+
     @property
     def ymax(self) -> Any:
         return xp.max(self.points[:, 1])
+
+    @ymax.setter
+    def ymax(self, value: Any) -> None:
+        self.move(0.0, value - self.ymax)
 
     @property
     def x(self) -> Any:
         return (self.xmin + self.xmax) / 2
 
+    @x.setter
+    def x(self, value: Any) -> None:
+        self.move(value - self.x, 0.0)
+
     @property
     def y(self) -> Any:
         return (self.ymin + self.ymax) / 2
 
+    @y.setter
+    def y(self, value: Any) -> None:
+        self.move(0.0, value - self.y)
+
     @property
     def center(self) -> Array:
         return xp.stack([self.x, self.y])
+
+    @center.setter
+    def center(self, value: Any) -> None:
+        if hasattr(value, "x") and hasattr(value, "y"):
+            vx, vy = value.x, value.y
+        else:
+            vx, vy = value[0], value[1]
+        c = self.center
+        self.move(vx - c[0], vy - c[1])
 
     @property
     def xsize(self) -> Any:
@@ -269,6 +303,16 @@ class Path:
     @property
     def ysize(self) -> Any:
         return self.ymax - self.ymin
+
+    dxmin = xmin
+    dxmax = xmax
+    dymin = ymin
+    dymax = ymax
+    dx = x
+    dy = y
+    dcenter = center
+    dxsize = xsize
+    dysize = ysize
 
     def move(self, *args: Any) -> Path:
         """Moves the path.
@@ -283,11 +327,18 @@ class Path:
 
     dmove = move
 
-    def movex(self, dx: Any) -> Path:
-        return self.move(dx, 0.0)
+    def movex(self, origin: Any = 0.0, destination: Any = None) -> Path:
+        """Moves the path in x by delta = origin if destination is None else destination - origin."""
+        delta = origin if destination is None else destination - origin
+        return self.move(delta, 0.0)
 
-    def movey(self, dy: Any) -> Path:
-        return self.move(0.0, dy)
+    def movey(self, origin: Any = 0.0, destination: Any = None) -> Path:
+        """Moves the path in y by delta = origin if destination is None else destination - origin."""
+        delta = origin if destination is None else destination - origin
+        return self.move(0.0, delta)
+
+    dmovex = movex
+    dmovey = movey
 
     def rotate(self, angle: Any = 45, center: Any = (0.0, 0.0)) -> Path:
         """Rotates the path (degrees, counter-clockwise) around center."""
@@ -539,7 +590,7 @@ class Path:
         """Returns a copy of the Path."""
         p = Path()
         p.info = self.info.copy()
-        p.points = self.points
+        p.points = _copy_points(self.points)
         p.start_angle = self.start_angle
         p.end_angle = self.end_angle
         return p
@@ -561,8 +612,12 @@ class Path:
     def mirror_x(self, x: Any = 0.0) -> Path:
         return self.mirror((x, 1), (x, 0))
 
+    dmirror_x = mirror_x
+
     def mirror_y(self, y: Any = 0.0) -> Path:
         return self.mirror((1, y), (0, y))
+
+    dmirror_y = mirror_y
 
     def invert(self) -> Path:
         """Inverts the Path by reversing the order of its points."""
@@ -572,6 +627,13 @@ class Path:
             _mod360(self.start_angle + 180),
         )
         return self
+
+
+def _copy_points(pts: Any) -> Any:
+    """Copies concrete NumPy point arrays while keeping JAX arrays/tracers intact."""
+    if isinstance(pts, jax.Array) or is_tracer(pts):
+        return pts
+    return np.array(pts, dtype=np.float64, copy=True)
 
 
 def _as_points(path: Any) -> Array:
@@ -1759,13 +1821,41 @@ def euler(
         num_pts_euler = 0
         num_pts_arc = 2
 
+    if is_small_angle:
+        if num_pts_euler <= 0:
+            frac: Any = np.linspace(0.0, 1.0, max(2 * num_pts_arc - 3, 2))
+        else:
+            u = (
+                np.sqrt(np.linspace(0.0, 1.0, num_pts_euler))
+                if angular_step is not None
+                else np.linspace(0.0, 1.0, num_pts_euler)
+            )
+            v = np.linspace(0.0, 1.0, num_pts_arc)
+            f1 = (u * p) / (1.0 + p)
+            f2 = (p + 0.5 * (1.0 - p) * v) / (1.0 + p)
+            fh = xp.concatenate([asarray(f1), asarray(f2[1:])])
+            frac = xp.concatenate([fh[: -1 if len(fh) > 1 else None], 1.0 - fh[::-1]])
+        total_x = radius * alpha if use_eff else radius * (1.0 + p) * alpha
+        px = asarray(frac) * total_x
+        py = xp.zeros_like(px)
+        path = Path()
+        path.points = xp.stack([px, py], axis=1)
+        path.start_angle = 0.0
+        path.end_angle = _mod360(orig_angle)
+        path.info["Reff"] = radius if use_eff else np.inf
+        path.info["Rmin"] = np.inf if use_eff else radius
+        return path
+
     if num_pts_euler > 0:
         if angular_step is not None:
             xbend1, ybend1 = _fresnel_angular(R0, sp, num_pts_euler)
         else:
             xbend1, ybend1 = _fresnel(R0, sp, num_pts_euler)
         x_p, y_p = xbend1[-1], ybend1[-1]
-        sinc_quarter = xp.sinc(p * alpha / (4 * xp.pi))
+        q_arg = p * alpha / 4
+        q_nz = xp.abs(q_arg) > 1e-8
+        q_safe = xp.where(q_nz, q_arg, 1.0)
+        sinc_quarter = xp.where(q_nz, xp.sin(q_safe) / q_safe, 1.0 - q_arg**2 / 6.0)
         dx = x_p - sp / 2 * sinc_quarter * xp.cos(p * alpha / 4)
         dy = y_p - (sp**3 / 8) * sinc_quarter**2
     else:
@@ -1830,7 +1920,8 @@ def euler(
     path.info["Reff"] = Reff * scale if not is_small_angle else np.inf
     path.info["Rmin"] = Rmin * scale if not is_small_angle else np.inf
     if mirror:
-        path.mirror((1, 0))
+        path.points = xp.stack([path.points[:, 0], -path.points[:, 1]], axis=1)
+        path.end_angle = _mod360(-path.end_angle)
     return path
 
 
@@ -1981,7 +2072,9 @@ def straight(length: float = 10.0, npoints: int = 2) -> Path:
     points = xp.stack([x, y]).T
 
     p = Path()
-    p.append(points)
+    p.points = points
+    p.start_angle = 0.0
+    p.end_angle = 0.0
     return p
 
 

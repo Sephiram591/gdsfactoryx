@@ -3,15 +3,21 @@
 [![tests](https://github.com/Sephiram591/gdsfactoryx/actions/workflows/test_code.yml/badge.svg)](https://github.com/Sephiram591/gdsfactoryx/actions/workflows/test_code.yml)
 [![MIT](https://img.shields.io/github/license/Sephiram591/gdsfactoryx)](https://choosealicense.com/licenses/mit/)
 
-**gdsfactoryx** is a port of [GDSFactory](https://github.com/gdsfactory/gdsfactory) (9.51.0) with a differentiable
-[JAX](https://jax.readthedocs.io) geometry backend: polygons, ports, references and routes are float64 JAX-compatible
-arrays, so any scalar computed from a layout can be differentiated with `jax.grad` with respect to the parameters of
-the cell functions. KLayout is kept for GDS I/O, viewing and boolean operations. The API is gdsfactory's: you still
+**gdsfactoryx** (`9.51.0.post2`) is the JAX-differentiable port of upstream
+[GDSFactory](https://github.com/gdsfactory/gdsfactory) (`v9.51.0`), built to power
+[bifrost](https://github.com/Sephiram591/bifrost) (end-to-end differentiable 3D FDTD photonics simulation with
+`fdtdx`, `LayerStack`-to-3D permittivity voxelization, and an interactive 3D viewer).
+
+In `gdsfactoryx`, polygons, ports, references, paths, cross-sections, and routes use a pure-Python/JAX array backend
+(`gdsfactory._jax.xp`), so layout geometry can be differentiated with `jax.grad` and compiled under fixed-topology
+`jax.jit` (and `@bf.jit` in `bifrost`) with respect to component parameters. `klayout.db` is kept for concrete GDS/OASIS
+I/O, viewing, and discrete boolean/DRC operations. The public API remains gdsfactory's: you still
 `import gdsfactory as gf`.
 
-- **Documentation**: gdsfactoryx has no docs of its own. Use the gdsfactory docs: https://gdsfactory.github.io/gdsfactory/
-- **FDTD simulation** of components and layer stacks (fdtdx), and the 3D viewer, live in
-  [bifrost](https://github.com/Sephiram591/bifrost).
+- **Documentation**: `gdsfactoryx` keeps upstream `gdsfactory` APIs; see the
+  [GDSFactory docs](https://gdsfactory.github.io/gdsfactory/) for general layout/PDK usage.
+- **FDTD simulation & 3D viewer**: live in [bifrost](https://github.com/Sephiram591/bifrost) (`import bifrost as bf`),
+  which consumes `gdsfactoryx` `Component`s and `LayerStack` definitions directly.
 
 ```python
 import jax
@@ -23,37 +29,65 @@ jax.grad(lambda r: gf.components.ring_single(radius=r).dxsize)(10.0)
 
 ## Installation
 
-gdsfactoryx installs the same top-level `gdsfactory` package as upstream
-[gdsfactory](https://github.com/gdsfactory/gdsfactory), so the two cannot share an environment. Remove upstream
-first, then install:
+`gdsfactoryx` provides the same top-level `gdsfactory` import package as upstream
+[gdsfactory](https://github.com/gdsfactory/gdsfactory), so the two distributions cannot share an environment. Remove
+upstream `gdsfactory` first, then install `gdsfactoryx` with `uv` or `pip`:
 
 ```bash
+# With uv
+uv pip uninstall gdsfactory
+uv pip install gdsfactoryx
+
+# Or with pip
 pip uninstall -y gdsfactory
 pip install gdsfactoryx
 ```
 
-To install the latest development version from GitHub instead:
+To install the latest development version from GitHub:
 
 ```bash
-pip install "gdsfactoryx @ git+https://github.com/Sephiram591/gdsfactoryx.git"
+uv pip install "gdsfactoryx @ git+https://github.com/Sephiram591/gdsfactoryx.git"
+# or: pip install "gdsfactoryx @ git+https://github.com/Sephiram591/gdsfactoryx.git"
 ```
 
-If both distributions end up installed, `import gdsfactory` raises an `ImportError` that says so. Fix it with
-`pip uninstall -y gdsfactory gdsfactoryx && pip install gdsfactoryx`.
+For local development from a clone:
 
-Packages that depend on upstream `gdsfactory` (for example `gplugins`) will install it again. Install such packages
-with `pip install --no-deps` and add their other dependencies yourself, so they use gdsfactoryx.
+```bash
+git clone https://github.com/Sephiram591/gdsfactoryx.git
+cd gdsfactoryx
+uv sync --all-extras
+```
 
-## Differentiability
+If both distributions end up installed, `import gdsfactory` raises an `ImportError`. Fix it by uninstalling both and
+reinstalling `gdsfactoryx`:
 
-Reverse mode (`jax.grad`, `jax.vjp`) and forward mode (`jax.jvp`, `jax.jacfwd`) work. Differentiation runs **eagerly**
-by default: wrap the objective in `jax.grad`, and component functions keep their ordinary Python control flow on concrete
-values. Without tracers, geometry runs at numpy speed.
+```bash
+pip uninstall -y gdsfactory gdsfactoryx && pip install gdsfactoryx
+```
 
-`jax.jit` also works when the geometry's structure does not depend on the traced values: polygons with a fixed number
-of vertices, ports and reference transforms, grid snapping included, give the same results as eagerly. Discrete choices
-(number of points, `if` on a value, routing topology) and KLayout operations need concrete values and raise a
-`TypeError` inside `jax.jit`; use the eager mode for them.
+Packages that declare a dependency on upstream `gdsfactory` (for example `gplugins`) will reinstall upstream `gdsfactory`
+and break the environment unless installed without dependency resolution. Install such packages with `--no-deps` and
+install their remaining dependencies manually:
+
+```bash
+pip install --no-deps gplugins
+```
+
+## Differentiability, `SNAP_ENABLED`, and `jax.jit`
+
+Reverse mode (`jax.grad`, `jax.vjp`) and forward mode (`jax.jvp`, `jax.jacfwd`) work out of the box. Differentiation
+runs **eagerly** by default: wrap your objective in `jax.grad`, and component factories keep normal Python control flow
+on concrete primal values. Without tracers, geometry executes at NumPy speed.
+
+**Fixed-topology `jax.jit` and `@bf.jit`**: `jax.jit` (and `bifrost`'s `@bf.jit`) works when the layout's discrete
+structure—vertex counts, Python `if`/loop branches, cell names, and routing topology—does not depend on traced values.
+Discrete choices and KLayout-backed operations require concrete values and raise a `TypeError` /
+`ConcretizationTypeError` inside `jax.jit`; run those eagerly or keep structural parameters static.
+
+**Straight-through DBU grid snapping (`gf.snap.SNAP_ENABLED`)**: Manufacturing-grid snapping (`1 nm` / `gf.kcl.dbu`)
+uses straight-through rounding (primal coordinates snapped to the DBU grid, identity gradient in AD) both eagerly and
+under `jax.jit`. Set `gf.snap.SNAP_ENABLED = False` when validating analytical gradients against finite differences.
+Inside `jax.jit`, `SNAP_ENABLED` is read at trace time—changing it does not alter an already-compiled function.
 
 | Quantity | How |
 | --- | --- |
@@ -62,218 +96,31 @@ of vertices, ports and reference transforms, grid snapping included, give the sa
 | references | `ref.transform`, `ref.move/rotate/mirror/connect`, `ref.xmin = ...` |
 | bounding boxes and areas | `component.dbbox()`, `xmin/xmax/ymin/ymax/xsize/ysize/center`, `component.area(layer)` |
 | paths and extrusion | `gf.path.arc/euler/straight/smooth/spiral_archimedean`, `Path.length()`, `gf.path.extrude` |
-| routes | `route_single`, `route_bundle`, `route_bundle_all_angle`, `route_dubins`: `route.length`, element positions |
-| rasterization | `gf.rasterize.rasterize(component, layer, resolution)` |
+| routes | `route_single`, `route_bundle`, `route_bundle_all_angle`, `route_dubins`: `route.length`, `route.length_um`, element positions |
+| layer stacks | `LayerStack`, `LayerLevel`, `DerivedLayer`, `LogicalLayer` (consumed by `bifrost` for 3D FDTD voxelization) |
 
 Notes:
 
 - Discrete choices (number of points, `if` branches, cell names, routing topology) use concrete primal values, so the
   gradient is exact for the chosen topology and zero across a discrete switch.
-- 1 nm grid snapping uses straight-through rounding (value snapped, gradient identity). Set
-  `gf.snap.SNAP_ENABLED = False` to compare with finite differences. Inside `jax.jit` the flag is read when the
-  function is traced: changing it does not affect a function that is already compiled.
-- `@gf.cell` calls with tracer arguments bypass the cache.
+- `@gf.cell` calls with tracer arguments bypass the cell cache.
 - KLayout is used only for discrete operations (I/O, `show`/`plot`, booleans, sizing, DRC fixes, fill, merged areas);
   gradients stop there. `gf.boolean`, `offset`, `over_under`, `fix_width`, `fix_spacing`, `trim`, `fill`,
-  `get_polygons(merge=True)` and A* routing are not differentiable.
-- `component.area(layer)` is the merged area as upstream; its derivative is that of the summed polygon areas, exact for
-  non-overlapping polygons.
+  `get_polygons(merge=True)`, and A* routing are not differentiable.
+- `component.area(layer)` computes the merged area as upstream; its derivative is that of the summed polygon areas,
+  exact for non-overlapping polygons.
 
 ### Differences from upstream API
 
-- `Component` and `ComponentReference` are gdsfactoryx classes, not kfactory `DKCell`/`DInstance`; use
-  `component.to_kfactory()` for a (concrete) kfactory cell.
+- `Component` and `ComponentReference` are `gdsfactoryx` classes, not `kfactory` `DKCell`/`DInstance`; use
+  `component.to_kfactory()` for a concrete `kfactory` cell.
 - `component.get_polygons()` returns KLayout polygons as upstream; `get_polygons_points()` returns differentiable arrays.
 - `port.center` is an `(x, y)` tuple; use `port.center_array` (or `port.xy`) for array math.
-- Routes are `gdsfactory.routing.ManhattanRoute` objects with kfactory's attributes plus `backbone_um` (differentiable).
+- Manhattan routes are `gdsfactory.routing.ManhattanRoute` objects with `kfactory`'s attributes plus `backbone_um`
+  (differentiable); all-angle and Dubins routes return `OpticalAllAngleRoute` objects with `length` / `length_um` in µm.
 
----
+## Upstream & License
 
-*The rest of this README is upstream GDSFactory's.*
-
-GDSFactory is a Python library for designing chips (Photonics, Analog, Quantum, MEMS), PCBs, and 3D-printable objects. We aim to make hardware design accessible, intuitive, and fun—empowering everyone to build the future.
-
-As input you write python code, as an output GDSFactory creates CAD files (GDS, OASIS, STL, GERBER).
-
-![cad](https://raw.githubusercontent.com/gdsfactory/gdsfactory/main/docs/images/cad.png)
-
-## Quick Start
-
-```python
-import gdsfactory as gf
-
-# Activate the built-in generic process design kit
-gf.gpdk.PDK.activate()
-
-# Create a new component
-c = gf.Component()
-
-# Add a rectangle
-r = gf.components.rectangle(size=(10, 10), layer=(1, 0))
-rect = c.add_ref(r)
-
-# Add text elements
-t1 = gf.components.text("Hello", size=10, layer=(2, 0))
-t2 = gf.components.text("world", size=10, layer=(2, 0))
-
-text1 = c.add_ref(t1)
-text2 = c.add_ref(t2)
-
-# Position elements
-text1.xmin = rect.xmax + 5
-text2.xmin = text1.xmax + 2
-text2.rotate(30)
-
-# Show the result
-c.show()
-```
-
-**4M+ downloads** · **116+ contributors** · **42+ PDKs**
-
-![workflow](https://raw.githubusercontent.com/gdsfactory/gdsfactory/main/docs/images/workflow.png)
-
-GDSFactory provides a comprehensive end-to-end design flow:
-
-- **Design (Layout, Simulation, Optimization)** — Define parametric cell functions in Python to generate components. Test component settings, ports, and geometry to avoid unwanted regressions, and capture design intent in a schematic.
-- **Verify (DRC, DFM, LVS)** — Run simulations directly from the layout using our simulation interfaces, removing the need to redraw your components in simulation tools. Conduct component and circuit simulations, study design for manufacturing. Ensure complex layouts match their design intent through Layout Versus Schematic verification (LVS) and are DRC clean.
-- **Validate** — Define layout and test protocols simultaneously for automated chip analysis post-fabrication. Extract essential component parameters and build data pipelines from raw data to structured data to monitor chip performance.
-
-**Input:** Python or YAML. **Output:** GDSII, OASIS, STL, or GERBER files for fabrication, plus component settings and netlists in YAML.
-
-GDSFactory integrates with Ansys, Lumerical, Tidy3d, MEEP, DEVSIM, SAX, MEOW, SPICE, and more.
-
-![tool interfaces](https://raw.githubusercontent.com/gdsfactory/gdsfactory/main/docs/images/tool_interfaces.png)
-
-
-## Open-Source PDKs (No NDA Required)
-
-These PDKs are publicly available and do not require an NDA:
-
-### Photonics
-
-| PDK | Code | Docs |
-| :-- | :--: | :--: |
-| Cornerstone PDK | [GitHub](https://github.com/gdsfactory/cspdk) | [Docs](https://gdsfactory.github.io/cspdk/) |
-| SiEPIC Ebeam UBC PDK | [GitHub](https://github.com/gdsfactory/ubc) | [Docs](https://gdsfactory.github.io/ubc) |
-| VTT PDK | [GitHub](https://github.com/gdsfactory/vtt) | [Docs](https://gdsfactory.github.io/vtt) |
-| Luxtelligence GF PDK | [GitHub](https://github.com/Luxtelligence/lxt_pdk_gf) | [Docs](https://gdsfactory.github.io/lxt_pdk_gf) |
-
-### Quantum
-
-| PDK | Code | Docs |
-| :-- | :--: | :--: |
-| Quantum RF PDK | [GitHub](https://github.com/gdsfactory/quantum-rf-pdk) | [Docs](https://gdsfactory.github.io/quantum-rf-pdk/) |
-
-### RF / AMS / Digital / Analog
-
-| PDK | Code | Docs |
-| :-- | :--: | :--: |
-| IHP | [GitHub](https://github.com/gdsfactory/IHP) | [Docs](https://gdsfactory.github.io/IHP) |
-| GlobalFoundries 180nm MCU CMOS | [GitHub](https://github.com/gdsfactory/gf180mcu) | [Docs](https://gdsfactory.github.io/gf180mcu/) |
-| SkyWater 130nm CMOS | [GitHub](https://github.com/gdsfactory/skywater130) | [Docs](https://gdsfactory.github.io/skywater130/) |
-
-## Foundry PDKs (NDA Required)
-
-Access PDKs under NDA require a **GDSFactory+** subscription.
-To sign up, visit [GDSFactory.com](https://gdsfactory.com/).
-See list of available PDKs under NDA [here](https://gdsfactory.com/pdks/).
-
-## GDSFactory+
-
-**GDSFactory+** offers Graphical User Interface for chip design, built on top of GDSFactory and VSCode. It provides you:
-
-- Foundry PDK access
-- Schematic capture
-- Device and circuit Simulations
-- Design verification (DRC, LVS)
-- Data analytics
-
-
-## Getting Started
-
-- [See slides](https://docs.google.com/presentation/d/1_ZmUxbaHWo_lQP17dlT1FWX-XD8D9w7-FcuEih48d_0/edit#slide=id.g11711f50935_0_5)
-- [Read docs](https://gdsfactory.github.io/gdsfactory/)
-- [![Video Tutorials](https://img.shields.io/badge/youtube-Video_Tutorials-red.svg?logo=youtube)](https://www.youtube.com/@gdsfactory/playlists)
-- See announcements on [GitHub](https://github.com/gdsfactory/gdsfactory/discussions/547), [google-groups](https://groups.google.com/g/gdsfactory) or [LinkedIn](https://www.linkedin.com/company/gdsfactory)
-- [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://github.com/codespaces/new?hide_repo_select=true&ref=main&repo=250169028)
-- [PIC training](https://gdsfactory.github.io/gdsfactory-photonics-training/)
-- Online course [UBCx: Silicon Photonics Design, Fabrication and Data Analysis](https://www.edx.org/learn/engineering/university-of-british-columbia-silicon-photonics-design-fabrication-and-data-ana), where students can use GDSFactory to create a design, have it fabricated, and tested.
-- [Visit website](https://gdsfactory.com)
-
-## Who is using GDSFactory?
-
-Hundreds of organisations are using GDSFactory. Some companies and organizations around the world using GDSFactory include:
-
-![logos](https://raw.githubusercontent.com/gdsfactory/gdsfactory/main/docs/images/logos.png)
-
-"I've used **GDSFactory** since 2017 for all my chip tapeouts. I love that it is fast, easy to use, and easy to extend. It's the only tool that allows us to have an end-to-end chip design flow (design, verification and validation)."
-
-<div style="text-align: right; margin-right: 10%;">Joaquin Matres - <strong>Google</strong></div>
-
----
-
-"I've relied on **GDSFactory** for several tapeouts over the years. It's the only tool I've found that gives me the flexibility and scalability I need for a variety of projects."
-
-<div style="text-align: right; margin-right: 10%;">Alec Hammond - <strong>Meta Reality Labs Research</strong></div>
-
----
-
-"The best photonics layout tool I've used so far and it is leaps and bounds ahead of any commercial alternatives out there. Feels like GDSFactory is freeing photonics."
-
-<div style="text-align: right; margin-right: 10%;">Hasitha Jayatilleka - <strong>LightIC Technologies</strong></div>
-
----
-
-"As an academic working on large scale silicon photonics at CMOS foundries I've used GDSFactory to go from nothing to full-reticle layouts rapidly (in a few days). I particularly appreciate the full-system approach to photonics, with my layout being connected to circuit simulators which are then connected to device simulators. Moving from legacy tools such as gdspy and phidl to GDSFactory has sped up my workflow at least an order of magnitude."
-
-<div style="text-align: right; margin-right: 10%;">Alex Sludds - <strong>MIT</strong></div>
-
----
-
-"I use GDSFactory for all of my photonic tape-outs. The Python interface makes it easy to version control individual photonic components as well as entire layouts, while integrating seamlessly with KLayout and most standard photonic simulation tools, both open-source and commercial."
-
-<div style="text-align: right; margin-right: 10%;">Thomas Dorch - <strong>Freedom Photonics</strong></div>
-
-## Why Use GDSFactory?
-
-- **Fast, extensible, and easy to use** – designed for efficiency and flexibility.
-- **Free and open-source** – no licensing fees, giving you the freedom to modify and extend it.
-- **A thriving ecosystem** – the most popular EDA tool with a growing community of users, developers, and integrations with other tools.
-- **Built on the open-source advantage** – just like the best machine learning libraries, GDSFactory benefits from continuous contributions, transparency, and innovation.
-
-GDSFactory is really fast thanks to KLayout C++ library for manipulating GDS objects. You will notice this when reading/writing big GDS files or doing large boolean operations.
-
-| Benchmark      |  gdspy  | GDSFactory | Gain |
-| :------------- | :-----: | :--------: | :--: |
-| 10k_rectangles | 80.2 ms |  4.87 ms   | 16.5 |
-| boolean-offset | 187 μs  |  44.7 μs   | 4.19 |
-| bounding_box   | 36.7 ms |   170 μs   | 216  |
-| flatten        | 465 μs  |  8.17 μs   | 56.9 |
-| read_gds       | 2.68 ms |   94 μs    | 28.5 |
-
-## Contributors
-
-A huge thanks to all the contributors who make this project possible!
-
-We welcome all contributions—whether you're adding new features, improving documentation, or even fixing a small typo. Every contribution helps make GDSFactory better!
-
-Join us and be part of the community. 🚀
-
-![contributors](https://raw.githubusercontent.com/gdsfactory/gdsfactory/main/docs/images/contributors.png)
-
-## LLM-Friendly Documentation
-
-GDSFactory provides machine-readable documentation optimized for LLM agents and AI-assisted development:
-
-- [llms.txt](https://gdsfactory.github.io/gdsfactory/llms.txt) — concise overview with links to all documentation sections
-- [llms-full.txt](https://gdsfactory.github.io/gdsfactory/llms-full.txt) — complete API reference and usage guide in a single document
-
-These follow the [llms.txt standard](https://llmstxt.org/) for making documentation easily ingestable by large language models.
-
-## Community
-
-Join our growing community:
-- [GitHub Discussions](https://github.com/gdsfactory/gdsfactory/discussions)
-- [Google Group](https://groups.google.com/g/gdsfactory)
-- [LinkedIn](https://www.linkedin.com/company/gdsfactory)
-- [Slack community channel](https://join.slack.com/t/gdsfactory-community/shared_invite/zt-3aoygv7cg-r5BH6yvL4YlHfY8~UXp0Wg)
+`gdsfactoryx` is derived from [gdsfactory/gdsfactory](https://github.com/gdsfactory/gdsfactory) (`v9.51.0`) under the
+MIT license (see [LICENSE](LICENSE)). For 3D electromagnetic simulation, `LayerStack` meshing, and visualization, see
+[bifrost](https://github.com/Sephiram591/bifrost).

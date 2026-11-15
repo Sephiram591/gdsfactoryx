@@ -34,7 +34,7 @@ from typing import Any, Literal, cast
 import kfactory as kf
 
 import gdsfactory as gf
-from gdsfactory._jax import is_abstract_tracer, to_float
+from gdsfactory._jax import is_abstract_tracer, is_tracer, to_float
 from gdsfactory.component import Component
 from gdsfactory.config import CONF
 from gdsfactory.routing._kf_router import ManhattanRoute, route_bundle_kf
@@ -164,8 +164,10 @@ def route_single(
         p2 = add_auto_tapers(component, [p2], xs, layer_transitions)[0]
 
     def straight_(width: float, length: float, **kwargs: Any) -> gf.Component:
-        xs = kwargs.pop("cross_section", cross_section)
-        return gf.get_component(straight, length=length, cross_section=xs, **kwargs)
+        xs_ = kwargs.pop("cross_section", xs if _has_width else cross_section)
+        if _has_width or is_tracer(width):
+            kwargs.setdefault("width", width)
+        return gf.get_component(straight, length=length, cross_section=xs_, **kwargs)
 
     if steps and waypoints:
         raise ValueError("Provide only one of steps or waypoints")
@@ -276,7 +278,7 @@ def route_single(
                 separation=0,
                 place_port_type=port_type,
                 allow_width_mismatch=allow_width_mismatch,
-                route_width=route_width,
+                route_width=width,
                 radius=radius,
                 on_collision=kf_on_collision,
                 on_placer_error=kf_on_placer_error,

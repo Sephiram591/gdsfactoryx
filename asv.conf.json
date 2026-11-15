@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "project": "gdsfactory",
-  "project_url": "https://github.com/gdsfactory/gdsfactory",
+  "project": "gdsfactoryx",
+  "project_url": "https://github.com/Sephiram591/gdsfactoryx",
   "repo": ".",
   "branches": [
     "main"
@@ -17,8 +17,8 @@
     "python -m pip install {wheel_file}"
   ],
   "uninstall_command": [
-    "return-code=any python -m pip uninstall -y gdsfactory"
+    "return-code=any python -m pip uninstall -y gdsfactoryx"
   ],
-  "show_commit_url": "https://github.com/gdsfactory/gdsfactory/commit/",
+  "show_commit_url": "https://github.com/Sephiram591/gdsfactoryx/commit/",
   "skip_existing_commits": true
 }

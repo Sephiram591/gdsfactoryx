@@ -12,6 +12,7 @@ import re
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from typing import Any
 
+import jax
 import numpy as np
 
 from gdsfactory._jax import (
@@ -19,6 +20,7 @@ from gdsfactory._jax import (
     asarray,
     cos_deg,
     get_dbu,
+    is_abstract_tracer,
     is_tracer,
     maybe_float,
     sin_deg,
@@ -59,7 +61,7 @@ class Port:
     """
 
     __slots__ = (
-        "__dict__",  # allows extra attributes (e.g. name_original)
+        "__dict__",
         "_center",
         "_orientation",
         "_width",
@@ -67,6 +69,7 @@ class Port:
         "layer",
         "mirror",
         "name",
+        "name_original",
         "on_grid",
         "port_type",
     )
@@ -75,16 +78,18 @@ class Port:
         self,
         name: str | None = None,
         center: Any = (0.0, 0.0),
-        width: Any = 0.5,
-        orientation: Any = 0.0,
+        width: float | Array | None = 0.5,
+        orientation: float | Array | None = 0.0,
         layer: Any = 0,
         port_type: str = "optical",
         info: dict[str, Any] | None = None,
         mirror: bool = False,
         cross_section: Any = None,
         on_grid: bool = True,
+        name_original: str | None = None,
     ) -> None:
         self.name = name
+        self.name_original = name_original if name_original is not None else name
         self.on_grid = on_grid
         self._orientation = _angle(orientation)
         self._center = self._snap_center(_point(center))
@@ -102,7 +107,13 @@ class Port:
         """Manhattan ports live on the dbu grid (kfactory integer ports)."""
         if not getattr(self, "on_grid", True):
             return c
-        if self._orientation is None or manhattan_angle(self._orientation) is not None:
+        if self._orientation is None:
+            return snap_dbu(c)
+        if is_abstract_tracer(self._orientation):
+            q = jax.lax.stop_gradient(xp.mod(asarray(self._orientation), 360.0)) / 90.0
+            is_manh = xp.abs(q - xp.round(q)) < 1e-6
+            return xp.where(is_manh, snap_dbu(c), c)
+        if manhattan_angle(self._orientation) is not None:
             return snap_dbu(c)
         return c
 
@@ -152,11 +163,13 @@ class Port:
 
     @width.setter
     def width(self, value: Any) -> None:
-        self._width = snap_dbu(maybe_float(value))
+        self._width = snap_dbu(maybe_float(value)) if value is not None else None
 
     @property
     def iwidth(self) -> int:
         """Width in database units."""
+        if self._width is None:
+            raise ValueError(f"Port {self.name!r} has width=None")
         return round(to_float(self._width) / get_dbu())
 
     @property
@@ -173,6 +186,8 @@ class Port:
     @property
     def angle(self) -> int:
         """Manhattan orientation index (0: east, 1: north, 2: west, 3: south)."""
+        if self._orientation is None:
+            raise ValueError(f"Port {self.name!r} has orientation=None")
         a = manhattan_angle(self._orientation)
         if a is None:
             raise ValueError(
@@ -184,7 +199,10 @@ class Port:
 
     @property
     def is_manhattan(self) -> bool:
-        return manhattan_angle(self._orientation) is not None
+        return (
+            self._orientation is not None
+            and manhattan_angle(self._orientation) is not None
+        )
 
     @property
     def cross_section(self) -> Any:
@@ -211,7 +229,8 @@ class Port:
             layer_name = get_layer_name(self.layer)
         except Exception:
             layer_name = str(self.layer)
-        auto = f"{layer_name}_{round(to_float(self.width) / get_dbu())}"
+        width_dbu = round(to_float(self.width) / get_dbu()) if self.width is not None else 0
+        auto = f"{layer_name}_{width_dbu}"
         return SimpleNamespace(name=auto, width=self.width, layer=self.layer)
 
     @property
@@ -223,16 +242,22 @@ class Port:
     @property
     def direction(self) -> Array:
         """Unit vector pointing out of the port."""
+        if self._orientation is None:
+            raise ValueError(f"Port {self.name!r} has orientation=None")
         return xp.stack([cos_deg(self._orientation), sin_deg(self._orientation)])
 
     @property
     def normal(self) -> Array:
         """Unit vector along the port face (90 deg ccw from the direction)."""
+        if self._orientation is None:
+            raise ValueError(f"Port {self.name!r} has orientation=None")
         return xp.stack([-sin_deg(self._orientation), cos_deg(self._orientation)])
 
     @property
     def endpoints(self) -> Array:
         """The two corners of the port face."""
+        if self._width is None:
+            raise ValueError(f"Port {self.name!r} has width=None")
         half = asarray(self._width) / 2
         return xp.stack(
             [self._center - half * self.normal, self._center + half * self.normal]
@@ -240,7 +265,8 @@ class Port:
 
     @property
     def transform(self) -> Transform:
-        return Transform(self.x, self.y, self._orientation, self.mirror, 1.0)
+        orientation = 0.0 if self._orientation is None else self._orientation
+        return Transform(self.x, self.y, orientation, self.mirror, 1.0)
 
     @property
     def dcplx_trans(self) -> Any:
@@ -261,6 +287,9 @@ class Port:
         p = Port.__new__(Port)
         p.on_grid = kwargs.pop("on_grid", getattr(self, "on_grid", True))
         p.name = self.name if name is None else name
+        p.name_original = kwargs.pop(
+            "name_original", getattr(self, "name_original", self.name)
+        )
         p._center = self._center
         p._width = self._width
         p._orientation = self._orientation
@@ -281,16 +310,22 @@ class Port:
 
         ``angle`` is the extra rotation in multiples of 90 degrees (2 flips it).
         """
+        if self._orientation is None:
+            raise ValueError(f"Port {self.name!r} has orientation=None")
         p = self.copy()
-        p.center = self._center + d * self.direction + d_orth * self.normal
+        delta = d * self.direction + d_orth * self.normal
         p.orientation = self._orientation + 90 * angle
         p.mirror = self.mirror != mirror
+        p.center = self._center + delta
         return p
 
     def apply_transform(self, t: Transform) -> Port:
-        self._orientation = t.apply_angle(self._orientation)
+        if self._orientation is not None:
+            self._orientation = t.apply_angle(self._orientation)
         self._center = self._snap_center(t.apply(self._center))
-        if not isinstance(t.magnification, int | float) or t.magnification != 1:
+        if self._width is not None and (
+            not isinstance(t.magnification, int | float) or t.magnification != 1
+        ):
             self._width = self._width * t.magnification
         self.mirror = self.mirror != t.mirror
         return self
@@ -317,12 +352,14 @@ class Port:
     def rotate(self, angle: Any, center: Any = None) -> Port:
         c = self._center if center is None else asarray(center)
         t = Transform(0.0, 0.0, angle)
-        self._orientation = t.apply_angle(self._orientation)
+        if self._orientation is not None:
+            self._orientation = t.apply_angle(self._orientation)
         self._center = self._snap_center(t.apply(self._center - c) + c)
         return self
 
     def flip(self) -> Port:
-        self._orientation = xp.mod(asarray(self._orientation) + 180.0, 360.0)
+        if self._orientation is not None:
+            self._orientation = xp.mod(asarray(self._orientation) + 180.0, 360.0)
         return self
 
     def flipped(self) -> Port:
@@ -340,12 +377,18 @@ class Port:
         try:
             layer: Any = get_layer_tuple(self.layer)
         except Exception:
-            layer = self.layer
+            layer = (
+                int(self.layer)
+                if isinstance(self.layer, np.integer)
+                else self.layer
+            )
         return {
             "name": self.name,
             "center": [to_float(self.x), to_float(self.y)],
-            "width": to_float(self.width),
-            "orientation": to_float(self.orientation),
+            "width": None if self._width is None else to_float(self._width),
+            "orientation": (
+                None if self._orientation is None else to_float(self._orientation)
+            ),
             "layer": layer,
             "port_type": self.port_type,
         }
@@ -358,10 +401,16 @@ class Port:
 
     def __repr__(self) -> str:
         try:
+            w = "None" if self._width is None else f"{to_float(self._width):.4g}"
+            o = (
+                "None"
+                if self._orientation is None
+                else f"{to_float(self._orientation):.4g}"
+            )
             return (
                 f"Port(name={self.name!r}, center=({to_float(self.x):.4g}, "
-                f"{to_float(self.y):.4g}), width={to_float(self.width):.4g}, "
-                f"orientation={to_float(self.orientation):.4g}, layer={self.layer}, "
+                f"{to_float(self.y):.4g}), width={w}, "
+                f"orientation={o}, layer={self.layer}, "
                 f"port_type={self.port_type!r})"
             )
         except Exception:
@@ -371,19 +420,45 @@ class Port:
         print(repr(self))
 
     def __eq__(self, other: object) -> bool:
+        if self is other:
+            return True
         if not isinstance(other, Port):
             return NotImplemented
+        if (self._width is None) != (other._width is None):
+            return False
+        if (self._orientation is None) != (other._orientation is None):
+            return False
+        if (
+            is_abstract_tracer(self._width)
+            or is_abstract_tracer(other._width)
+            or is_abstract_tracer(self._orientation)
+            or is_abstract_tracer(other._orientation)
+            or is_abstract_tracer(self._center)
+            or is_abstract_tracer(other._center)
+        ):
+            return False
+        width_eq = (
+            True
+            if self._width is None
+            else abs(to_float(self._width) - to_float(other._width)) < 1e-9
+        )
+        orient_eq = (
+            True
+            if self._orientation is None
+            else abs(
+                (to_float(self._orientation) - to_float(other._orientation) + 180)
+                % 360
+                - 180
+            )
+            < 1e-9
+        )
         return (
             self.name == other.name
             and self.layer == other.layer
             and self.port_type == other.port_type
-            and abs(to_float(self.width) - to_float(other.width)) < 1e-9
+            and width_eq
             and self.is_close(other, tol=1e-9)
-            and abs(
-                (to_float(self.orientation) - to_float(other.orientation) + 180) % 360
-                - 180
-            )
-            < 1e-9
+            and orient_eq
         )
 
     def __hash__(self) -> int:
@@ -410,7 +485,7 @@ class Ports:
 
     def __contains__(self, item: str | Port) -> bool:
         if isinstance(item, Port):
-            return any(p is item for p in self._ports)
+            return any(p is item or p == item for p in self._ports)
         return any(p.name == item for p in self._ports)
 
     def __getitem__(self, key: str | int | tuple[Any, ...]) -> Port:
@@ -625,19 +700,34 @@ def filter_ports(
     if port_type:
         out = [p for p in out if p.port_type == port_type]
     if angle is not None:
-        out = [p for p in out if manhattan_angle(p.orientation) == (angle % 4) * 90]
+        out = [
+            p
+            for p in out
+            if p.orientation is not None
+            and manhattan_angle(p.orientation) == (angle % 4) * 90
+        ]
     if orientation is not None:
         o = float(orientation) % 360
         out = [
             p
             for p in out
-            if abs((to_float(p.orientation) - o + 180) % 360 - 180) < 1e-6
+            if p.orientation is not None
+            and abs((to_float(p.orientation) - o + 180) % 360 - 180) < 1e-6
         ]
     return out
 
 
 def _layer_enum(layer: Any) -> Any:
     """Layer index as the PDK LayerEnum member when one exists (kfactory semantics)."""
+    if layer is None or hasattr(layer, "layer"):
+        return layer
+    if not isinstance(layer, int):
+        try:
+            from gdsfactory.pdk import get_layer
+
+            layer = get_layer(layer)
+        except Exception:
+            return layer
     if isinstance(layer, int) and not hasattr(layer, "layer"):
         try:
             import kfactory as kf

@@ -43,7 +43,7 @@ def sort_ports(
 
     """
     original_ports1 = list(ports1)
-    ports1_list = list(ports1)
+    ports1_list = list(original_ports1)
     ports2_list = list(ports2)
 
     if len(ports1_list) != len(ports2_list):
@@ -67,7 +67,8 @@ def sort_ports(
             ports2_list.sort(key=f_key1)
 
     if enforce_port_ordering:
-        ports2_list = [ports2_list[original_ports1.index(p1)] for p1 in ports1_list]
+        orig_index = {id(p): i for i, p in enumerate(original_ports1)}
+        ports2_list = [ports2_list[orig_index[id(p1)]] for p1 in ports1_list]
 
     return ports1_list, ports2_list
 

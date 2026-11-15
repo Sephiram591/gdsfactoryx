@@ -14,7 +14,7 @@ import numpy as np
 import numpy.typing as npt
 
 import gdsfactory as gf
-from gdsfactory._jax import to_float, xp
+from gdsfactory._jax import asarray, to_float, xp
 from gdsfactory.component import Component
 from gdsfactory.snap import snap_to_grid
 from gdsfactory.typings import Anchor, ComponentSpec, Float2, Size
@@ -267,10 +267,15 @@ def pack(
             elif add_ports_suffix:
                 packed.add_ports(d.ports, suffix=f"_{index}")
             else:
-                try:
-                    packed.add_ports(d.ports)
-                except ValueError:
+                if any(
+                    p.name is not None and p.name in packed.ports for p in d.ports
+                ):
                     packed.add_ports(d.ports, suffix=f"_{index}")
+                else:
+                    try:
+                        packed.add_ports(d.ports)
+                    except ValueError:
+                        packed.add_ports(d.ports, suffix=f"_{index}")
 
             index += 1
 
@@ -283,9 +288,9 @@ def pack(
                         label.dmirror()
                     if text_rotation:
                         label.rotate(text_rotation)
-                    offset = xp.asarray(text_offset, dtype=xp.float64) + xp.asarray(
-                        getattr(d.dsize_info, text_anchor)
-                    )
+                    anchor = getattr(d.dsize_info, text_anchor)
+                    anchor_arr = xp.stack([asarray(anchor[0]), asarray(anchor[1])])
+                    offset = asarray(text_offset) + anchor_arr
                     label.move((offset[0], offset[1]))
                     component.info["text_label"] = f"{text_prefix}{index}"
 

@@ -394,10 +394,10 @@ def _req_straight_len(
                 jax.ShapeDtypeStruct((), jnp.int32),
                 jax.ShapeDtypeStruct((), jnp.int32),
             ),
-            jnp.asarray(length),
-            jnp.asarray(in_out_port_spacing),
-            jnp.asarray(min_radius),
-            *(jnp.asarray(s) for s in spacings),
+            jax.lax.stop_gradient(jnp.asarray(length)),
+            jax.lax.stop_gradient(jnp.asarray(in_out_port_spacing)),
+            jax.lax.stop_gradient(jnp.asarray(min_radius)),
+            *(jax.lax.stop_gradient(jnp.asarray(s)) for s in spacings),
             vmap_method="sequential",
         )
         a, b = min_straigth_length_t, 0.9 * in_out_port_spacing
