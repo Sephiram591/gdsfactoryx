@@ -18,14 +18,28 @@ type Value = float | Sequence[float] | npt.NDArray[np.floating[Any]]
 SNAP_ENABLED = True
 
 
+def _snap_concrete(
+    x: Value,
+    nm: int | None = None,
+    grid_factor: int = 1,
+) -> Any:
+    grid_um = (nm / 1000 if nm is not None else gf.kcl.dbu) * grid_factor
+    res = grid_um * np.floor(np.asarray(x, dtype=np.float64) / grid_um + 0.5)
+    if np.ndim(res) == 0:
+        return float(res)
+    return res
+
+
 def is_on_grid(
     x: Value,
     nm: int | None = None,
     grid_factor: int = 1,
 ) -> bool:
-    return np.array_equal(
-        snap_to_grid(x, grid_factor=grid_factor, nm=nm), np.round(x, 6)
-    )
+    from gdsfactory._jax import to_numpy
+
+    xn = np.asarray(to_numpy(x), dtype=np.float64)
+    x_grid = _snap_concrete(xn, grid_factor=grid_factor, nm=nm)
+    return bool(np.isclose(x_grid, xn, rtol=0, atol=1e-9).all())
 
 
 def warn_if_not_on_grid(x: Value) -> None:
@@ -40,10 +54,10 @@ def assert_on_grid(
 ) -> None:
     from gdsfactory._jax import to_numpy
 
-    x = to_numpy(x)
-    x_grid = snap_to_grid(x, nm=nm, grid_factor=grid_factor)
-    if not np.isclose(x_grid, x, rtol=0).all():
-        raise ValueError(f"{x} needs to be on 1nm grid and should be {x_grid}")
+    xn = to_numpy(x)
+    x_grid = _snap_concrete(xn, nm=nm, grid_factor=grid_factor)
+    if not np.isclose(x_grid, xn, rtol=0, atol=1e-9).all():
+        raise ValueError(f"{xn} needs to be on 1nm grid and should be {x_grid}")
 
 
 assert_on_1nm_grid = partial(assert_on_grid, nm=1)
@@ -51,9 +65,12 @@ assert_on_2nm_grid = partial(assert_on_grid, nm=2)
 
 
 def assert_on_2x_grid(x: float) -> None:
-    x_grid = snap_to_grid(x, grid_factor=2)
-    if not np.isclose(x_grid, x, rtol=0).all():
-        raise ValueError(f"{x} needs to be on 2x grid and should be {x_grid}")
+    from gdsfactory._jax import to_numpy
+
+    xn = to_numpy(x)
+    x_grid = _snap_concrete(xn, grid_factor=2)
+    if not np.isclose(x_grid, xn, rtol=0, atol=1e-9).all():
+        raise ValueError(f"{xn} needs to be on 2x grid and should be {x_grid}")
 
 
 _T = TypeVar("_T", bound=npt.NDArray[np.floating[Any]])
@@ -89,12 +106,10 @@ def snap_to_grid[T: npt.NDArray[np.floating[Any]]](
         nm: Optional grid size in nm. If None, uses the default grid size from the PDK.
         grid_factor: multiplies the grid size (`nm`, or the PDK default if `nm` is None) by this factor.
     """
-    from gdsfactory._jax import has_tracers, is_tracer, jnp
+    from gdsfactory._jax import asarray, has_tracers, is_tracer, jnp
 
     if not SNAP_ENABLED:
         if isinstance(x, list | tuple):
-            from gdsfactory._jax import asarray
-
             return cast("_T | float", asarray(x))
         return cast("_T | float", x)
 
@@ -104,20 +119,12 @@ def snap_to_grid[T: npt.NDArray[np.floating[Any]]](
         # straight-through: snapped value, identity gradient
         import jax
 
-        xa = (
-            jnp.asarray(x, dtype=jnp.float64)
-            if not isinstance(x, list | tuple)
-            else jnp.stack([jnp.asarray(v, dtype=jnp.float64) for v in x])
-        )
+        xa = asarray(x)
         snapped = grid_um * jnp.floor(jax.lax.stop_gradient(xa) / grid_um + 0.5)
         return cast("_T | float", xa + jax.lax.stop_gradient(snapped - xa))
 
     # Round half up
-    res = grid_um * np.floor(np.asarray(x, dtype=np.float64) / grid_um + 0.5)
-
-    if np.ndim(res) == 0:
-        return float(res)
-    return cast("_T | float", res)
+    return cast("_T | float", _snap_concrete(x, nm=nm, grid_factor=grid_factor))
 
 
 @overload

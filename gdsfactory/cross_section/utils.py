@@ -12,6 +12,7 @@ import numpy as np
 from kfactory import logger
 
 from gdsfactory import typings
+from gdsfactory._jax import _is_jax, is_tracer
 from gdsfactory.cross_section.base import (
     CrossSection,
     CrossSectionFactory,
@@ -146,6 +147,10 @@ def cross_section(
         ) -> list[Any]:
             if isinstance(value, (int, float, np.number)):
                 return [float(value)] * len(cladding_layers)
+            if (
+                is_tracer(value) or _is_jax(value) or isinstance(value, np.ndarray)
+            ) and getattr(value, "ndim", None) == 0:
+                return [value] * len(cladding_layers)
             if value is None or len(value) == 0:
                 return [default] * len(cladding_layers)
             return list(value)

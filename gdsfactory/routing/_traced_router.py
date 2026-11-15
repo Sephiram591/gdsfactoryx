@@ -21,20 +21,19 @@ import numpy as np
 from kfactory.conf import logger
 from kfactory.routing.steps import Step, Straight
 
-from gdsfactory._jax import is_tracer, to_float
+from gdsfactory._jax import get_dbu, is_tracer, to_float
 from gdsfactory.routing._dual import DNum, Point, Trans
 from gdsfactory.routing._traced_manhattan import ManhattanRouter, route_smart
-
-DBU = 1e-3
 
 
 def to_dbu(x: Any) -> DNum:
     """Um -> dbu like kfactory (``CplxTrans(dbu).inverted() * x``), keeping derivatives."""
     if isinstance(x, DNum):
         return x
-    v = kdb.CplxTrans(DBU).inverted() * to_float(x)
+    dbu = get_dbu()
+    v = kdb.CplxTrans(dbu).inverted() * to_float(x)
     if is_tracer(x):
-        return DNum.traced(x / DBU, v)
+        return DNum.traced(x / dbu, v)
     return DNum(v)
 
 

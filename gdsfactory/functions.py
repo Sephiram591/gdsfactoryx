@@ -11,7 +11,17 @@ import numpy.typing as npt
 from numpy import float64
 
 import gdsfactory as gf
-from gdsfactory._jax import round_st, to_float, xp, xset
+from gdsfactory._jax import (
+    has_abstract_tracers,
+    is_abstract_tracer,
+    points_array,
+    round_st,
+    safe_arctan2,
+    safe_hypot,
+    to_float,
+    xp,
+    xset,
+)
 
 if TYPE_CHECKING:
     from gdsfactory.component import Component, ComponentReference
@@ -301,8 +311,7 @@ def path_length(points: npt.NDArray[np.floating[Any]]) -> float:
     """
     points = xp.asarray(points)
     dpts = points[1:, :] - points[:-1, :]
-    _d = dpts**2
-    return xp.sum(xp.sqrt(_d[:, 0] + _d[:, 1]))  # type: ignore[return-value]
+    return xp.sum(safe_hypot(dpts[:, 0], dpts[:, 1]))  # type: ignore[return-value]
 
 
 def snap_angle(a: float) -> float:
@@ -327,7 +336,7 @@ def angles_rad(pts: npt.NDArray[np.floating[Any]]) -> npt.NDArray[np.floating[An
     """Returns the angles (radians) of the connection between each point and the next."""
     pts = xp.asarray(pts)
     _pts = xp.roll(pts, -1, 0)
-    return xp.arctan2(_pts[:, 1] - pts[:, 1], _pts[:, 0] - pts[:, 0])  # type: ignore[return-value]
+    return safe_arctan2(_pts[:, 1] - pts[:, 1], _pts[:, 0] - pts[:, 0])  # type: ignore[return-value]
 
 
 def angles_deg(pts: npt.NDArray[np.floating[Any]]) -> npt.NDArray[np.floating[Any]]:
@@ -362,14 +371,16 @@ def extrude_path(
 
     assert grid is not None
 
-    if isinstance(points, list):
-        points = xp.stack([xp.stack([p[0], p[1]]) for p in points], axis=0)
-    points = xp.asarray(points, dtype=xp.float64)
+    points = points_array(points)
 
     a = angles_deg(points)
     if with_manhattan_facing_angles:
-        _start_angle = snap_angle(a[0] + 180)
-        _end_angle = snap_angle(a[-2])
+        if has_abstract_tracers(a):
+            _start_angle = xp.round((a[0] + 180) / 90.0) * 90.0 % 360.0
+            _end_angle = xp.round(a[-2] / 90.0) * 90.0 % 360.0
+        else:
+            _start_angle = snap_angle(a[0] + 180)
+            _end_angle = snap_angle(a[-2])
     else:
         _start_angle = a[0] + 180
         _end_angle = a[-2]
@@ -393,12 +404,16 @@ def extrude_path(
     ) * (0.5 * width)
 
     points_back = xp.flipud(points - offsets)
-    if to_float(spike_length) != 0:
+    if is_abstract_tracer(spike_length) or to_float(spike_length) != 0:
         d = spike_length
         a_start = start_angle_ * DEG2RAD
         a_end = end_angle_ * DEG2RAD
-        p_start_spike = points[0] + d * xp.array([[xp.cos(a_start), xp.sin(a_start)]])
-        p_end_spike = points[-1] + d * xp.array([[xp.cos(a_end), xp.sin(a_end)]])
+        p_start_spike = points[0] + d * xp.stack(
+            [xp.stack([xp.cos(a_start), xp.sin(a_start)])]
+        )
+        p_end_spike = points[-1] + d * xp.stack(
+            [xp.stack([xp.cos(a_end), xp.sin(a_end)])]
+        )
 
         pts = xp.vstack((p_start_spike, points + offsets, p_end_spike, points_back))
     else:

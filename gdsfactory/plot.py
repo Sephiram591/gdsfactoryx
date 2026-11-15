@@ -30,31 +30,35 @@ def plot_component(
     import klayout.lay as lay
     import matplotlib.pyplot as plt
 
+    from gdsfactory._jax import get_dbu
+    from gdsfactory._kcl import temporary_kcl
     from gdsfactory.config import GDSDIR_TEMP
     from gdsfactory.klayout_bridge import to_kfactory
     from gdsfactory.pdk import get_layer_views
 
-    kc = to_kfactory(component, add_ports=show_ports)
-    if show_ports:
-        # KLayout only renders shapes: draw each port on its own layer, as an arrow
-        # pointing out of the device (plus its name).
-        kc.draw_ports()
-    lyp_path = GDSDIR_TEMP / f"layer_properties-{uuid4().hex}.lyp"
-    GDSDIR_TEMP.mkdir(parents=True, exist_ok=True)
-    layer_views = get_layer_views()
-    try:
-        layer_views.to_lyp(filepath=lyp_path)
-        layout_view = lay.LayoutView()
-        cell_view_index = layout_view.create_layout(True)
-        layout_view.active_cellview_index = cell_view_index
-        cell_view = layout_view.cellview(cell_view_index)
-        layout = cell_view.layout()
-        layout.assign(kc.kcl.layout)
-        cell_view.cell = layout.cell(kc.name)
-        layout_view.max_hier()
-        layout_view.load_layer_props(str(lyp_path))
-    finally:
-        lyp_path.unlink(missing_ok=True)
+    with temporary_kcl(f"gdsfactoryx_plot_{uuid4().hex}") as kcl:
+        kcl.layout.dbu = get_dbu()
+        kc = to_kfactory(component, kcl=kcl, add_ports=show_ports)
+        if show_ports:
+            # KLayout only renders shapes: draw each port on its own layer, as an arrow
+            # pointing out of the device (plus its name).
+            kc.draw_ports()
+        lyp_path = GDSDIR_TEMP / f"layer_properties-{uuid4().hex}.lyp"
+        GDSDIR_TEMP.mkdir(parents=True, exist_ok=True)
+        layer_views = get_layer_views()
+        try:
+            layer_views.to_lyp(filepath=lyp_path)
+            layout_view = lay.LayoutView()
+            cell_view_index = layout_view.create_layout(True)
+            layout_view.active_cellview_index = cell_view_index
+            cell_view = layout_view.cellview(cell_view_index)
+            layout = cell_view.layout()
+            layout.assign(kc.kcl.layout)
+            cell_view.cell = layout.cell(kc.name)
+            layout_view.max_hier()
+            layout_view.load_layer_props(str(lyp_path))
+        finally:
+            lyp_path.unlink(missing_ok=True)
 
     layout_view.add_missing_layers()
     layout_view.zoom_fit()

@@ -23,7 +23,13 @@ from pydantic import (
 )
 
 from gdsfactory import typings
-from gdsfactory._jax import float_or_array, to_float, xp
+from gdsfactory._jax import (
+    float_or_array,
+    has_abstract_tracers,
+    has_tracers,
+    to_float,
+    xp,
+)
 from gdsfactory.component import Component
 from gdsfactory.config import CONF, ErrorType
 
@@ -137,6 +143,8 @@ class Section(BaseModel):
 
     @model_validator(mode="after")
     def _require_width_value_or_function(self) -> Self:
+        if has_abstract_tracers(self.width):
+            return self
         if to_float(self.width) < 0:
             raise ValueError(f"Section width must be >= 0, got {self.width}")
         if to_float(self.width) == 0 and self.width_function is None:
@@ -238,7 +246,12 @@ class CrossSection(BaseModel):
     ) -> None:
         radius_min = self.radius_min if self.radius_min is not None else self.radius
 
-        if radius_min and to_float(radius) < to_float(radius_min):
+        if (
+            radius_min is not None
+            and not has_abstract_tracers((radius, radius_min))
+            and to_float(radius_min) > 0
+            and to_float(radius) < to_float(radius_min)
+        ):
             message = (
                 f"min_bend_radius {radius} < CrossSection.radius_min {radius_min}. "
             )
@@ -340,12 +353,12 @@ class CrossSection(BaseModel):
                 }
             )
             xs = self.model_copy(update={"sections": tuple(section_list), **kwargs})
-            if xs != xs_original:
+            if has_tracers(xs) or has_tracers(xs_original) or xs != xs_original:
                 xs._name = f"xs_{xs.hash}"
             return xs
 
         xs = self.model_copy(update=kwargs)
-        if xs != xs_original:
+        if has_tracers(xs) or has_tracers(xs_original) or xs != xs_original:
             xs._name = f"xs_{xs.hash}"
         return xs
 

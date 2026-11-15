@@ -20,6 +20,8 @@ Gradients:
 from __future__ import annotations
 
 import contextlib
+import contextvars
+import functools
 import itertools
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
@@ -28,14 +30,12 @@ from typing import TYPE_CHECKING, Any
 import jax
 import numpy as np
 
-from gdsfactory._jax import Array, asarray, is_tracer, to_float, to_numpy, xp
+from gdsfactory._jax import Array, asarray, get_dbu, is_tracer, to_float, to_numpy, xp
 from gdsfactory._ports import Port
 from gdsfactory.transform import Transform
 
 if TYPE_CHECKING:
     from gdsfactory.component import Component, ComponentReference
-
-DBU = 1e-3
 
 # Debug switch: run (and check against kfactory) the traced router on every route.
 _CHECK_TRACED_ROUTER = bool(
@@ -92,15 +92,16 @@ class ManhattanRoute:
     @property
     def length_backbone(self) -> Any:
         """Length of the backbone in dbu (differentiable)."""
+        dbu = get_dbu()
         pts = self.backbone_um
         if pts is None:
-            pts = asarray([[p.x * DBU, p.y * DBU] for p in self.backbone])
+            pts = asarray([[p.x * dbu, p.y * dbu] for p in self.backbone])
         d = xp.diff(pts, axis=0)
-        return xp.sum(xp.sqrt(xp.sum(d**2, axis=1))) / DBU
+        return xp.sum(xp.sqrt(xp.sum(d**2, axis=1))) / dbu
 
     @property
     def length_um(self) -> Any:
-        return self.length * DBU
+        return self.length * get_dbu()
 
 
 OpticalManhattanRoute = ManhattanRoute
@@ -114,16 +115,20 @@ class _Mirror:
 
     _counter = itertools.count()
 
-    def __init__(self) -> None:
+    def __init__(self, dbu: float | None = None) -> None:
         import kfactory as kf
 
+        self.dbu = get_dbu() if dbu is None else dbu
         self.kcl = kf.KCLayout(f"gdsfactoryx_router_{next(self._counter)}")
-        self.kcl.layout.dbu = DBU
+        self.kcl.layout.dbu = self.dbu
         self.cache: dict[int, Any] = {}
         self.keep: dict[int, Any] = {}
         self.by_index: dict[int, Any] = {}
         self.tree_cache: dict[int, tuple[Any, Any]] = {}
         self._pool: list[Any] = []
+        self._depth: int = 0
+        self._unlocked_cells: int = 0
+        self._unlocked_indices: list[int] = []
 
     def layer(self, layer: Any) -> int:
         from gdsfactory.pdk import get_layer_info
@@ -150,6 +155,9 @@ class _Mirror:
         if component.locked:
             self.cache[key] = kc
             self.keep[key] = component
+        else:
+            self._unlocked_cells += 1
+            self._unlocked_indices.append(kc.cell_index())
         self.by_index[kc.cell_index()] = component
         return kc
 
@@ -167,12 +175,18 @@ class _Mirror:
         Nested routing calls (e.g. from a factory) get their own cell.
         """
         cell = self._pool.pop() if self._pool else self.new_cell()
+        self._depth += 1
         try:
             yield cell
         finally:
             cell.kdb_cell.clear()
             cell.ports.clear()
             self._pool.append(cell)
+            self._depth -= 1
+            if self._depth == 0:
+                for idx in self._unlocked_indices:
+                    self.by_index.pop(idx, None)
+                self._unlocked_indices.clear()
 
     def port(self, cell: Any, p: Port, name: str | None = None) -> Any:
         import klayout.db as kdb
@@ -183,7 +197,7 @@ class _Mirror:
             dcplx_trans=kdb.DCplxTrans(
                 1, round(orientation, 9) % 360, False, to_float(p.x), to_float(p.y)
             ),
-            width=round(to_float(p.width) / DBU) * DBU,
+            width=round(to_float(p.width) / self.dbu) * self.dbu,
             layer=self.layer(p.layer),
             port_type=p.port_type,
         )
@@ -192,10 +206,32 @@ class _Mirror:
 _MIRROR: _Mirror | None = None
 
 
+def _clear_routing_mirror() -> None:
+    global _MIRROR
+    m = _MIRROR
+    _MIRROR = None
+    if m is not None:
+        import kfactory as kf
+
+        kcl = m.kcl
+        try:
+            if kcl.library is not None:
+                kcl.library.delete()
+        finally:
+            if kf.layout.kcls.get(kcl.name) is kcl:
+                del kf.layout.kcls[kcl.name]
+
+
 def mirror() -> _Mirror:
     global _MIRROR
+    dbu = get_dbu()
+    if _MIRROR is not None and (
+        _MIRROR.dbu != dbu
+        or (_MIRROR._depth == 0 and _MIRROR._unlocked_cells > 256)
+    ):
+        _clear_routing_mirror()
     if _MIRROR is None:
-        _MIRROR = _Mirror()
+        _MIRROR = _Mirror(dbu)
     return _MIRROR
 
 
@@ -244,9 +280,40 @@ class _Hook:
             kfo.route_bundle_generic, kfe.route_bundle_generic = originals
 
 
+_CONCRETE_CACHE_VAR: contextvars.ContextVar[dict[int, tuple[Any, Any]] | None] = (
+    contextvars.ContextVar("_concrete_cache", default=None)
+)
+
+
+@contextlib.contextmanager
+def _concrete_cache_scope() -> Iterator[dict[int, tuple[Any, Any]]]:
+    """Per-call cache scope of stripped concrete components."""
+    existing = _CONCRETE_CACHE_VAR.get()
+    if existing is not None:
+        yield existing
+        return
+    cache: dict[int, tuple[Any, Any]] = {}
+    token = _CONCRETE_CACHE_VAR.set(cache)
+    try:
+        yield cache
+    finally:
+        cache.clear()
+        _CONCRETE_CACHE_VAR.reset(token)
+
+
+def _scoped_concrete_cache(fn: Callable[..., Any]) -> Callable[..., Any]:
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        with _concrete_cache_scope():
+            return fn(*args, **kwargs)
+
+    return wrapper
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
+@_scoped_concrete_cache
 def route_bundle_kf(
     component: Component,
     ports1: Sequence[Port],
@@ -466,7 +533,7 @@ def route_bundle_kf(
             raise
         # ------------------------------------------------------------ backbones
         base_bbs = [
-            np.asarray([[p.x * DBU, p.y * DBU] for p in r.pts], dtype=float)
+            np.asarray([[p.x * m.dbu, p.y * m.dbu] for p in r.pts], dtype=float)
             for r in hook.records
         ]
         route_records = list(hook.records)
@@ -532,6 +599,7 @@ def route_bundle_kf(
         return out
 
 
+@_scoped_concrete_cache
 def place_manhattan_kf(
     component: Component,
     p1: Port,
@@ -559,16 +627,17 @@ def place_manhattan_kf(
         kp2 = m.port(cell, p2, name="e0")
         bend90_concrete = _concrete_component(bend90)
         kb = m.export(bend90_concrete)
+        dbu = m.dbu
         straight_cells: dict[int, tuple[float, float]] = {}
 
         def kf_straight(width: int, length: int, **kw: Any) -> Any:
-            comp = straight_factory(width=width * DBU, length=length * DBU)
+            comp = straight_factory(width=width * dbu, length=length * dbu)
             kc = m.export(comp)
-            straight_cells[kc.cell_index()] = (width * DBU, length * DBU)
+            straight_cells[kc.cell_index()] = (width * dbu, length * dbu)
             return m.kcl[kc.cell_index()]
 
         pts_dbu = [
-            kdb.Point(round(to_float(x) / DBU), round(to_float(y) / DBU))
+            kdb.Point(round(to_float(x) / dbu), round(to_float(y) / dbu))
             for x, y in pts
         ]
         rk = place_manhattan(
@@ -580,7 +649,7 @@ def place_manhattan_kf(
             pts=pts_dbu,
             port_type=port_type,
             allow_width_mismatch=allow_width_mismatch,
-            route_width=round(to_float(route_width) / DBU)
+            route_width=round(to_float(route_width) / dbu)
             if route_width is not None
             else None,
         )
@@ -613,9 +682,9 @@ def place_manhattan_kf(
 def to_kf_port(p: Port) -> Any:
     """Concrete integer kfactory Port (in the private mirror layout)."""
     m = mirror()
-    cell = m.new_cell("port")
-    dp = m.port(cell, p)
-    return m.kcl[cell.cell_index()].ports[dp.name]
+    with m.scratch() as cell:
+        dp = m.port(cell, p)
+        return m.kcl[cell.cell_index()].ports[dp.name].copy()
 
 
 def _dbox(b: Any) -> Any:
@@ -625,7 +694,7 @@ def _dbox(b: Any) -> Any:
     if isinstance(b, kdb.DBox):
         return b
     if isinstance(b, kdb.Box):
-        return b.to_dtype(DBU)
+        return b.to_dtype(get_dbu())
     if all(hasattr(b, a) for a in ("left", "bottom", "right", "top")):
         return kdb.DBox(
             to_float(b.left), to_float(b.bottom), to_float(b.right), to_float(b.top)
@@ -680,9 +749,10 @@ def _dual_port(kp: Any, p: Port) -> Any:
     """Dual Trans of a kfactory port (exact kfactory integers + traced position)."""
     from gdsfactory.routing._dual import DNum, Trans
 
+    dbu = get_dbu()
     t = kp.trans
-    x = DNum.traced(p.x / DBU if is_tracer(p.x) else None, t.disp.x)
-    y = DNum.traced(p.y / DBU if is_tracer(p.y) else None, t.disp.y)
+    x = DNum.traced(p.x / dbu if is_tracer(p.x) else None, t.disp.x)
+    y = DNum.traced(p.y / dbu if is_tracer(p.y) else None, t.disp.y)
     return Trans(t.angle, t.is_mirror(), x, y)
 
 
@@ -694,18 +764,19 @@ def _traced_bend_radius(bend90: Component | None, kb: Any, port_type: str) -> An
 
     if bend90 is None or kb is None:
         return DNum(0)
+    dbu = get_dbu()
     v = get_radius(kb.ports.filter(port_type=port_type))
     ports = [p for p in bend90.ports if p.port_type == port_type]
     if not bend90.has_tracers() or len(ports) != 2:
         return DNum(v)
     p1, p2 = ports
     if manhattan_index(p1) == manhattan_index(p2):
-        r = xp.sqrt(xp.sum((p1.center_array - p2.center_array) ** 2)) / DBU
+        r = xp.sqrt(xp.sum((p1.center_array - p2.center_array) ** 2)) / dbu
     else:
         c = _virtual_corner(p1, p2)
         r1 = xp.sqrt(xp.sum((p1.center_array - c) ** 2))
         r2 = xp.sqrt(xp.sum((p2.center_array - c) ** 2))
-        r = (r1 if to_float(r1) >= to_float(r2) else r2) / DBU
+        r = (r1 if to_float(r1) >= to_float(r2) else r2) / dbu
     return DNum.traced(r, v)
 
 
@@ -733,13 +804,14 @@ def _traced_backbones(
     from gdsfactory.routing._dual import Box, DNum, Point
     from gdsfactory.routing._traced_router import to_dbu, traced_route_bundle
 
+    dbu = get_dbu()
     port_type = kf_kwargs.get("place_port_type", "optical")
     start_ts = [
         _dual_port(kp, p) for kp, p in zip(hook.start_ports, ports1, strict=True)
     ]
     end_ts = [_dual_port(kp, p) for kp, p in zip(hook.end_ports, ports2, strict=True)]
     widths = [
-        DNum.traced(p.width / DBU if is_tracer(p.width) else None, kp.width)
+        DNum.traced(p.width / dbu if is_tracer(p.width) else None, kp.width)
         for kp, p in zip(hook.start_ports, ports1, strict=True)
     ]
     if router == "optical":
@@ -756,7 +828,7 @@ def _traced_backbones(
         if isinstance(b, PortBox):
             dual_boxes.append(b.dual())
         else:
-            dual_boxes.append(Box(_dbox(b).to_itype(DBU)))
+            dual_boxes.append(Box(_dbox(b).to_itype(dbu)))
     routers = traced_route_bundle(
         start_ts,
         end_ts,
@@ -788,7 +860,7 @@ def _traced_backbones(
         out.append(
             xp.stack(
                 [
-                    xp.stack([asarray(p.x.tv()) * DBU, asarray(p.y.tv()) * DBU])
+                    xp.stack([asarray(p.x.tv()) * dbu, asarray(p.y.tv()) * dbu])
                     for p in pts
                 ]
             )
@@ -816,30 +888,32 @@ def _port_from_dict(d: dict[str, Any]) -> Port:
 
 
 def _key(p: Port) -> tuple[int, int]:
-    return (round(to_float(p.x) / DBU), round(to_float(p.y) / DBU))
+    dbu = get_dbu()
+    return (round(to_float(p.x) / dbu), round(to_float(p.y) / dbu))
 
 
 def _kkey(p: Any) -> tuple[int, int]:
+    dbu = get_dbu()
     t = p.dcplx_trans
-    return (round(t.disp.x / DBU), round(t.disp.y / DBU))
+    return (round(t.disp.x / dbu), round(t.disp.y / dbu))
 
 
 def _has_traced_geometry(*components: Component | None) -> bool:
     return any(c is not None and c.has_tracers() for c in components)
 
 
-_CONCRETE_CACHE: dict[int, tuple[Any, Any]] = {}
-
-
 def _concrete_component(c: Component) -> Component:
     """Concrete (tracer-free) version of a component, for the kfactory mirror."""
     if not c.has_tracers():
         return c
+    cache = _CONCRETE_CACHE_VAR.get()
+    if cache is None:
+        return _strip(c, {})
     key = id(c)
-    if key in _CONCRETE_CACHE and _CONCRETE_CACHE[key][0] is c:
-        return _CONCRETE_CACHE[key][1]
+    if key in cache and cache[key][0] is c:
+        return cache[key][1]
     cc = _strip(c, {})
-    _CONCRETE_CACHE[key] = (c, cc)
+    cache[key] = (c, cc)
     return cc
 
 
@@ -979,6 +1053,7 @@ def _rebuild_optical(
     length = length_kf
     length_straights = length_straights_kf
     if traced:
+        dbu = get_dbu()
         dl = 0.0
         dls = 0.0
         for e in elements:
@@ -986,8 +1061,8 @@ def _rebuild_optical(
                 dls = dls + _tangent(e["comp"].info.get("length", 0.0))
             else:
                 dl = dl + _tangent(e["comp"].info.get("length", 0.0))
-        length = length_kf + (dl + dls) / DBU
-        length_straights = length_straights_kf + dls / DBU
+        length = length_kf + (dl + dls) / dbu
+        length_straights = length_straights_kf + dls / dbu
 
     sp = _port_from_kport(rk.start_port)
     ep = _port_from_kport(rk.end_port)
@@ -1011,7 +1086,7 @@ def _port_from_kport(p: Any) -> Port:
 
     t = p.dcplx_trans
     li = p.layer_info
-    width = p.width * DBU if isinstance(p.width, int) else p.width
+    width = p.width * get_dbu() if isinstance(p.width, int) else p.width
     return Port(
         name=p.name,
         center=(t.disp.x, t.disp.y),
@@ -1150,7 +1225,7 @@ def _rebuild_electrical(
     sp = _port_from_kport(rk.start_port)
     ep = _port_from_kport(rk.end_port)
     d = xp.diff(pts, axis=0)
-    length = xp.sum(xp.sqrt(xp.sum(d**2, axis=1))) / DBU
+    length = xp.sum(xp.sqrt(xp.sum(d**2, axis=1))) / get_dbu()
     return ManhattanRoute(
         backbone=list(rk.backbone),
         backbone_um=pts,

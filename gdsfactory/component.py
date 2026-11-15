@@ -24,10 +24,13 @@ import numpy.typing as npt
 from gdsfactory._jax import (
     Array,
     asarray,
+    get_dbu,
+    has_abstract_tracers,
     has_tracers,
     is_tracer,
     maybe_float,
     points_array,
+    safe_arctan2,
     snap_dbu,
     stop_gradient,
     to_float,
@@ -473,8 +476,11 @@ class ComponentReference(_BBoxMixin):
         if self._name is not None:
             return self._name
         t = self.transform
-        x = round(to_float(t.x) * 1000)
-        y = round(to_float(t.y) * 1000)
+        if has_abstract_tracers(t):
+            return f"{self.cell.name}_traced"
+        inv = 1.0 / get_dbu()
+        x = round(to_float(t.x) * inv)
+        y = round(to_float(t.y) * inv)
         name = f"{self.cell.name}_{x}_{y}"
         # KLayout's own angle (atan2 of the stored sin/cos), like kfactory
         angle = t.klayout_angle()
@@ -588,14 +594,14 @@ class ComponentReference(_BBoxMixin):
     @property
     def trans(self) -> Any:
         """Integer (dbu) simple transformation, like kfactory's ``Instance.trans``."""
-        return self.transform.to_klayout().s_trans().to_itype(1e-3)
+        return self.transform.to_klayout().s_trans().to_itype(get_dbu())
 
     @trans.setter
     def trans(self, value: Any) -> None:
         import klayout.db as kdb
 
         if isinstance(value, kdb.Trans):
-            value = kdb.DCplxTrans(value.to_dtype(1e-3))
+            value = kdb.DCplxTrans(value.to_dtype(get_dbu()))
         elif isinstance(value, kdb.DTrans):
             value = kdb.DCplxTrans(value)
         self.dcplx_trans = value
@@ -627,9 +633,13 @@ class ComponentReference(_BBoxMixin):
 
     def transform_by(self, t: Transform) -> Self:
         """Applies t after the current transform (in the parent's frame)."""
-        self.transform = _kl_value(
-            t * self.transform, t.to_klayout() * self.transform.to_klayout()
-        )
+        new_t = t * self.transform
+        if has_abstract_tracers((t, self.transform)):
+            self.transform = new_t
+        else:
+            self.transform = _kl_value(
+                new_t, t.to_klayout() * self.transform.to_klayout()
+            )
         self.a = t.apply_vector(self.a)
         self.b = t.apply_vector(self.b)
         return self
@@ -686,7 +696,7 @@ class ComponentReference(_BBoxMixin):
         p1 = asarray(p1)
         p2 = asarray(p2)
         d = p2 - p1
-        theta = xp.degrees(xp.arctan2(d[1], d[0]))
+        theta = xp.degrees(safe_arctan2(d[1], d[0]))
         # mirror across line at angle theta through p1: T(p1) R(theta) M R(-theta) T(-p1)
         t = (
             Transform(p1[0], p1[1])
@@ -738,22 +748,18 @@ class ComponentReference(_BBoxMixin):
         else:
             raise TypeError(f"Cannot connect to {type(other)}")
 
-        if isinstance(port, Port):
-            # a port of this reference (possibly of an array element): map it back
-            # into the cell frame (kfactory semantics)
-            local = port.copy(self.transform.inverted())
-        elif isinstance(port, tuple):
-            local = self.ports[port].copy(self.transform.inverted())
-        else:
-            local = self.cell.ports[port]
+        cur_p = port if isinstance(port, Port) else self.ports[port]
+        local = cur_p.copy(self.transform.inverted())
 
-        if not allow_width_mismatch and round(to_float(local.width) * 1000) != round(
-            to_float(op.width) * 1000
+        if not allow_width_mismatch and not has_abstract_tracers(
+            (local.width, op.width)
         ):
-            raise PortWidthMismatchError(
-                f"Width mismatch {self.cell.name}:{local.name} ({to_float(local.width)}) "
-                f"!= {op.name} ({to_float(op.width)})"
-            )
+            inv = 1.0 / get_dbu()
+            if round(to_float(local.width) * inv) != round(to_float(op.width) * inv):
+                raise PortWidthMismatchError(
+                    f"Width mismatch {self.cell.name}:{local.name} ({to_float(local.width)}) "
+                    f"!= {op.name} ({to_float(op.width)})"
+                )
         if not allow_layer_mismatch and local.layer != op.layer:
             raise PortLayerMismatchError(
                 f"Layer mismatch {self.cell.name}:{local.name} ({local.layer}) "
@@ -769,17 +775,25 @@ class ComponentReference(_BBoxMixin):
         # With use_mirror=False the other port's mirror is ignored and the
         # current mirror of this reference is kept (xor'ed with `mirror`).
         if not use_angle:
-            self.transform = Transform(op.x - local.x, op.y - local.y)
-            return self
+            return self.move(op.x - cur_p.x, op.y - cur_p.y)
         op_mirror = op.mirror if use_mirror else False
         conn_mirror = mirror if use_mirror else (mirror != self.transform.mirror)
         op_t = Transform(op.x, op.y, op.orientation, op_mirror, 1.0)
         conn = Transform(0.0, 0.0, 180.0, conn_mirror, 1.0)
         p_t = Transform(local.x, local.y, local.orientation, local.mirror, 1.0)
-        self.transform = _kl_value(
-            op_t * conn * p_t.inverted(),
-            op_t.to_klayout() * conn.to_klayout() * p_t.to_klayout().inverted(),
-        )
+        new_t = op_t * conn * p_t.inverted()
+        old_t = self.transform
+        if has_abstract_tracers((op_t, conn, p_t)):
+            self.transform = new_t
+        else:
+            self.transform = _kl_value(
+                new_t,
+                op_t.to_klayout() * conn.to_klayout() * p_t.to_klayout().inverted(),
+            )
+        if self.is_regular_array():
+            delta = self.transform * old_t.inverted()
+            self.a = delta.apply_vector(self.a)
+            self.b = delta.apply_vector(self.b)
         return self
 
     # -------------------------------------------------------------- geometry
@@ -1145,9 +1159,15 @@ class Component(_BBoxMixin):
                 or is_tracer(p.width)
             ):
                 return True
+        for lab in self.labels:
+            if is_tracer(lab.position):
+                return True
         for r in self.insts:
             t = r.transform
-            if any(is_tracer(v) for v in (t.x, t.y, t.rotation, t.magnification)):
+            if any(
+                is_tracer(v)
+                for v in (t.x, t.y, t.rotation, t.magnification, r.a, r.b)
+            ):
                 return True
             if r.cell.has_tracers():
                 return True
@@ -1285,7 +1305,7 @@ class Component(_BBoxMixin):
                     )
                 except Exception:
                     pass
-            if register_cross_section:
+            if register_cross_section and not has_tracers(xs):
                 pdk = get_active_pdk()
                 if xs_name not in pdk.cross_sections:
                     pdk.register_cross_sections(**{xs_name: lambda: xs})
@@ -1354,7 +1374,8 @@ class Component(_BBoxMixin):
             kwargs["orientation"] = t.angle
         if "trans" in kwargs:
             t = kwargs.pop("trans")
-            kwargs["center"] = (t.disp.x * 1e-3, t.disp.y * 1e-3)
+            dbu = get_dbu()
+            kwargs["center"] = (t.disp.x * dbu, t.disp.y * dbu)
             kwargs["orientation"] = t.angle * 90
         return self.add_port(name=name, **kwargs)
 
@@ -1508,14 +1529,24 @@ class Component(_BBoxMixin):
         """
         import klayout.db as kdb
 
+        from gdsfactory import snap
+
         t = t or Transform()
+        if has_abstract_tracers(t) or has_abstract_tracers(self):
+            flat = self._flat_polygons(t)
+            if not snap.SNAP_ENABLED:
+                return flat
+            return {
+                lay: [snap_dbu(p) for p in polys] for lay, polys in flat.items()
+            }
+        dbu = get_dbu()
         kt = kt if kt is not None else kdb.ICplxTrans()
         out: dict[int, list[Array]] = {}
         for lay, polys in self.polygons.items():
             out.setdefault(lay, []).extend(_klayout_apply(t, kt, p) for p in polys)
         for r in self.insts:
             for rt in r.array_transforms():
-                krt = kdb.ICplxTrans(rt.to_klayout(), 1e-3)
+                krt = kdb.ICplxTrans(rt.to_klayout(), dbu)
                 for lay, polys in r.cell._flat_polygons_klayout(
                     t * rt, kt * krt
                 ).items():
@@ -1702,7 +1733,8 @@ class Component(_BBoxMixin):
         polys = self._flat_polygons(layer=layer).get(_layer_key(layer), [])
         if not polys:
             return 0.0
-        merged = float(kb.merge_arrays(polys).area()) * 1e-6
+        dbu = get_dbu()
+        merged = float(kb.merge_arrays(polys).area()) * (dbu * dbu)
         if any(is_tracer(p) for p in polys):
             total = sum(xp.abs(polygon_area(p)) for p in polys)
             return merged + (total - stop_gradient(total))
@@ -1732,7 +1764,7 @@ class Component(_BBoxMixin):
         if merge:
             r.merge()
         if smooth:
-            r = r.smoothed(int(smooth * 1e3))
+            r = r.smoothed(round(smooth / get_dbu()))
         return r
 
     # --------------------------------------------------------------- edits
@@ -1864,6 +1896,8 @@ class Component(_BBoxMixin):
             self._check_unlocked()
             op(self)
             return self
+        from gdsfactory.routing import _kf_router
+
         for c in self._cells_for(True):
             was_locked = c.locked
             c.locked = False
@@ -1871,6 +1905,11 @@ class Component(_BBoxMixin):
                 op(c)
             finally:
                 c.locked = was_locked
+                if was_locked and _kf_router._MIRROR is not None:
+                    key = id(c)
+                    _kf_router._MIRROR.cache.pop(key, None)
+                    _kf_router._MIRROR.keep.pop(key, None)
+                    _kf_router._MIRROR.tree_cache.pop(key, None)
         return self
 
     def remove_layers(
@@ -2103,50 +2142,50 @@ class Component(_BBoxMixin):
 
         The fill cells are added as references of ``fill_cell``.
         """
-        import kfactory as kf
         from kfactory.utils.fill import fill_tiled
 
+        from gdsfactory._kcl import temporary_kcl
         from gdsfactory.klayout_bridge import to_kfactory
         from gdsfactory.pdk import get_component, get_layer_info
         from gdsfactory.transform import Transform
 
         self._check_unlocked()
         fill_comp = get_component(fill_cell)
-        kcl = kf.KCLayout(f"gdsfactoryx_fill_{next(_unnamed_counter)}")
-        kcl.layout.dbu = 1e-3
-        kc = to_kfactory(self, kcl=kcl, add_ports=False)
-        kfill = to_kfactory(fill_comp, kcl=kcl, add_ports=False, unique_prefix="fill_")
-        before = {id(i) for i in kc.kdb_cell.each_inst()}
-        n_before = kc.kdb_cell.child_instances()
-        fill_tiled(
-            kc,
-            fill_cell=kfill,
-            fill_layers=[(get_layer_info(lay), int(sp)) for lay, sp in fill_layers],
-            fill_regions=[(r, int(sp)) for r, sp in fill_regions],
-            exclude_layers=[
-                (get_layer_info(lay), int(sp)) for lay, sp in exclude_layers
-            ],
-            exclude_regions=[(r, int(sp)) for r, sp in exclude_regions],
-            n_threads=n_threads,
-            tile_size=tile_size,
-            row_step=row_step,
-            col_step=col_step,
-            x_space=x_space,
-            y_space=y_space,
-            tile_border=tile_border,
-            multi=multi,
-        )
-        _ = before
-        for i, inst in enumerate(kc.kdb_cell.each_inst()):
-            if i < n_before or inst.cell_index != kfill.cell_index():
-                continue
-            ca = inst.dcell_inst
-            ref = self.add_ref(fill_comp)
-            ref.transform = Transform.from_klayout(inst.dcplx_trans)
-            if ca.is_regular_array():
-                ref.na, ref.nb = ca.na, ca.nb
-                ref.a = asarray([ca.a.x, ca.a.y])
-                ref.b = asarray([ca.b.x, ca.b.y])
+        with temporary_kcl(f"gdsfactoryx_fill_{next(_unnamed_counter)}") as kcl:
+            kcl.layout.dbu = get_dbu()
+            kc = to_kfactory(self, kcl=kcl, add_ports=False)
+            kfill = to_kfactory(fill_comp, kcl=kcl, add_ports=False, unique_prefix="fill_")
+            before = {id(i) for i in kc.kdb_cell.each_inst()}
+            n_before = kc.kdb_cell.child_instances()
+            fill_tiled(
+                kc,
+                fill_cell=kfill,
+                fill_layers=[(get_layer_info(lay), int(sp)) for lay, sp in fill_layers],
+                fill_regions=[(r, int(sp)) for r, sp in fill_regions],
+                exclude_layers=[
+                    (get_layer_info(lay), int(sp)) for lay, sp in exclude_layers
+                ],
+                exclude_regions=[(r, int(sp)) for r, sp in exclude_regions],
+                n_threads=n_threads,
+                tile_size=tile_size,
+                row_step=row_step,
+                col_step=col_step,
+                x_space=x_space,
+                y_space=y_space,
+                tile_border=tile_border,
+                multi=multi,
+            )
+            _ = before
+            for i, inst in enumerate(kc.kdb_cell.each_inst()):
+                if i < n_before or inst.cell_index != kfill.cell_index():
+                    continue
+                ca = inst.dcell_inst
+                ref = self.add_ref(fill_comp)
+                ref.transform = Transform.from_klayout(inst.dcplx_trans)
+                if ca.is_regular_array():
+                    ref.na, ref.nb = ca.na, ca.nb
+                    ref.a = asarray([ca.a.x, ca.a.y])
+                    ref.b = asarray([ca.b.x, ca.b.y])
 
     def child_cells(self) -> int:
         """Number of distinct cells referenced directly by this cell."""
@@ -2195,7 +2234,7 @@ class Component(_BBoxMixin):
     def _draw_ports(self) -> None:
         import klayout.db as kdb
 
-        dbu = 0.001
+        dbu = get_dbu()
         for port in self.ports:
             w = round(to_float(port.width) / dbu)
             marker = kdb.Region(
@@ -2561,7 +2600,7 @@ class _ShapesProxy:
 
         self._c._check_unlocked()
         if isinstance(shape, kdb.DText | kdb.Text):
-            t = shape if isinstance(shape, kdb.DText) else shape.to_dtype(1e-3)
+            t = shape if isinstance(shape, kdb.DText) else shape.to_dtype(get_dbu())
             self._c.labels.append(Label(t.string, (t.x, t.y), self._layer))
             return shape
         if isinstance(shape, kdb.Texts):
@@ -2569,7 +2608,7 @@ class _ShapesProxy:
                 self.insert(t)
             return shape
         if isinstance(shape, kdb.DPath | kdb.Path):
-            dpath = shape if isinstance(shape, kdb.DPath) else shape.to_dtype(1e-3)
+            dpath = shape if isinstance(shape, kdb.DPath) else shape.to_dtype(get_dbu())
             pts = asarray([[p.x, p.y] for p in dpath.each_point()])
             self._c._paths.setdefault(self._layer, []).append((pts, dpath.width))
         for arr in _to_point_arrays(shape):
@@ -2624,6 +2663,8 @@ def _kl_value(t: Transform, kt: Any) -> Transform:
     Reproduces KLayout's floating point arithmetic (same rounding as upstream)
     while keeping the derivatives of the differentiable composition t.
     """
+    if has_abstract_tracers(t):
+        return t
     rot = t.rotation
     if manhattan_angle(rot) is not None:
         # kfactory uses exact integer transformations for manhattan placements
@@ -2664,9 +2705,13 @@ def _klayout_apply(t: Transform, kt: Any, points: Array) -> Array:
     exact = t.apply(points)
     if not snap.SNAP_ENABLED:
         return exact
+    if has_abstract_tracers((t, points)):
+        return snap_dbu(exact)
+    dbu = get_dbu()
+    inv = 1.0 / dbu
     if kt is None:
-        kt = kdb.ICplxTrans(t.to_klayout(), 1e-3)
-    q = np.round(to_numpy(points) * 1000.0).astype(np.int64)
+        kt = kdb.ICplxTrans(t.to_klayout(), dbu)
+    q = np.round(to_numpy(points) * inv).astype(np.int64)
     if (
         kt.is_ortho()
         and not kt.is_mag()
@@ -2678,7 +2723,7 @@ def _klayout_apply(t: Transform, kt: Any, points: Array) -> Array:
         res = [st.trans(kdb.Point(int(x), int(y))) for x, y in q]
     else:
         res = [kt.trans(kdb.Point(int(x), int(y))) for x, y in q]
-    rounded = np.array([[p.x, p.y] for p in res], dtype=np.float64) * 1e-3
+    rounded = np.array([[p.x, p.y] for p in res], dtype=np.float64) * dbu
     if is_tracer(exact) or isinstance(exact, jax_array_types()):
         return exact + stop_gradient(asarray(rounded) - exact)
     rounded.flags.writeable = False

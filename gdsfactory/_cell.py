@@ -17,7 +17,7 @@ import inspect
 from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any, ParamSpec, Protocol, cast
 
-from gdsfactory._jax import has_tracers
+from gdsfactory._jax import has_abstract_tracers, has_tracers
 
 if TYPE_CHECKING:
     from gdsfactory.component import Component
@@ -97,14 +97,14 @@ def _metadata(value: Any) -> Any:
     """Settings value as kfactory stores it (functions -> names); keeps jax values."""
     from kfactory.serialization import convert_metadata_type
 
-    if has_tracers(value) or type(value).__module__.startswith("jax"):
-        return value
     if isinstance(value, dict):
         return {k: _metadata(v) for k, v in value.items()}
     if isinstance(value, list):
         return [_metadata(v) for v in value]
     if isinstance(value, tuple):
         return tuple(_metadata(v) for v in value)
+    if has_tracers(value) or type(value).__module__.startswith("jax"):
+        return value
     try:
         return convert_metadata_type(value)
     except Exception:
@@ -157,6 +157,9 @@ def clear_cache() -> None:
     for c in _CACHES:
         c.clear()
     _BY_NAME.clear()
+    from gdsfactory.routing._kf_router import _clear_routing_mirror
+
+    _clear_routing_mirror()
 
 
 def cached_cells() -> list[Any]:
@@ -261,7 +264,10 @@ def cell(
 
             function_name = func.__name__
             if set_name:
-                c._name = get_cell_name(_basename or function_name, **params)
+                if has_abstract_tracers(params):
+                    c._name = f"{_basename or function_name}_traced"
+                else:
+                    c._name = get_cell_name(_basename or function_name, **params)
             if set_settings:
                 c.settings = type(c.settings)(
                     {k: _metadata(v) for k, v in params.items()}

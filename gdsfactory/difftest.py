@@ -133,13 +133,13 @@ def xor(
         print("Text only in new")
         get_texts(ld.layer_index_b(), b_texts).insert(bnota)
 
-    ld.on_cell_in_a_only = lambda anotb: cell_diff_a(anotb)  # type: ignore[assignment]
-    ld.on_cell_in_b_only = lambda anotb: cell_diff_b(anotb)  # type: ignore[assignment]
-    ld.on_text_in_a_only = lambda anotb, prop_id: text_diff_a(anotb, prop_id)  # type: ignore[assignment]
-    ld.on_text_in_b_only = lambda anotb, prop_id: text_diff_b(anotb, prop_id)  # type: ignore[assignment]
+    ld.on_cell_in_a_only = cell_diff_a  # type: ignore[assignment]
+    ld.on_cell_in_b_only = cell_diff_b  # type: ignore[assignment]
+    ld.on_text_in_a_only = text_diff_a  # type: ignore[assignment]
+    ld.on_text_in_b_only = text_diff_b  # type: ignore[assignment]
 
-    ld.on_polygon_in_a_only = lambda anotb, prop_id: polygon_diff_a(anotb, prop_id)  # type: ignore[assignment]
-    ld.on_polygon_in_b_only = lambda anotb, prop_id: polygon_diff_b(anotb, prop_id)  # type: ignore[assignment]
+    ld.on_polygon_in_a_only = polygon_diff_a  # type: ignore[assignment]
+    ld.on_polygon_in_b_only = polygon_diff_b  # type: ignore[assignment]
 
     if ignore_cell_name_differences:
         ld.on_cell_name_differs = lambda anotb: print(f"cell name differs {anotb.name}")  # type: ignore[assignment]
@@ -269,8 +269,65 @@ def diff(
     if ref_file == run_file:
         return DiffResult(has_differences=False)
 
-    old = read_top_cell(ref_file)
-    new = read_top_cell(run_file)
+    old_kcl: KCLayout | None = None
+    new_kcl: KCLayout | None = None
+    had_error = False
+    try:
+        old = read_top_cell(ref_file)
+        old_kcl = old.kcl
+        new = read_top_cell(run_file)
+        new_kcl = new.kcl
+        return _diff_cells(
+            old=old,
+            new=new,
+            ref_file=ref_file,
+            run_file=run_file,
+            xor=xor,
+            test_name=test_name,
+            ignore_sliver_differences=ignore_sliver_differences,
+            ignore_cell_name_differences=ignore_cell_name_differences,
+            ignore_label_differences=ignore_label_differences,
+            show=show,
+            stagger=stagger,
+            out_file=out_file,
+            sliver_tolerance=sliver_tolerance,
+        )
+    except BaseException:
+        had_error = True
+        raise
+    finally:
+        cleanup_err: Exception | None = None
+        for kcl in (old_kcl, new_kcl):
+            if kcl is None:
+                continue
+            try:
+                if kcl.library is not None:
+                    kcl.library.delete()
+            except Exception as err:
+                if cleanup_err is None:
+                    cleanup_err = err
+            finally:
+                if kf.layout.kcls.get(kcl.name) is kcl:
+                    del kf.layout.kcls[kcl.name]
+        if cleanup_err is not None and not had_error:
+            raise cleanup_err
+
+
+def _diff_cells(
+    old: DKCell,
+    new: DKCell,
+    ref_file: pathlib.Path,
+    run_file: pathlib.Path,
+    xor: bool,
+    test_name: str,
+    ignore_sliver_differences: bool | None,
+    ignore_cell_name_differences: bool | None,
+    ignore_label_differences: bool | None,
+    show: bool,
+    stagger: bool,
+    out_file: PathType | None,
+    sliver_tolerance: int,
+) -> DiffResult:
 
     if ignore_sliver_differences is None:
         ignore_sliver_differences = CONF.difftest_ignore_sliver_differences

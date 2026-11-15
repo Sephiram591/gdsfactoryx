@@ -28,6 +28,7 @@ import numpy as np
 import gdsfactory as gf
 from gdsfactory._jax import (
     asarray,
+    get_dbu,
     has_tracers,
     is_tracer,
     stop_gradient,
@@ -158,7 +159,7 @@ def place_all_angle_route(
         orientation=xp.mod(_angle_deg(end_v) + 180, 360),
         layer=layer,
     )
-    dbu = 1e-3
+    dbu = get_dbu()
     old_pt = pts[0]
     pt = pts[1]
     start_offset: Any = 0.0
@@ -236,12 +237,13 @@ def place_all_angle_route(
 def _kf_port(cell: Any, m: Any, p: _P, name: str, layer: Any) -> Any:
     import klayout.db as kdb
 
+    dbu = m.dbu
     return cell.create_port(
         name=name,
         dcplx_trans=kdb.DCplxTrans(
             1, to_float(p.a), False, to_float(p.c[0]), to_float(p.c[1])
         ),
-        width=round(to_float(p.w) * 1000) / 1000,
+        width=round(to_float(p.w) / dbu) * dbu,
         layer=m.layer(layer),
         port_type="optical",
     )
@@ -268,9 +270,13 @@ class _Router:
         self._n = 0
 
     def kf_bend(self, width: float, angle: float) -> Any:
+        from gdsfactory.routing._kf_router import _concrete_component
+
         key = (round(width, 9), round(angle, 9))
         if key not in self._bends:
-            self._bends[key] = self.m.export(self.bend_func(width=width, angle=angle))
+            self._bends[key] = self.m.export(
+                _concrete_component(self.bend_func(width=width, angle=angle))
+            )
         return self._bends[key]
 
     def kport(self, p: _P) -> Any:

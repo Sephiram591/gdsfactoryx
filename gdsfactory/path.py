@@ -28,6 +28,7 @@ from gdsfactory._cell import cell
 from gdsfactory._jax import (
     Array,
     asarray,
+    get_dbu,
     is_tracer,
     jnp,
     round_st,
@@ -194,9 +195,9 @@ class Path:
             if isinstance(trans, kdb.DTrans):
                 trans = kdb.DCplxTrans(trans)
             elif isinstance(trans, kdb.Trans):
-                trans = kdb.DCplxTrans(trans.to_dtype(1e-3))
+                trans = kdb.DCplxTrans(trans.to_dtype(get_dbu()))
             elif isinstance(trans, kdb.ICplxTrans):
-                trans = trans.to_itrans(1e-3)
+                trans = trans.to_itrans(get_dbu())
             trans = Transform.from_klayout(trans)
         self.points = trans.apply(self.points)
         self.start_angle = trans.apply_angle(self.start_angle)
@@ -1482,20 +1483,24 @@ _SQRT_2_OVER_PI: float = float(np.sqrt(2 / np.pi))
 
 
 def _scipy_fresnel(
-    z: npt.NDArray[np.float64],
-) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+    z: npt.NDArray[Any],
+) -> tuple[npt.NDArray[Any], npt.NDArray[Any]]:
     from scipy.special import fresnel
 
-    s, c = fresnel(np.asarray(z, dtype=np.float64))
-    return np.asarray(s, dtype=np.float64), np.asarray(c, dtype=np.float64)
+    z_arr = np.asarray(z)
+    out_dtype = np.float32 if z_arr.dtype == np.float32 else np.float64
+    s, c = fresnel(np.asarray(z_arr, dtype=np.float64))
+    return np.asarray(s, dtype=out_dtype), np.asarray(c, dtype=out_dtype)
 
 
 @jax.custom_jvp
 def _fresnel_integrals(z: Array) -> tuple[Array, Array]:
     """Differentiable Fresnel integrals (S(z), C(z)) = scipy.special.fresnel(z)."""
-    shape = jax.ShapeDtypeStruct(jnp.shape(z), jnp.float64)
+    out_dtype = jnp.result_type(z, jnp.float32)
+    za = jnp.asarray(z, dtype=out_dtype)
+    shape = jax.ShapeDtypeStruct(jnp.shape(za), out_dtype)
     return jax.pure_callback(
-        _scipy_fresnel, (shape, shape), z, vmap_method="expand_dims"
+        _scipy_fresnel, (shape, shape), za, vmap_method="expand_dims"
     )
 
 
@@ -1505,7 +1510,10 @@ def _fresnel_jvp(primals: tuple[Array], tangents: tuple[Array]) -> tuple[Any, An
     (dz,) = tangents
     s, c = _fresnel_integrals(z)
     arg = xp.pi * z**2 / 2
-    return (s, c), (xp.sin(arg) * dz, xp.cos(arg) * dz)
+    return (s, c), (
+        xp.asarray(xp.sin(arg) * dz, dtype=s.dtype),
+        xp.asarray(xp.cos(arg) * dz, dtype=s.dtype),
+    )
 
 
 def _fresnel_xy(t: Array) -> Array:

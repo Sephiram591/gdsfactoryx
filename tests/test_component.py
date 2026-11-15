@@ -641,12 +641,15 @@ def test_remap_layers_recursive_locked_child() -> None:
     assert child.locked, "expected a cached component to be locked"
 
     c = gf.Component()
-    c << child
-    c.remap_layers({(1, 0): (2, 0)}, recursive=True)
+    try:
+        c << child
+        c.remap_layers({(1, 0): (2, 0)}, recursive=True)
 
-    assert child.area((1, 0)) == 0, f"{child.area((1, 0))}"
-    assert child.area((2, 0)) == 10, f"{child.area((2, 0))}"
-    assert child.locked, "child lock should be restored"
+        assert child.area((1, 0)) == 0, f"{child.area((1, 0))}"
+        assert child.area((2, 0)) == 10, f"{child.area((2, 0))}"
+        assert child.locked, "child lock should be restored"
+    finally:
+        gf.clear_cache()
 
 
 @pytest.mark.parametrize(

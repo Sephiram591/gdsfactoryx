@@ -5,12 +5,13 @@ Adapted from PHIDL https://github.com/amccaugh/phidl/ by Adam McCaughan
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Sequence
 from itertools import zip_longest
 from typing import Any, Literal
 
 import gdsfactory as gf
-from gdsfactory._jax import to_float, xp
+from gdsfactory._jax import is_abstract_tracer, to_float, xp
 from gdsfactory.component import Component, ComponentReference
 from gdsfactory.transform import Transform
 from gdsfactory.typings import Anchor, ComponentSpec, ComponentSpecs, Float2, Spacing
@@ -40,6 +41,8 @@ def _align_offset(bbox: Any, align_x: str, align_y: str) -> tuple[Any, Any]:
 
 def _or(prev: Any, default: Any) -> Any:
     """Python ``prev or default`` (as used by kfactory) on concrete values."""
+    if is_abstract_tracer(prev):
+        return xp.where(prev != 0, prev, default)
     return prev if prev is not None and to_float(prev) != 0 else default
 
 
@@ -96,13 +99,31 @@ def _grid(
             [None if inst is None else inst.dbbox() for inst in array]
             for array in insts
         ]
-        w = max(
-            max(0 if bbox is None else bbox.width() + spacing_x for bbox in box_array)
-            for box_array in bboxes
+        w = functools.reduce(
+            xp.maximum,
+            [
+                functools.reduce(
+                    xp.maximum,
+                    [
+                        0.0 if bbox is None else bbox.width() + spacing_x
+                        for bbox in box_array
+                    ],
+                )
+                for box_array in bboxes
+            ],
         )
-        h = max(
-            max(0 if bbox is None else bbox.height() + spacing_y for bbox in box_array)
-            for box_array in bboxes
+        h = functools.reduce(
+            xp.maximum,
+            [
+                functools.reduce(
+                    xp.maximum,
+                    [
+                        0.0 if bbox is None else bbox.height() + spacing_y
+                        for bbox in box_array
+                    ],
+                )
+                for box_array in bboxes
+            ],
         )
         x0: Any = 0.0
         y0: Any = 0.0
@@ -127,8 +148,20 @@ def _grid(
     y0 = 0.0
     _insts = _create_insts(target, flat, rotation, mirror)
     shape_bboxes = [None if inst is None else inst.dbbox() for inst in _insts]
-    w = max(0 if box is None else box.width() for box in shape_bboxes) + spacing_x
-    h = max(0 if box is None else box.height() for box in shape_bboxes) + spacing_y
+    w = (
+        functools.reduce(
+            xp.maximum,
+            [0.0 if box is None else box.width() for box in shape_bboxes],
+        )
+        + spacing_x
+    )
+    h = (
+        functools.reduce(
+            xp.maximum,
+            [0.0 if box is None else box.height() for box in shape_bboxes],
+        )
+        + spacing_y
+    )
     for i, (inst, bbox) in enumerate(zip(_insts, shape_bboxes, strict=False)):
         i_x = i % shape[1]
         if i_x == 0:

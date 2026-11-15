@@ -14,14 +14,12 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from gdsfactory._jax import Array, asarray, to_float, to_numpy
+from gdsfactory._jax import Array, asarray, get_dbu, to_float, to_numpy
 
 if TYPE_CHECKING:
     import klayout.db as kdb
 
     from gdsfactory.component import Component
-
-DBU = 1e-3
 
 
 def _kdb() -> Any:
@@ -30,16 +28,17 @@ def _kdb() -> Any:
     return kdb
 
 
-def array_to_kpolygon(points: Any) -> kdb.Polygon:
-    """(N, 2) um array -> integer kdb.Polygon (rounded to 1 nm).
+def array_to_kpolygon(points: Any, dbu: float | None = None) -> kdb.Polygon:
+    """(N, 2) um array -> integer kdb.Polygon (rounded to active dbu).
 
-    Built as upstream inserts shapes (a ``kdb.DPolygon`` converted to the 1 nm grid): KLayout normalizes the float
+    Built as upstream inserts shapes (a ``kdb.DPolygon`` converted to the dbu grid): KLayout normalizes the float
     polygon before rounding it, so points that only become collinear on the grid are kept. Normalizing an integer
     polygon after rounding would drop them, and the GDS writer then splits large polygons at other places.
     """
     kdb = _kdb()
+    dbu = get_dbu() if dbu is None else dbu
     pts = to_numpy(points)
-    return kdb.DPolygon([kdb.DPoint(float(x), float(y)) for x, y in pts]).to_itype(DBU)
+    return kdb.DPolygon([kdb.DPoint(float(x), float(y)) for x, y in pts]).to_itype(dbu)
 
 
 def array_to_kdpolygon(points: Any) -> kdb.DPolygon:
@@ -48,32 +47,37 @@ def array_to_kdpolygon(points: Any) -> kdb.DPolygon:
     return kdb.DPolygon([kdb.DPoint(float(x), float(y)) for x, y in pts])
 
 
-def arrays_to_region(polys: list[Any]) -> kdb.Region:
+def arrays_to_region(polys: list[Any], dbu: float | None = None) -> kdb.Region:
     kdb = _kdb()
+    dbu = get_dbu() if dbu is None else dbu
     r = kdb.Region()
     for p in polys:
-        r.insert(array_to_kpolygon(p))
+        r.insert(array_to_kpolygon(p, dbu=dbu))
     return r
 
 
-def merge_arrays(polys: list[Any], smooth: float | None = None) -> kdb.Region:
-    r = arrays_to_region(polys)
+def merge_arrays(
+    polys: list[Any], smooth: float | None = None, dbu: float | None = None
+) -> kdb.Region:
+    dbu = get_dbu() if dbu is None else dbu
+    r = arrays_to_region(polys, dbu=dbu)
     r.merge()
     if smooth:
-        r = r.smoothed(round(smooth / DBU))
+        r = r.smoothed(round(smooth / dbu))
     return r
 
 
-def kpolygon_to_array(poly: Any) -> Array:
+def kpolygon_to_array(poly: Any, dbu: float | None = None) -> Array:
     """kdb.Polygon / DPolygon / SimplePolygon -> (N, 2) um jax array (holes resolved)."""
     kdb = _kdb()
+    dbu = get_dbu() if dbu is None else dbu
     if isinstance(poly, kdb.Polygon | kdb.SimplePolygon):
         if isinstance(poly, kdb.Polygon) and poly.holes():
             poly = poly.resolved_holes()
         pts = (
-            [(p.x * DBU, p.y * DBU) for p in poly.each_point_hull()]
+            [(p.x * dbu, p.y * dbu) for p in poly.each_point_hull()]
             if isinstance(poly, kdb.Polygon)
-            else [(p.x * DBU, p.y * DBU) for p in poly.each_point()]
+            else [(p.x * dbu, p.y * dbu) for p in poly.each_point()]
         )
     elif isinstance(poly, kdb.DPolygon | kdb.DSimplePolygon):
         if isinstance(poly, kdb.DPolygon) and poly.holes():
@@ -88,8 +92,8 @@ def kpolygon_to_array(poly: Any) -> Array:
     return asarray(np.asarray(pts, dtype=np.float64))
 
 
-def region_to_arrays(region: kdb.Region) -> list[Array]:
-    return [kpolygon_to_array(p) for p in region.each()]
+def region_to_arrays(region: kdb.Region, dbu: float | None = None) -> list[Array]:
+    return [kpolygon_to_array(p, dbu=dbu) for p in region.each()]
 
 
 def klayout_shape_to_arrays(shape: Any) -> list[Array]:
@@ -167,7 +171,8 @@ def to_kfactory(
 
     if kcl is None:
         kcl = kf.KCLayout(f"gdsfactoryx_export_{next(_EXPORT_COUNTER)}")
-        kcl.layout.dbu = DBU
+        kcl.layout.dbu = get_dbu()
+    dbu = float(kcl.layout.dbu)
     names = {k: unique_prefix + v for k, v in _unique_names(component).items()}
     excluded: set[int] = set()
     if exclude_layers:
@@ -238,7 +243,7 @@ def to_kfactory(
                 )
                 kp = kc.create_port(
                     name=p.name,
-                    width=round(to_float(p.width) / DBU) * DBU,
+                    width=round(to_float(p.width) / dbu) * dbu,
                     layer=layer_index(p.layer),
                     port_type=p.port_type,
                     dcplx_trans=trans,
@@ -267,7 +272,7 @@ def to_kfactory(
         baked into a copy of the cell.
         """
         trans_ = trans * r.transform.to_klayout()
-        base = kdb.DCplxTrans(kdb.ICplxTrans(trans_, DBU).s_trans().to_dtype(DBU))
+        base = kdb.DCplxTrans(kdb.ICplxTrans(trans_, dbu).s_trans().to_dtype(dbu))
         residual = base.inverted() * trans_
         if not r.cell._virtual and residual == kdb.DCplxTrans():
             child = build(r.cell)
@@ -313,7 +318,7 @@ def to_kfactory(
                 shapes = kc.kdb_cell.shapes(layer_index(lay))
                 for poly in polys:
                     shapes.insert(
-                        array_to_kdpolygon(poly).transformed(residual).to_itype(DBU)
+                        array_to_kdpolygon(poly).transformed(residual).to_itype(dbu)
                     )
             for lab in c.labels:
                 if lab.layer not in excluded:
@@ -334,13 +339,13 @@ def to_kfactory(
         else:
             # KCell: flatten + merge on the grid, then KLayout transforms the
             # integer shapes
-            itrans = kdb.ICplxTrans(residual, DBU)
+            itrans = kdb.ICplxTrans(residual, dbu)
             for lay, polys in c._flat_polygons_klayout().items():
                 if lay in excluded or not polys:
                     continue
                 region = kdb.Region()
                 for poly in polys:
-                    region.insert(array_to_kpolygon(poly))
+                    region.insert(array_to_kpolygon(poly, dbu=dbu))
                 region.merge()
                 kc.kdb_cell.shapes(layer_index(lay)).insert(region.transformed(itrans))
             for lab in c._flat_labels(rt):
@@ -356,7 +361,7 @@ def to_kfactory(
                 )
                 kp = kc.create_port(
                     name=q.name,
-                    width=round(to_float(q.width) / DBU) * DBU,
+                    width=round(to_float(q.width) / dbu) * dbu,
                     layer=layer_index(q.layer),
                     port_type=q.port_type,
                     dcplx_trans=kdb.DCplxTrans(
@@ -391,89 +396,93 @@ def flatten_exact(
     Returns:
         polygons per layer index and labels.
     """
-    import kfactory as kf
-
+    from gdsfactory._kcl import temporary_kcl
     from gdsfactory.component import Component as _C
     from gdsfactory.component import Label
     from gdsfactory.pdk import get_layer, get_layer_info
 
     kdb = _kdb()
-    kcl = kf.KCLayout(f"gdsfactoryx_flatten_{next(_EXPORT_COUNTER)}")
-    kcl.layout.dbu = DBU
-    shell = _C(name=f"{component.name}_flat")
-    shell.polygons = dict(component.polygons)
-    shell.labels = list(component.labels)
-    for r in component.insts:
-        if not r.virtual:
-            shell.insts.append(r)
-    kc = to_kfactory(shell, kcl=kcl, add_ports=False)
-    cache: dict[int, tuple[Any, Any]] = {}
+    dbu = get_dbu()
+    with temporary_kcl(f"gdsfactoryx_flatten_{next(_EXPORT_COUNTER)}") as kcl:
+        kcl.layout.dbu = dbu
+        shell = _C(name=f"{component.name}_flat")
+        shell.polygons = dict(component.polygons)
+        shell.labels = list(component.labels)
+        for r in component.insts:
+            if not r.virtual:
+                shell.insts.append(r)
+        kc = to_kfactory(shell, kcl=kcl, add_ports=False)
+        cache: dict[int, tuple[Any, Any]] = {}
 
-    def layer_index(layer: int) -> int:
-        return kcl.layout.layer(get_layer_info(layer))
+        def layer_index(layer: int) -> int:
+            return kcl.layout.layer(get_layer_info(layer))
 
-    def insert_flat(r: Any, trans: Any) -> None:
-        trans_ = trans * r.transform.to_klayout()
-        transforms = [trans_]
-        if r.na > 1 or r.nb > 1:
-            a, b = to_numpy(r.a), to_numpy(r.b)
-            transforms = [
-                kdb.DCplxTrans(
-                    float(ia * a[0] + ib * b[0]), float(ia * a[1] + ib * b[1])
-                )
-                * trans_
-                for ia in range(r.na)
-                for ib in range(r.nb)
-            ]
-        for tr in transforms:
-            if r.cell._virtual:
-                for lay, polys in r.cell.polygons.items():
-                    shapes = kc.kdb_cell.shapes(layer_index(lay))
-                    for poly in polys:
-                        shapes.insert(
-                            array_to_kdpolygon(poly).transformed(tr).to_itype(DBU)
-                        )
-                for lab in r.cell.labels:
-                    kc.kdb_cell.shapes(layer_index(lab.layer)).insert(
-                        kdb.DText(
-                            lab.text, to_float(lab.x), to_float(lab.y)
-                        ).transformed(tr)
+        def insert_flat(r: Any, trans: Any) -> None:
+            trans_ = trans * r.transform.to_klayout()
+            transforms = [trans_]
+            if r.na > 1 or r.nb > 1:
+                a, b = to_numpy(r.a), to_numpy(r.b)
+                transforms = [
+                    kdb.DCplxTrans(
+                        float(ia * a[0] + ib * b[0]), float(ia * a[1] + ib * b[1])
                     )
-                for rr in r.cell.insts:
-                    insert_flat(rr, tr)
-            else:
-                child = to_kfactory(
-                    r.cell, kcl=kcl, add_ports=False, cache=cache, unique_prefix="f_"
-                )
-                for li in kcl.layer_indexes():
-                    reg = kdb.Region(child.kdb_cell.begin_shapes_rec(li))
-                    if not reg.is_empty():
-                        reg.transform(kdb.ICplxTrans(tr, DBU))
-                        kc.kdb_cell.shapes(li).insert(reg)
+                    * trans_
+                    for ia in range(r.na)
+                    for ib in range(r.nb)
+                ]
+            for tr in transforms:
+                if r.cell._virtual:
+                    for lay, polys in r.cell.polygons.items():
+                        shapes = kc.kdb_cell.shapes(layer_index(lay))
+                        for poly in polys:
+                            shapes.insert(
+                                array_to_kdpolygon(poly).transformed(tr).to_itype(dbu)
+                            )
+                    for lab in r.cell.labels:
+                        kc.kdb_cell.shapes(layer_index(lab.layer)).insert(
+                            kdb.DText(
+                                lab.text, to_float(lab.x), to_float(lab.y)
+                            ).transformed(tr)
+                        )
+                    for rr in r.cell.insts:
+                        insert_flat(rr, tr)
+                else:
+                    child = to_kfactory(
+                        r.cell,
+                        kcl=kcl,
+                        add_ports=False,
+                        cache=cache,
+                        unique_prefix="f_",
+                    )
+                    for li in kcl.layer_indexes():
+                        reg = kdb.Region(child.kdb_cell.begin_shapes_rec(li))
+                        if not reg.is_empty():
+                            reg.transform(kdb.ICplxTrans(tr, dbu))
+                            kc.kdb_cell.shapes(li).insert(reg)
 
-    for r in component.insts:
-        if r.virtual:
-            insert_flat(r, kdb.DCplxTrans())
-    kc.kdb_cell.flatten(False)
-    polys: dict[int, list[Array]] = {}
-    labels: list[Any] = []
-    for li in kcl.layout.layer_indexes():
-        info = kcl.layout.get_info(li)
-        try:
-            lay = int(get_layer((info.layer, info.datatype)))
-        except Exception:
-            continue
-        shapes = kc.kdb_cell.shapes(li)
-        reg = kdb.Region(shapes)
-        if merge:
-            reg.merge()
-        out = region_to_arrays(reg)
-        if out:
-            polys[lay] = out
-        for sh in shapes.each(kdb.Shapes.STexts):
-            t = sh.dtext
-            labels.append(Label(t.string, (t.x, t.y), lay))
-    return polys, labels
+        for r in component.insts:
+            if r.virtual:
+                insert_flat(r, kdb.DCplxTrans())
+        kc.kdb_cell.flatten(False)
+        polys: dict[int, list[Array]] = {}
+        labels: list[Any] = []
+        for li in kcl.layout.layer_indexes():
+            info = kcl.layout.get_info(li)
+            try:
+                lay = int(get_layer((info.layer, info.datatype)))
+            except Exception:
+                continue
+            shapes = kc.kdb_cell.shapes(li)
+            reg = kdb.Region(shapes)
+            if merge:
+                reg.merge()
+            out = region_to_arrays(reg, dbu=dbu)
+            if out:
+                polys[lay] = out
+            for sh in shapes.each(kdb.Shapes.STexts):
+                t = sh.dtext
+                labels.append(Label(t.string, (t.x, t.y), lay))
+        return polys, labels
 
 
 def _clean(d: dict[str, Any]) -> dict[str, Any]:
@@ -501,7 +510,8 @@ def write(
     with_metadata: bool = True,
     exclude_layers: Any = None,
 ) -> pathlib.Path:
-    kc = to_kfactory(component, exclude_layers=exclude_layers)
+    from gdsfactory._kcl import temporary_kcl
+
     gdspath = pathlib.Path(gdspath)
     opts = save_options
     if opts is None:
@@ -510,7 +520,10 @@ def write(
         opts = save_layout_options()
     if not with_metadata:
         opts.write_context_info = False
-    kc.write(str(gdspath), save_options=opts, set_meta_data=with_metadata)
+    with temporary_kcl(f"gdsfactoryx_export_{next(_EXPORT_COUNTER)}") as kcl:
+        kcl.layout.dbu = get_dbu()
+        kc = to_kfactory(component, kcl=kcl, exclude_layers=exclude_layers)
+        kc.write(str(gdspath), save_options=opts, set_meta_data=with_metadata)
     return gdspath
 
 
@@ -518,10 +531,15 @@ def show(component: Any, **kwargs: Any) -> None:
     """Shows a Component (or a GDS path / kfactory cell) in KLayout via klive."""
     import kfactory as kf
 
+    from gdsfactory._kcl import temporary_kcl
     from gdsfactory.component import Component as _Component
 
     if isinstance(component, _Component):
-        component = to_kfactory(component)
+        with temporary_kcl(f"gdsfactoryx_export_{next(_EXPORT_COUNTER)}") as kcl:
+            kcl.layout.dbu = get_dbu()
+            kc = to_kfactory(component, kcl=kcl)
+            kf.show(kc, **kwargs)
+        return
     kf.show(component, **kwargs)
 
 
@@ -589,7 +607,7 @@ def from_kfactory(kcell: Any, cache: dict[int, Component] | None = None) -> Comp
                     or shape.is_simple_polygon()
                 ):
                     c.polygons.setdefault(lay, []).append(
-                        kpolygon_to_array(shape.polygon)
+                        kpolygon_to_array(shape.polygon, dbu=dbu)
                     )
         for inst in cell.each_inst():
             child = convert(layout.cell(inst.cell_index))

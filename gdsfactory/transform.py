@@ -17,6 +17,7 @@ from gdsfactory._jax import (
     Array,
     asarray,
     cos_deg,
+    is_abstract_tracer,
     maybe_float,
     sin_deg,
     to_float,
@@ -183,6 +184,8 @@ def normalize_angle(a: Any) -> Any:
 
 def manhattan_angle(a: Any) -> int | None:
     """Returns orientation as int in {0, 90, 180, 270} or None for off-grid."""
+    if is_abstract_tracer(a):
+        return None
     v = to_float(a) % 360
     q = v / 90
     if abs(q - round(q)) < 1e-6:

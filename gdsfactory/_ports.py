@@ -18,6 +18,7 @@ from gdsfactory._jax import (
     Array,
     asarray,
     cos_deg,
+    get_dbu,
     is_tracer,
     maybe_float,
     sin_deg,
@@ -155,12 +156,13 @@ class Port:
 
     @property
     def iwidth(self) -> int:
-        """Width in database units (1 nm)."""
-        return round(to_float(self._width) * 1000)
+        """Width in database units."""
+        return round(to_float(self._width) / get_dbu())
 
     @property
     def icenter(self) -> tuple[int, int]:
-        return round(to_float(self.x) * 1000), round(to_float(self.y) * 1000)
+        dbu = get_dbu()
+        return round(to_float(self.x) / dbu), round(to_float(self.y) / dbu)
 
     # kfactory compatibility aliases
     dcenter = center
@@ -209,7 +211,7 @@ class Port:
             layer_name = get_layer_name(self.layer)
         except Exception:
             layer_name = str(self.layer)
-        auto = f"{layer_name}_{round(to_float(self.width) * 1000)}"
+        auto = f"{layer_name}_{round(to_float(self.width) / get_dbu())}"
         return SimpleNamespace(name=auto, width=self.width, layer=self.layer)
 
     @property
@@ -247,7 +249,7 @@ class Port:
     @property
     def trans(self) -> Any:
         """Integer (dbu) simple transformation, like kfactory's ``Port.trans``."""
-        return self.dcplx_trans.s_trans().to_itype(1e-3)
+        return self.dcplx_trans.s_trans().to_itype(get_dbu())
 
     # -------------------------------------------------------------- methods
     def copy(
@@ -492,7 +494,8 @@ class Ports:
             center = (dcplx_trans.disp.x, dcplx_trans.disp.y)
             orientation = dcplx_trans.angle
         if trans is not None:
-            center = (trans.disp.x * 1e-3, trans.disp.y * 1e-3)
+            dbu = get_dbu()
+            center = (trans.disp.x * dbu, trans.disp.y * dbu)
             orientation = trans.angle * 90
         p = Port(
             name=name,

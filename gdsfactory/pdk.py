@@ -16,6 +16,7 @@ from kfactory.layout import Constants
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from gdsfactory import logger
+from gdsfactory._jax import has_tracers
 from gdsfactory._kcl import clear_cache
 from gdsfactory.component import Component, ComponentAllAngle
 from gdsfactory.config import CONF
@@ -689,6 +690,8 @@ class Pdk(BaseModel):
         return yaml.safe_dump(d)
 
     def get_cross_section_name(self, cross_section: CrossSection) -> str:
+        if has_tracers(cross_section):
+            return cross_section.name
         xs_name = next(
             (
                 key
