@@ -412,9 +412,9 @@ class Path:
 
     def length(self) -> Any:
         """Return cumulative length (rounded to 1e-3 um, straight-through gradient)."""
-        return round_st(self.length_exact(), 3)
+        return round_st(self._length_exact(), 3)
 
-    def length_exact(self) -> Any:
+    def _length_exact(self) -> Any:
         d = xp.diff(self.points, axis=0)
         return xp.sum(xp.sqrt(xp.sum(d**2, axis=1)))
 
@@ -1265,7 +1265,7 @@ def extrude_transition(
                 cross_section=x2,
             )
 
-    c.info["length"] = round_st(p.length_exact(), 3)
+    c.info["length"] = round_st(p._length_exact(), 3)
     return c
 
 
@@ -1491,7 +1491,7 @@ def _scipy_fresnel(
 
 
 @jax.custom_jvp
-def fresnel(z: Array) -> tuple[Array, Array]:
+def _fresnel_integrals(z: Array) -> tuple[Array, Array]:
     """Differentiable Fresnel integrals (S(z), C(z)) = scipy.special.fresnel(z)."""
     shape = jax.ShapeDtypeStruct(jnp.shape(z), jnp.float64)
     return jax.pure_callback(
@@ -1499,11 +1499,11 @@ def fresnel(z: Array) -> tuple[Array, Array]:
     )
 
 
-@fresnel.defjvp
+@_fresnel_integrals.defjvp
 def _fresnel_jvp(primals: tuple[Array], tangents: tuple[Array]) -> tuple[Any, Any]:
     (z,) = primals
     (dz,) = tangents
-    s, c = fresnel(z)
+    s, c = _fresnel_integrals(z)
     arg = xp.pi * z**2 / 2
     return (s, c), (xp.sin(arg) * dz, xp.cos(arg) * dz)
 
@@ -1512,7 +1512,7 @@ def _fresnel_xy(t: Array) -> Array:
     """[x, y] of the normalised clothoid for parameter values t."""
     z = t * _SQRT_2_OVER_PI
     if isinstance(z, jax.Array) or is_tracer(z):
-        sin_fresnel, cos_fresnel = fresnel(z)
+        sin_fresnel, cos_fresnel = _fresnel_integrals(z)
     else:
         sin_fresnel, cos_fresnel = _scipy_fresnel(z)
     return xp.stack([cos_fresnel * _SQRT_HALF_PI, sin_fresnel * _SQRT_HALF_PI])
@@ -1953,7 +1953,6 @@ __all__ = [
     "euler",
     "extrude",
     "extrude_transition",
-    "fresnel",
     "smooth",
     "spiral_archimedean",
     "straight",

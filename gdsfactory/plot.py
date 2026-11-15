@@ -85,30 +85,4 @@ def plot_component(
     return fig if return_fig else None
 
 
-def plot_polygons(
-    component: Component,
-    ax: Axes | None = None,
-    alpha: float = 0.6,
-) -> Axes:
-    """Plots the (flattened) polygons with matplotlib, one color per layer."""
-    import matplotlib.pyplot as plt
-    from matplotlib.patches import Polygon as MplPolygon
-
-    from gdsfactory._jax import to_numpy
-
-    if ax is None:
-        _, ax = plt.subplots()
-    cmap = plt.get_cmap("tab20")
-    for i, (_layer, polys) in enumerate(
-        sorted(component.get_polygons_points().items())
-    ):
-        for p in polys:
-            ax.add_patch(
-                MplPolygon(to_numpy(p), closed=True, alpha=alpha, color=cmap(i % 20))
-            )
-    ax.autoscale_view()
-    ax.set_aspect("equal")
-    return ax
-
-
-__all__ = ["plot_component", "plot_polygons"]
+__all__ = ["plot_component"]

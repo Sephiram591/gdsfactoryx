@@ -4,7 +4,7 @@ All coordinates are float64 ``jax.numpy`` arrays (um). There is no grid
 snapping inside the geometry kernel; coordinates are rounded to the database
 unit only when a Component is exported (``write_gds``, ``show``, ``plot``,
 ``to_kfactory``). Any scalar computed from a Component (port positions, bounding
-boxes, areas, polygon vertices, rasterized masks, ...) can be differentiated
+boxes, areas, polygon vertices, ...) can be differentiated
 with :func:`jax.grad` with respect to the float parameters that produced it.
 """
 
@@ -1693,7 +1693,7 @@ class Component(_BBoxMixin):
 
         The value is KLayout's merged area; the derivative is the derivative of
         the sum of the polygon areas (exact when polygons on the layer do not
-        overlap). Use :meth:`area_unmerged` for a fully differentiable sum.
+        overlap).
         """
         from gdsfactory import klayout_bridge as kb
 
@@ -1707,15 +1707,6 @@ class Component(_BBoxMixin):
             total = sum(xp.abs(polygon_area(p)) for p in polys)
             return merged + (total - stop_gradient(total))
         return merged
-
-    def area_unmerged(self, layer: LayerSpec | None = None) -> Any:
-        """Sum of polygon areas (differentiable; overlaps are double counted)."""
-        polys = self._flat_polygons(layer=layer)
-        total: Any = 0.0
-        for ps in polys.values():
-            for p in ps:
-                total = total + xp.abs(polygon_area(p))
-        return total
 
     @property
     def layers(self) -> list[Layer]:
@@ -1807,7 +1798,7 @@ class Component(_BBoxMixin):
             c._name = new_name
         return c  # type: ignore[return-value]
 
-    def transformed(self, t: Transform) -> Component:
+    def _transformed(self, t: Transform) -> Component:
         """Returns a new flat-ish component: this component referenced with transform t."""
         c = Component()
         ref = c.add_ref(self)
@@ -2522,12 +2513,6 @@ class Component(_BBoxMixin):
         from gdsfactory.export.to_3d import to_3d
 
         return to_3d(self, *args, **kwargs)
-
-    def to_array(self, *args: Any, **kwargs: Any) -> Array:
-        """Differentiable rasterization (see gdsfactory.rasterize.rasterize)."""
-        from gdsfactory.rasterize import rasterize
-
-        return rasterize(self, *args, **kwargs)
 
     def has_ports(self) -> bool:
         return len(self.ports) > 0

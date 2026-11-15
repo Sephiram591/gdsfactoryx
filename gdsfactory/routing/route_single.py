@@ -214,7 +214,7 @@ def route_single(
             "error" if on_placer_error == "warning" else on_placer_error
         )
         try:
-            return place_manhattan_points(
+            return _place_manhattan_points(
                 component,
                 p1,
                 p2,
@@ -349,7 +349,7 @@ def _error_path(
     )
 
 
-def place_manhattan_points(
+def _place_manhattan_points(
     component: Component,
     p1: Port,
     p2: Port,

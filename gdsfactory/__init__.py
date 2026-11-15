@@ -91,7 +91,6 @@ from gdsfactory.pdk import (
 from gdsfactory.get_factories import get_cells
 from gdsfactory.grid import grid, grid_with_text
 
-from gdsfactory import rasterize
 from gdsfactory.klayout_bridge import show
 
 c = components
@@ -179,7 +178,6 @@ __all__ = (
     "partial",
     "path",
     "port",
-    "rasterize",
     "read",
     "routing",
     "schematic_cell",

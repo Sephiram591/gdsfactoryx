@@ -193,17 +193,6 @@ def test_spiral_fixed_length_gradient() -> None:
     check_grad(f, 1000.0, h=0.01)
 
 
-def test_rasterize_gradient() -> None:
-    def f(width: Any) -> Any:
-        c = gf.components.straight(length=5, width=width)
-        rho, _ = gf.rasterize.rasterize(
-            c, layer=(1, 0), bbox=(0.013, -1.0, 4.987, 1.0), resolution=0.05
-        )
-        return rho.mean()
-
-    check_grad(f, 0.5, rtol=1e-3)
-
-
 def test_forward_mode() -> None:
     def f(radius: Any) -> Any:
         return gf.components.bend_euler(radius=radius).ports["o2"].y
