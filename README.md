@@ -3,7 +3,7 @@
 [![tests](https://github.com/Sephiram591/gdsfactoryx/actions/workflows/test_code.yml/badge.svg)](https://github.com/Sephiram591/gdsfactoryx/actions/workflows/test_code.yml)
 [![MIT](https://img.shields.io/github/license/Sephiram591/gdsfactoryx)](https://choosealicense.com/licenses/mit/)
 
-**gdsfactoryx** (`9.51.0.post2`) is the JAX-differentiable port of upstream
+**gdsfactoryx** (`9.51.0.post3`) is the JAX-differentiable port of upstream
 [GDSFactory](https://github.com/gdsfactory/gdsfactory) (`v9.51.0`), built to power
 [bifrost](https://github.com/Sephiram591/bifrost) (end-to-end differentiable 3D FDTD photonics simulation with
 `fdtdx`, `LayerStack`-to-3D permittivity voxelization, and an interactive 3D viewer).

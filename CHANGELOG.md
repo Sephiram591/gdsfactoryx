@@ -1,7 +1,12 @@
 # [Changelog](https://keepachangelog.com/en/1.0.0/)
-## [Unreleased](https://github.com/Sephiram591/gdsfactoryx/compare/v9.51.0.post2...main)
+## [Unreleased](https://github.com/Sephiram591/gdsfactoryx/compare/v9.51.0.post3...main)
 
 <!-- towncrier release notes start -->
+
+## [9.51.0.post3](https://github.com/Sephiram591/gdsfactoryx/releases/tag/v9.51.0.post3)
+
+- **LLM documentation**: Added `docs/llms.txt` and `docs/llms-full.txt` for AI-agent API discovery.
+- **Post-`9.51.0.post2` fixes**: Ships the `review-fixes` JAX/JIT/AD, path/routing, upstream `v9.51.0` parity, boundary cleanup (`I-BND-01`–`I-BND-04`), and packaging/CI/docs updates landed since `9.51.0.post2`.
 
 ## [9.51.0.post2](https://github.com/Sephiram591/gdsfactoryx/releases/tag/v9.51.0.post2)
 
