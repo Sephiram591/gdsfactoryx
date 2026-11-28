@@ -326,12 +326,16 @@ def test_port_copy_polar_snaps_summed_center_and_traces() -> None:
     assert np.isclose(float(moved.y), 0.0, atol=1e-9)
 
     def end_x(d: jax.Array) -> jax.Array:
-        return gf.Port(
-            name="o1",
-            center=(0.0, 0.0),
-            width=0.5,
-            orientation=0.0,
-        ).copy_polar(d=d, angle=0.0).x
+        return (
+            gf.Port(
+                name="o1",
+                center=(0.0, 0.0),
+                width=0.5,
+                orientation=0.0,
+            )
+            .copy_polar(d=d, angle=0.0)
+            .x
+        )
 
     grad_val = jax.grad(end_x)(jax.numpy.asarray(1.0))
     assert np.isclose(float(grad_val), 1.0)

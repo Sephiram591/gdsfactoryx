@@ -173,7 +173,9 @@ def path_manhattan(port1: typings.Port, port2: typings.Port, radius: float) -> P
     radius_f = to_float(radius)
     e1, e2 = _get_rotated_basis(port1.orientation)
     displacement = asarray(port2.center) - asarray(port1.center)
-    xrel = xp.dot(displacement, e1)  # port2 position, forward(+)/backward(-) from port 1
+    xrel = xp.dot(
+        displacement, e1
+    )  # port2 position, forward(+)/backward(-) from port 1
     yrel = xp.dot(displacement, e2)  # port2 position, left(+)/right(-) from port1
     xrel_f = round(to_float(xrel), 3)
     yrel_f = round(to_float(yrel), 3)
@@ -199,9 +201,7 @@ def path_manhattan(port1: typings.Port, port2: typings.Port, radius: float) -> P
                 else radius
             )
             length1 = (
-                2 * radius + xrel
-                if (abs(radius_f - xrel_f) < 2 * radius_f)
-                else radius
+                2 * radius + xrel if (abs(radius_f - xrel_f) < 2 * radius_f) else radius
             )
             pts = path_J(port1, port2, length1=length1, length2=length2)
     elif orel == 180 and yrel_f == 0 and xrel_f > 0:
@@ -209,15 +209,15 @@ def path_manhattan(port1: typings.Port, port2: typings.Port, radius: float) -> P
     elif (orel == 180 and xrel_f <= 2 * radius_f) or (abs(yrel_f) < 2 * radius_f):
         # Adjust length1 and left1 to ensure intermediate segments fit bend radius
         left1 = (
-            xp.abs(yrel) + 2 * radius
-            if (abs(yrel_f) < 4 * radius_f)
-            else 2 * radius
+            xp.abs(yrel) + 2 * radius if (abs(yrel_f) < 4 * radius_f) else 2 * radius
         )
         y_direction = -1 if (yrel_f < 0) else 1
         left1 = y_direction * left1
         length2 = radius
         x_direction = -1 if (orel == 180) else 1
-        segmentx_length = abs(to_float(xrel) + x_direction * to_float(length2) - radius_f)
+        segmentx_length = abs(
+            to_float(xrel) + x_direction * to_float(length2) - radius_f
+        )
         length1 = (
             xrel + x_direction * length2 + 2 * radius
             if segmentx_length < 2 * radius_f

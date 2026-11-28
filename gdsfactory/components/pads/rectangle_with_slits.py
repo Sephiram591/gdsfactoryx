@@ -68,12 +68,10 @@ def rectangle_with_slits(
     r = c << rectangle
     c.add_ports(r.ports)
     columns = math.floor(
-        (to_float(size[0]) - 2 * to_float(slit_enclosure))
-        / to_float(slit_column_pitch)
+        (to_float(size[0]) - 2 * to_float(slit_enclosure)) / to_float(slit_column_pitch)
     )
     rows = math.floor(
-        (to_float(size[1]) - 2 * to_float(slit_enclosure))
-        / to_float(slit_row_pitch)
+        (to_float(size[1]) - 2 * to_float(slit_enclosure)) / to_float(slit_row_pitch)
     )
 
     if layer_slit is None:

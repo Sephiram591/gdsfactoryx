@@ -383,9 +383,7 @@ def test_is_virtual_instance_all_angle_and_non_orthogonal() -> None:
 
     c = gf.Component()
     ortho = c.add_ref(gf.components.straight(length=5), name="ortho")
-    off_grid = c.add_ref_off_grid(
-        gf.components.straight(length=5), name="off_grid"
-    )
+    off_grid = c.add_ref_off_grid(gf.components.straight(length=5), name="off_grid")
     all_angle = c.add_ref(
         gf.components.bend_euler_all_angle(angle=33), name="all_angle"
     )
@@ -407,18 +405,14 @@ def test_get_netlist_all_angle_virtual_flags_and_recursive() -> None:
 
     sub = gf.ComponentAllAngle()
     s1 = sub.add_ref(gf.components.straight(length=5), name="s1")
-    bend = sub.add_ref(
-        gf.components.bend_euler_all_angle(angle=33), name="bend"
-    )
+    bend = sub.add_ref(gf.components.bend_euler_all_angle(angle=33), name="bend")
     bend.connect("o1", s1.ports["o2"])
     sub.add_port("o1", port=s1.ports["o1"])
     sub.add_port("o2", port=bend.ports["o2"])
 
     top = gf.Component()
     sub_ref = top.add_ref(sub, name="sub_ref")
-    s_end = top.add_ref_off_grid(
-        gf.components.straight(length=4), name="s_end"
-    )
+    s_end = top.add_ref_off_grid(gf.components.straight(length=4), name="s_end")
     s_end.connect("o1", sub_ref.ports["o2"])
     top.add_port("o1", port=sub_ref.ports["o1"])
     top.add_port("o2", port=s_end.ports["o2"])

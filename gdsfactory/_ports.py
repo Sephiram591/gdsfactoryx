@@ -229,7 +229,9 @@ class Port:
             layer_name = get_layer_name(self.layer)
         except Exception:
             layer_name = str(self.layer)
-        width_dbu = round(to_float(self.width) / get_dbu()) if self.width is not None else 0
+        width_dbu = (
+            round(to_float(self.width) / get_dbu()) if self.width is not None else 0
+        )
         auto = f"{layer_name}_{width_dbu}"
         return SimpleNamespace(name=auto, width=self.width, layer=self.layer)
 
@@ -378,9 +380,7 @@ class Port:
             layer: Any = get_layer_tuple(self.layer)
         except Exception:
             layer = (
-                int(self.layer)
-                if isinstance(self.layer, np.integer)
-                else self.layer
+                int(self.layer) if isinstance(self.layer, np.integer) else self.layer
             )
         return {
             "name": self.name,
@@ -446,8 +446,7 @@ class Port:
             True
             if self._orientation is None
             else abs(
-                (to_float(self._orientation) - to_float(other._orientation) + 180)
-                % 360
+                (to_float(self._orientation) - to_float(other._orientation) + 180) % 360
                 - 180
             )
             < 1e-9

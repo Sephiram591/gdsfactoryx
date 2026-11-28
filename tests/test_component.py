@@ -1102,9 +1102,7 @@ def test_path_copy_isolation_and_setters() -> None:
 def test_trim_locked_and_container_copy_ports_false() -> None:
     locked_wg = gf.components.straight(length=10)
     assert locked_wg.locked
-    trimmed = gf.functions.trim(
-        locked_wg, domain=[(0, -2), (0, 2), (5, 2), (5, -2)]
-    )
+    trimmed = gf.functions.trim(locked_wg, domain=[(0, -2), (0, 2), (5, 2), (5, -2)])
     assert np.isclose(locked_wg.xmax, 10.0)
     assert np.isclose(trimmed.xmax, 5.0)
     assert len(trimmed.ports) == len(locked_wg.ports)

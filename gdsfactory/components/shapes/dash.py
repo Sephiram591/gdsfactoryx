@@ -96,12 +96,8 @@ def dash(
     xangle_lb, yangle_lb = _bezier3(px, py, n_bezier_points)
 
     # Assemble outline
-    xdash = xp.concatenate(
-        [xangle_lu, xtip_t, xangle_ru, xangle_rb, xtip_b, xangle_lb]
-    )
-    ydash = xp.concatenate(
-        [yangle_lu, ytip_t, yangle_ru, yangle_rb, ytip_b, yangle_lb]
-    )
+    xdash = xp.concatenate([xangle_lu, xtip_t, xangle_ru, xangle_rb, xtip_b, xangle_lb])
+    ydash = xp.concatenate([yangle_lu, ytip_t, yangle_ru, yangle_rb, ytip_b, yangle_lb])
 
     points = xp.column_stack([xdash, ydash])
     c.add_polygon(points, layer=layer)

@@ -267,9 +267,7 @@ def pack(
             elif add_ports_suffix:
                 packed.add_ports(d.ports, suffix=f"_{index}")
             else:
-                if any(
-                    p.name is not None and p.name in packed.ports for p in d.ports
-                ):
+                if any(p.name is not None and p.name in packed.ports for p in d.ports):
                     packed.add_ports(d.ports, suffix=f"_{index}")
                 else:
                     try:

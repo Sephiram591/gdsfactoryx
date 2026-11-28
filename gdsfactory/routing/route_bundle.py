@@ -72,11 +72,7 @@ def get_min_spacing(
     if len(ports1) != len(ports2):
         raise ValueError(f"ports1={len(ports1)} and ports2={len(ports2)} must be equal")
 
-    axis = (
-        "X"
-        if round(to_float(ports1[0].orientation or 0)) % 360 in [0, 180]
-        else "Y"
-    )
+    axis = "X" if round(to_float(ports1[0].orientation or 0)) % 360 in [0, 180] else "Y"
     j = 0
     min_j = 0
     max_j = 0

@@ -391,14 +391,10 @@ def route_ports_to_y(
 
     da = 45
     north_ports = [
-        p
-        for p in ports
-        if 90 - da < to_float(p.orientation) % 360 < 90 + da
+        p for p in ports if 90 - da < to_float(p.orientation) % 360 < 90 + da
     ]
     south_ports = [
-        p
-        for p in ports
-        if 270 - da < to_float(p.orientation) % 360 < 270 + da
+        p for p in ports if 270 - da < to_float(p.orientation) % 360 < 270 + da
     ]
     east_ports = [
         p
@@ -407,9 +403,7 @@ def route_ports_to_y(
         or to_float(p.orientation) % 360 > 360 - da
     ]
     west_ports = [
-        p
-        for p in ports
-        if 180 - da < to_float(p.orientation) % 360 < 180 + da
+        p for p in ports if 180 - da < to_float(p.orientation) % 360 < 180 + da
     ]
 
     epsilon = 1.0
@@ -496,9 +490,7 @@ def route_ports_to_y(
 
         if (
             to_float(
-                xp.sum(
-                    xp.abs((asarray(new_port.center) - asarray(port.center)) ** 2)
-                )
+                xp.sum(xp.abs((asarray(new_port.center) - asarray(port.center)) ** 2))
             )
             < 1
         ):

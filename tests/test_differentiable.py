@@ -223,9 +223,9 @@ def test_route_bundle_all_angle_length_um() -> None:
     # Curve length must exceed Euclidean chord distance (~sqrt(25^2 + 20^2) = 32.0156)
     assert float(dubins_fn(20.0)) > 33.0
     xs = gf.get_cross_section("strip")
-    assert float(dubins_path_length((5.0, 0.0, 0.0), (30.0, 20.0, 90.0), xs)) == pytest.approx(
-        float(dubins_fn(20.0)), rel=1e-6
-    )
+    assert float(
+        dubins_path_length((5.0, 0.0, 0.0), (30.0, 20.0, 90.0), xs)
+    ) == pytest.approx(float(dubins_fn(20.0)), rel=1e-6)
 
 
 def test_spiral_fixed_length_gradient() -> None:
@@ -413,9 +413,13 @@ def test_boundary_zero_angle_gradients() -> None:
     for step in (None, 1.0):
 
         def _euler_o2x(a: Any, *, angular_step: float | None = step) -> Any:
-            return gf.components.bend_euler(
-                radius=10.0, angle=a, angular_step=angular_step
-            ).ports["o2"].x
+            return (
+                gf.components.bend_euler(
+                    radius=10.0, angle=a, angular_step=angular_step
+                )
+                .ports["o2"]
+                .x
+            )
 
         def _euler_summary_a(a: Any, *, angular_step: float | None = step) -> Any:
             return summary(
@@ -426,9 +430,7 @@ def test_boundary_zero_angle_gradients() -> None:
 
         def _euler_summary_r(r: Any, *, angular_step: float | None = step) -> Any:
             return summary(
-                gf.components.bend_euler(
-                    radius=r, angle=0.0, angular_step=angular_step
-                )
+                gf.components.bend_euler(radius=r, angle=0.0, angular_step=angular_step)
             )
 
         g_eu_x, _ = _assert_finite_fwd_rev(_euler_o2x, 0.0)
@@ -493,9 +495,13 @@ def test_boundary_180_angle_gradients() -> None:
             )
 
         def _euler_r_o2y(r: Any, *, angular_step: float | None = step) -> Any:
-            return gf.components.bend_euler(
-                radius=r, angle=180.0, angular_step=angular_step
-            ).ports["o2"].y
+            return (
+                gf.components.bend_euler(
+                    radius=r, angle=180.0, angular_step=angular_step
+                )
+                .ports["o2"]
+                .y
+            )
 
         g_ea, _ = _assert_finite_fwd_rev(_euler_a, 180.0)
         g_er, _ = _assert_finite_fwd_rev(_euler_r, 10.0)
@@ -564,7 +570,9 @@ def test_routing_parameter_sweeps() -> None:
     def _single_width_route(w: Any) -> tuple[Any, gf.Component]:
         c = gf.Component()
         p1 = gf.Port("o1", center=(0.0, 0.0), width=0.5, orientation=0, layer=(1, 0))
-        p2 = gf.Port("o2", center=(60.0, 40.0), width=0.5, orientation=180, layer=(1, 0))
+        p2 = gf.Port(
+            "o2", center=(60.0, 40.0), width=0.5, orientation=180, layer=(1, 0)
+        )
         route = gf.routing.route_single(
             c,
             p1,
@@ -579,7 +587,9 @@ def test_routing_parameter_sweeps() -> None:
     def _bundle_width_route(w: Any) -> tuple[Any, gf.Component]:
         c = gf.Component()
         p1 = gf.Port("o1", center=(0.0, 0.0), width=0.5, orientation=0, layer=(1, 0))
-        p2 = gf.Port("o2", center=(60.0, 40.0), width=0.5, orientation=180, layer=(1, 0))
+        p2 = gf.Port(
+            "o2", center=(60.0, 40.0), width=0.5, orientation=180, layer=(1, 0)
+        )
         routes = gf.routing.route_bundle(
             c,
             [p1],
@@ -630,7 +640,9 @@ def test_routing_parameter_sweeps() -> None:
     def _bundle_portbox(y_top: Any) -> Any:
         c = gf.Component()
         p1 = gf.Port("o1", center=(0.0, 0.0), width=0.5, orientation=0, layer=(1, 0))
-        p2 = gf.Port("o2", center=(100.0, 0.0), width=0.5, orientation=180, layer=(1, 0))
+        p2 = gf.Port(
+            "o2", center=(100.0, 0.0), width=0.5, orientation=180, layer=(1, 0)
+        )
         obstacle = PortBox([(30.0, -25.0), (70.0, y_top)])
         routes = gf.routing.route_bundle(
             c,

@@ -168,9 +168,7 @@ def awg(
         bend_radius = 10.0 if xs.radius is None else xs.radius
         margin = maybe_float(xp.maximum(4.0, bend_radius))
         max_rise = (gap - 2 * bend_radius) / 2
-        stagger = maybe_float(
-            xp.clip((max_rise - margin) / max(arms - 2, 1), 0.0, 4.0)
-        )
+        stagger = maybe_float(xp.clip((max_rise - margin) / max(arms - 2, 1), 0.0, 4.0))
         lengths: list[float] = []
         for i in range(arms):
             p_in = fpr_in_ref.ports[f"E{i}"]

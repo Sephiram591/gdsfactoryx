@@ -209,10 +209,9 @@ def via_stack_with_offset(
             )
             ref.move((x00, y00))
             y0 += height
-            if (
-                to_float(ref.xsize + enclosure) > to_float(width)
-                or to_float(ref.ysize + enclosure) > to_float(height)
-            ):
+            if to_float(ref.xsize + enclosure) > to_float(width) or to_float(
+                ref.ysize + enclosure
+            ) > to_float(height):
                 warnings.warn(
                     f"size = {size} for layer {layer} violates min enclosure"
                     f" {enclosure} for via {via.name!r}",

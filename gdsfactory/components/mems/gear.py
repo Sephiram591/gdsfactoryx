@@ -86,7 +86,10 @@ def gear(
         n_hole_pts = 64
         hole_angles = xp.linspace(0, 2 * xp.pi, n_hole_pts, endpoint=False)
         hole_points = xp.column_stack(
-            [hub_hole_radius * xp.cos(hole_angles), hub_hole_radius * xp.sin(hole_angles)]
+            [
+                hub_hole_radius * xp.cos(hole_angles),
+                hub_hole_radius * xp.sin(hole_angles),
+            ]
         )
         c.add_polygon(hole_points, layer=layer)
 

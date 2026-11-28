@@ -135,7 +135,9 @@ def _is_points_like(path: Any) -> bool:
             return True
         if isinstance(first, list | tuple) and len(first) == 2:
             c0 = first[0]
-            return not isinstance(c0, Path | list | tuple) and getattr(c0, "ndim", 0) == 0
+            return (
+                not isinstance(c0, Path | list | tuple) and getattr(c0, "ndim", 0) == 0
+            )
         return False
     return False
 
@@ -796,7 +798,9 @@ def transition_adiabatic(
             return asarray(neff_w(w_vals))
         except Exception:
             if not is_tracer(w_vals):
-                return asarray(_eval_neff_np_arr(np.asarray(to_numpy(w_vals), dtype=np.float64)))
+                return asarray(
+                    _eval_neff_np_arr(np.asarray(to_numpy(w_vals), dtype=np.float64))
+                )
 
             out_dtype = jnp.asarray(0.0).dtype
 
@@ -821,9 +825,9 @@ def transition_adiabatic(
                     w64 = np.asarray(w_cb, dtype=np.float64)
                     eps = 1e-5
                     val = _eval_neff_np_arr(w64)
-                    dval = (_eval_neff_np_arr(w64 + eps) - _eval_neff_np_arr(w64 - eps)) / (
-                        2.0 * eps
-                    )
+                    dval = (
+                        _eval_neff_np_arr(w64 + eps) - _eval_neff_np_arr(w64 - eps)
+                    ) / (2.0 * eps)
                     return (
                         np.asarray(val, dtype=np.dtype(out_dtype)),
                         np.asarray(dval, dtype=np.dtype(out_dtype)),
@@ -1092,8 +1096,7 @@ def extrude(
 
         insets = section.insets
         has_insets = bool(insets) and (
-            has_abstract_tracers(insets)
-            or tuple(to_float(i) for i in insets) != (0, 0)  # type: ignore[union-attr]
+            has_abstract_tracers(insets) or tuple(to_float(i) for i in insets) != (0, 0)  # type: ignore[union-attr]
         )
         path_changed = has_insets
 
@@ -1227,7 +1230,12 @@ def _inset_path(p_sec: Path, insets: tuple[Any, Any]) -> Path | None:
     total_len = float(fwd_np[-1]) if len(fwd_np) else 0.0
     i0 = to_float(insets[0])
     i1 = to_float(insets[1])
-    if total_len <= 1e-12 or i0 > total_len or i1 > total_len or i0 + i1 >= total_len - 1e-12:
+    if (
+        total_len <= 1e-12
+        or i0 > total_len
+        or i1 > total_len
+        or i0 + i1 >= total_len - 1e-12
+    ):
         return None
 
     valid_fwd = np.argwhere((fwd_np >= i0) & (seg_len_np > 1e-12))
@@ -1627,7 +1635,9 @@ def arc(
         if npoints is not None:
             npoints = max(int(npoints), 2)
         elif angular_step is not None:
-            step_f = to_float(angular_step) if not is_abstract_tracer(angular_step) else 1.0
+            step_f = (
+                to_float(angular_step) if not is_abstract_tracer(angular_step) else 1.0
+            )
             npoints = max(math.ceil(90.0 / step_f) + 1, 2)
         else:
             r_est = 10.0 if is_abstract_tracer(radius) else to_float(radius)
@@ -1642,9 +1652,7 @@ def arc(
             npoints = math.ceil(abs(angle_f / to_float(angular_step))) + 1
         elif not npoints:
             r_est = 10.0 if is_abstract_tracer(radius) else to_float(radius)
-            npoints = int(
-                abs(angle_f) / 360 * r_est / PDK.bend_points_distance / 2
-            )
+            npoints = int(abs(angle_f) / 360 * r_est / PDK.bend_points_distance / 2)
             npoints = max(npoints, _bend_npoints_floor(angle_f), 2)
         else:
             npoints = max(int(npoints), 2)
@@ -1654,7 +1662,11 @@ def arc(
     )
     x = radius * xp.cos(t)
     y = radius * (xp.sin(t) + 1)
-    sign = xp.where(angle < 0, -1.0, 1.0) if is_tracer(angle) else (-1.0 if to_float(angle) < 0 else 1.0)
+    sign = (
+        xp.where(angle < 0, -1.0, 1.0)
+        if is_tracer(angle)
+        else (-1.0 if to_float(angle) < 0 else 1.0)
+    )
     points = xp.stack([x, y]).T * sign
 
     path = Path()
@@ -1808,9 +1820,7 @@ def euler(
     else:
         if not npoints:
             r_est = 10.0 if is_abstract_tracer(radius) else to_float(radius)
-            npoints = abs(
-                int(angle_f / 360 * r_est / pdk.bend_points_distance / 2)
-            )
+            npoints = abs(int(angle_f / 360 * r_est / pdk.bend_points_distance / 2))
             npoints = max(npoints, _bend_npoints_floor(angle_f), 2)
         else:
             npoints = max(int(npoints), 2)
@@ -2179,18 +2189,14 @@ def smooth(
         chord = safe_sqrt(xp.sum(delta_p**2))
         sin_half = xp.sin(xp.radians(dt / 2))
         safe_sin = xp.where(xp.abs(sin_half) > 1e-12, sin_half, 1.0)
-        r = xp.where(
-            xp.abs(sin_half) > 1e-12, xp.abs((chord / 2) / safe_sin), 0.0
-        )
+        r = xp.where(xp.abs(sin_half) > 1e-12, xp.abs((chord / 2) / safe_sin), 0.0)
         radii.append(r)
         paths.append(P)
 
     if radii:
         tan_val = xp.tan(xp.radians(180 - dtheta) / 2)
         safe_tan = xp.where(xp.abs(tan_val) > 1e-12, tan_val, 1.0)
-        d = xp.where(
-            xp.abs(tan_val) > 1e-12, xp.abs(xp.stack(radii) / safe_tan), 0.0
-        )
+        d = xp.where(xp.abs(tan_val) > 1e-12, xp.abs(xp.stack(radii) / safe_tan), 0.0)
     else:
         d = xp.zeros((0,))
     encroachment = xp.concatenate([xp.zeros(1), d]) + xp.concatenate([d, xp.zeros(1)])

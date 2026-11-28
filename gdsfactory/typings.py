@@ -179,6 +179,7 @@ type ConnectivitySpec = ConductorConductorName | ConductorViaConductorName
 
 type Sparameters = dict[str, npt.NDArray[np.float64]]
 
+
 @dataclass
 class OpticalAllAngleRoute:
     """An all-angle optical route (lengths and coordinates in um)."""

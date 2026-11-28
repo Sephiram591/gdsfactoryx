@@ -60,9 +60,7 @@ def _has_jax(x: Any) -> bool:
 
 
 def _any_jax(args: Any, kwargs: Any) -> bool:
-    return any(_has_jax(a) for a in args) or any(
-        _has_jax(v) for v in kwargs.values()
-    )
+    return any(_has_jax(a) for a in args) or any(_has_jax(v) for v in kwargs.values())
 
 
 class _DualNamespace:
@@ -147,7 +145,16 @@ def is_abstract_tracer(x: Any) -> bool:
 
 def _walk_has(tree: Any, pred: Callable[[Any], bool], visited: dict[int, Any]) -> bool:
     if tree is None or isinstance(
-        tree, bool | int | float | complex | str | bytes | np.generic | type | types.ModuleType
+        tree,
+        bool
+        | int
+        | float
+        | complex
+        | str
+        | bytes
+        | np.generic
+        | type
+        | types.ModuleType,
     ):
         return False
     if isinstance(tree, np.ndarray) and tree.dtype != object:

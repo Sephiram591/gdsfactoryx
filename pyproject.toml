@@ -96,12 +96,12 @@ maintainer = [
 gf = "gdsfactory.cli:app"
 
 [project.urls]
-Homepage = "https://github.com/Sephiram591/gdsfactoryx"
-Repository = "https://github.com/Sephiram591/gdsfactoryx"
-Documentation = "https://github.com/Sephiram591/gdsfactoryx#readme"
-Changelog = "https://github.com/Sephiram591/gdsfactoryx/blob/main/CHANGELOG.md"
-Issues = "https://github.com/Sephiram591/gdsfactoryx/issues"
 Bifrost = "https://github.com/Sephiram591/bifrost"
+Changelog = "https://github.com/Sephiram591/gdsfactoryx/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/Sephiram591/gdsfactoryx#readme"
+Homepage = "https://github.com/Sephiram591/gdsfactoryx"
+Issues = "https://github.com/Sephiram591/gdsfactoryx/issues"
+Repository = "https://github.com/Sephiram591/gdsfactoryx"
 "Upstream documentation" = "https://gdsfactory.github.io/gdsfactory/"
 "Upstream project" = "https://github.com/gdsfactory/gdsfactory"
 

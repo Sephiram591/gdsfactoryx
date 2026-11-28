@@ -237,8 +237,7 @@ def mirror() -> _Mirror:
     global _MIRROR
     dbu = get_dbu()
     if _MIRROR is not None and (
-        _MIRROR.dbu != dbu
-        or (_MIRROR._depth == 0 and _MIRROR._unlocked_cells > 256)
+        _MIRROR.dbu != dbu or (_MIRROR._depth == 0 and _MIRROR._unlocked_cells > 256)
     ):
         _clear_routing_mirror()
     if _MIRROR is None:
@@ -1328,14 +1327,14 @@ def _traced_kport(kport: Any, ref_port: Port, width_traced: Any = None) -> Port:
     w_src = ref_port.width if is_tracer(ref_port.width) else width_traced
     width = None
     if w_src is not None and is_tracer(w_src):
-        conc_w = kport.width * get_dbu() if isinstance(kport.width, int) else kport.width
+        conc_w = (
+            kport.width * get_dbu() if isinstance(kport.width, int) else kport.width
+        )
         width = asarray(conc_w) + _tangent(w_src)
     return _port_from_kport(kport, center=center, width=width)
 
 
-def _assign_in_out(
-    e: dict[str, Any], cur_conc: Any, port_type: str
-) -> tuple[Any, Any]:
+def _assign_in_out(e: dict[str, Any], cur_conc: Any, port_type: str) -> tuple[Any, Any]:
     """Identify local in/out ports for element ``e`` by nearest concrete position."""
     lp = _local_ports(e["comp"], port_type)
     t: Transform = e["t"]
@@ -1411,9 +1410,7 @@ def _add_tangents(
                 offset_tr = e["offset"] + _tangent(sign_perp * delta_tr[perp_axis])
                 width_tr = width_traced if width_traced is not None else e["width"]
                 if (
-                    is_tracer(length_tr)
-                    or is_tracer(offset_tr)
-                    or is_tracer(width_tr)
+                    is_tracer(length_tr) or is_tracer(offset_tr) or is_tracer(width_tr)
                 ) and sbend_factory is not None:
                     e["comp"] = sbend_factory(
                         offset=offset_tr, length=length_tr, width=width_tr

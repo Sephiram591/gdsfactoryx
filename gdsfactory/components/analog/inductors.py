@@ -61,9 +61,7 @@ def _poly_to_points(poly: Any, d_out: float, aspect_ratio: float) -> Any:
     arr = points_array(poly)
     if not has_tracers(aspect_ratio) and to_float(aspect_ratio) == 1.0:
         return arr
-    return xp.column_stack(
-        [arr[:, 0], _shift_y_value(arr[:, 1], d_out, aspect_ratio)]
-    )
+    return xp.column_stack([arr[:, 0], _shift_y_value(arr[:, 1], d_out, aspect_ratio)])
 
 
 def inductor_min_diameter(width: float, space: float, turns: int, grid: float) -> float:

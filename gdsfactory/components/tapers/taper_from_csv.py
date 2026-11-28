@@ -56,7 +56,9 @@ def taper_from_csv(
     # round_trip: correctly rounded floats. pandas' default parser can be one ulp off, which moves half-width ties
     # (e.g. 1.4495 um) to the other nanometre in the np.round below.
     taper_data = pd.read_csv(filepath, float_precision="round_trip")
-    xs: npt.NDArray[np.float64] = np.asarray(taper_data["x"].values, dtype=np.float64) * 1e6
+    xs: npt.NDArray[np.float64] = (
+        np.asarray(taper_data["x"].values, dtype=np.float64) * 1e6
+    )
     ys: npt.NDArray[np.float64] = np.round(taper_data["width"].values * 1e6 / 2.0, 3)
 
     x = gf.get_cross_section(cross_section)

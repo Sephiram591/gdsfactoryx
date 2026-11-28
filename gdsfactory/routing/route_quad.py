@@ -78,8 +78,7 @@ def route_quad(
     # sort vertices by angle from center of quadrilateral to make convex polygon
     angles = safe_arctan2(displacements[:, 0], displacements[:, 1])
     sorted_idx = [
-        idx
-        for idx, _ in sorted(enumerate(angles), key=lambda x: to_float(x[1]))
+        idx for idx, _ in sorted(enumerate(angles), key=lambda x: to_float(x[1]))
     ]
     sorted_vertices = xp.stack([vertices[i] for i in sorted_idx])
 

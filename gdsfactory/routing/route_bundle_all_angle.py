@@ -369,7 +369,9 @@ class _Router:
             if isinstance(v, jax.Array | np.ndarray)
             and np.issubdtype(jnp.asarray(v).dtype, np.floating)
         ]
-        out_dtype = jnp.result_type(*float_dtypes) if float_dtypes else _jax_float_dtype()
+        out_dtype = (
+            jnp.result_type(*float_dtypes) if float_dtypes else _jax_float_dtype()
+        )
 
         @jax.custom_jvp
         def _solve_theta(
@@ -579,9 +581,7 @@ def _backbones(
             for ps, pe, pts in zip(p1s, p2s, bundles, strict=False):
                 v_start = pts[0] - pts[1]
                 v_end = pts[-1] - pts[-2]
-                psb = _P(
-                    pts[0], xp.rad2deg(safe_arctan2(v_start[1], v_start[0])), ps.w
-                )
+                psb = _P(pts[0], xp.rad2deg(safe_arctan2(v_start[1], v_start[0])), ps.w)
                 peb = _P(pts[-1], xp.rad2deg(safe_arctan2(v_end[1], v_end[0])), pe.w)
                 pts_ = r.connection(ps, psb, list(pts))
                 pts_.reverse()

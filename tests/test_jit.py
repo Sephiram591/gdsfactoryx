@@ -72,6 +72,7 @@ def coordinates() -> np.ndarray:
 def test_snap_jit_matches_eager_bitwise(device: Any) -> None:
     x = jax.device_put(jnp.asarray(coordinates()), device)
     expected = bits(snap_dbu_reference(x))
+
     def _snap(v: Any) -> Any:
         return snap_dbu(v)
 
@@ -99,6 +100,7 @@ def test_snap_gradient_is_identity_under_jit(device: Any) -> None:
 def test_snap_float32_input_is_promoted_like_before(device: Any) -> None:
     x = jax.device_put(jnp.asarray(coordinates().astype(np.float32)), device)
     expected = bits(snap_dbu_reference(x))
+
     def _snap(v: Any) -> Any:
         return snap_dbu(v)
 
@@ -120,6 +122,7 @@ def test_snap_python_and_numpy_values_unchanged() -> None:
 
 def test_snap_disabled_returns_input_under_jit(device: Any) -> None:
     """SNAP_ENABLED is read when the function is traced (a new function here, not a cached compile)."""
+
     def _snap(v: Any) -> Any:
         return snap_dbu(v)
 
@@ -346,9 +349,7 @@ def _hier_wg_chain(length: Any, radius: Any, width: Any) -> gf.Component:
     c = gf.Component()
     xs = gf.CrossSection(
         sections=(
-            gf.Section(
-                width=width, offset=0.0, layer=(1, 0), port_names=("o1", "o2")
-            ),
+            gf.Section(width=width, offset=0.0, layer=(1, 0), port_names=("o1", "o2")),
         )
     )
     s1 = c << gf.components.straight(length=length, cross_section=xs)
@@ -407,7 +408,9 @@ def test_hierarchical_cell_connect_and_flatten_under_jit(device: Any) -> None:
         assert len(e_sorted) == len(j_sorted)
         for ep, jp in zip(e_sorted, j_sorted, strict=True):
             np.testing.assert_allclose(jp, ep, rtol=1e-12, atol=1e-12)
-    for a, b in zip(jax.tree.leaves(eager_ports), jax.tree.leaves(jit_ports), strict=True):
+    for a, b in zip(
+        jax.tree.leaves(eager_ports), jax.tree.leaves(jit_ports), strict=True
+    ):
         np.testing.assert_allclose(np.asarray(b), np.asarray(a), rtol=1e-12, atol=1e-12)
 
     eager_vg = jax.value_and_grad(lambda v: _component_loss(_build_flat(v)))(p)

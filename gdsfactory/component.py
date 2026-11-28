@@ -1223,8 +1223,7 @@ class Component(_BBoxMixin):
         for r in self.insts:
             t = r.transform
             if any(
-                is_tracer(v)
-                for v in (t.x, t.y, t.rotation, t.magnification, r.a, r.b)
+                is_tracer(v) for v in (t.x, t.y, t.rotation, t.magnification, r.a, r.b)
             ):
                 return True
             if r.cell.has_tracers():
@@ -1615,9 +1614,7 @@ class Component(_BBoxMixin):
             flat = self._flat_polygons(t)
             if not snap.SNAP_ENABLED:
                 return flat
-            return {
-                lay: [snap_dbu(p) for p in polys] for lay, polys in flat.items()
-            }
+            return {lay: [snap_dbu(p) for p in polys] for lay, polys in flat.items()}
         dbu = get_dbu()
         kt = kt if kt is not None else kdb.ICplxTrans()
         out: dict[int, list[Array]] = {}
@@ -2239,7 +2236,9 @@ class Component(_BBoxMixin):
         with temporary_kcl(f"gdsfactoryx_fill_{next(_unnamed_counter)}") as kcl:
             kcl.layout.dbu = get_dbu()
             kc = to_kfactory(self, kcl=kcl, add_ports=False)
-            kfill = to_kfactory(fill_comp, kcl=kcl, add_ports=False, unique_prefix="fill_")
+            kfill = to_kfactory(
+                fill_comp, kcl=kcl, add_ports=False, unique_prefix="fill_"
+            )
             before = {id(i) for i in kc.kdb_cell.each_inst()}
             n_before = kc.kdb_cell.child_instances()
             fill_tiled(
@@ -2380,9 +2379,7 @@ class Component(_BBoxMixin):
                 )
             }
         else:
-            by_layer = (
-                self._flat_polygons() if recursive else dict(self.polygons)
-            )
+            by_layer = self._flat_polygons() if recursive else dict(self.polygons)
 
         boxes = []
         for polys in by_layer.values():
@@ -2510,9 +2507,7 @@ class Component(_BBoxMixin):
             k: [
                 (
                     t.apply(pts),
-                    width * scale
-                    if is_tracer(scale) or float(scale) != 1.0
-                    else width,
+                    width * scale if is_tracer(scale) or float(scale) != 1.0 else width,
                 )
                 for pts, width in v
             ]

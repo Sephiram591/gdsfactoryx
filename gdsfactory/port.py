@@ -826,13 +826,7 @@ def auto_rename_ports_layer_orientation(
         layer_tuple = layer if isinstance(layer, kf.LayerEnum) else (layer, 0)
 
         function(direction_ports, prefix=f"{layer_tuple[0]}_{layer_tuple[1]}_")
-        new_ports.update(
-            {
-                p.name: p
-                for p in ports_on_layer
-                if p.name is not None
-            }
-        )
+        new_ports.update({p.name: p for p in ports_on_layer if p.name is not None})
 
 
 __all__ = [

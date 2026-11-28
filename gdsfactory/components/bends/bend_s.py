@@ -270,7 +270,9 @@ def _get_euler_sbend_angle_middle_length_from_jog(
             if isinstance(v, jax.Array | np.ndarray)
             and np.issubdtype(jnp.asarray(v).dtype, np.floating)
         ]
-        out_dtype = jnp.result_type(*float_dtypes) if float_dtypes else _jax_float_dtype()
+        out_dtype = (
+            jnp.result_type(*float_dtypes) if float_dtypes else _jax_float_dtype()
+        )
 
         @jax.custom_jvp
         def _solve(j_in: Any, r_in: Any, p_in: Any) -> Any:

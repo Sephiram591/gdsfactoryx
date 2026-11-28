@@ -328,7 +328,6 @@ def _diff_cells(
     out_file: PathType | None,
     sliver_tolerance: int,
 ) -> DiffResult:
-
     if ignore_sliver_differences is None:
         ignore_sliver_differences = CONF.difftest_ignore_sliver_differences
 

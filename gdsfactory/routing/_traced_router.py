@@ -49,10 +49,7 @@ def _steps(value: Any, n: int) -> list[list[Step]]:
             return [list(value) for _ in range(n)]
         if isinstance(value[0], Sequence) and not isinstance(value[0], str | bytes):
             return [
-                [
-                    s if isinstance(s, Step) else Straight(dist=to_dbu(s))
-                    for s in row
-                ]
+                [s if isinstance(s, Step) else Straight(dist=to_dbu(s)) for s in row]
                 for row in value
             ]
         return [[Straight(dist=to_dbu(s)) for s in value] for _ in range(n)]

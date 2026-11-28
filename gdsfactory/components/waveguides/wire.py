@@ -93,7 +93,9 @@ def wire_corner45_straight(
     c = gf.Component()
     xs = gf.get_cross_section(cross_section)
     radius = (
-        radius if radius is not None else (xs.radius if xs.radius is not None else width)
+        radius
+        if radius is not None
+        else (xs.radius if xs.radius is not None else width)
     )
 
     if radius is None:

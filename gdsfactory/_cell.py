@@ -268,13 +268,15 @@ def cell(
             _snap_token = _SNAP_PORTS_OVERRIDE.set(snap_ports)
             try:
                 if validate_with_pydantic and not traced:
-                    if _validated_func is None:
+                    validated = _validated_func
+                    if validated is None:
                         import pydantic
 
-                        _validated_func = pydantic.validate_call(
+                        validated = pydantic.validate_call(
                             config=pydantic.ConfigDict(arbitrary_types_allowed=True)
                         )(func)
-                    c = _validated_func(*bound.args, **bound.kwargs)
+                        _validated_func = validated
+                    c = validated(*bound.args, **bound.kwargs)
                 else:
                     c = func(*bound.args, **bound.kwargs)
             finally:
